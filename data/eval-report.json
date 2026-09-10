@@ -1,0 +1,743 @@
+{
+  "generatedAt": "2026-09-10T06:54:47.309Z",
+  "mode": "demo",
+  "model": "deterministic-demo-v1",
+  "total": 32,
+  "scenarioPassRate": 1,
+  "hardConstraintPassRate": 0.84375,
+  "feasibleCasePassRate": 1,
+  "attemptHardConstraintPassRate": 0.6428571428571429,
+  "averageRegenerationCount": 0.3125,
+  "violationRates": {
+    "locked_event": 0,
+    "time_conflict": 0.07142857142857142,
+    "opening_hours": 0.07142857142857142,
+    "budget": 0.07142857142857142,
+    "travel_time": 0.21428571428571427,
+    "past_event": 0.07142857142857142,
+    "duration": 0,
+    "place_data": 0,
+    "schema": 0,
+    "change_accounting": 0
+  },
+  "results": [
+    {
+      "id": "case-01",
+      "name": "15:00 / rain / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 15
+        }
+      ],
+      "durationMs": 18,
+      "violations": []
+    },
+    {
+      "id": "case-02",
+      "name": "16:00 / sunny / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 4,
+      "violations": []
+    },
+    {
+      "id": "case-03",
+      "name": "17:00 / hot / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 2,
+      "violations": []
+    },
+    {
+      "id": "case-04",
+      "name": "18:00 / rain / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 2,
+      "violations": []
+    },
+    {
+      "id": "case-05",
+      "name": "18:30 / sunny / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-06",
+      "name": "15:00 / hot / ฿800",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-07",
+      "name": "16:00 / rain / ฿800",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-08",
+      "name": "17:00 / sunny / ฿800",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 2,
+      "violations": []
+    },
+    {
+      "id": "case-09",
+      "name": "18:00 / hot / ฿800",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-10",
+      "name": "18:30 / rain / ฿800",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-11",
+      "name": "15:00 / sunny / ฿1000",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-12",
+      "name": "16:00 / hot / ฿1000",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-13",
+      "name": "17:00 / rain / ฿1000",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-14",
+      "name": "18:00 / sunny / ฿1000",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 2,
+      "violations": []
+    },
+    {
+      "id": "case-15",
+      "name": "18:30 / hot / ฿1000",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-16",
+      "name": "15:00 / rain / ฿1750",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-17",
+      "name": "16:00 / sunny / ฿1750",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-18",
+      "name": "17:00 / hot / ฿1750",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-19",
+      "name": "18:00 / rain / ฿1750",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-20",
+      "name": "18:30 / sunny / ฿1750",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-21",
+      "name": "15:00 / hot / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-22",
+      "name": "16:00 / rain / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-23",
+      "name": "17:00 / sunny / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    },
+    {
+      "id": "case-24",
+      "name": "18:00 / hot / ฿650",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-25",
+      "name": "Budget below locked dinner cost",
+      "expectedFeasible": false,
+      "pass": true,
+      "validPlan": false,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [
+            {
+              "code": "budget",
+              "message": "Remaining activities cost ฿650; only ฿400 remains."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 2,
+          "violations": [
+            {
+              "code": "budget",
+              "message": "Remaining activities cost ฿650; only ฿400 remains."
+            }
+          ],
+          "durationMs": 1
+        },
+        {
+          "attempt": 3,
+          "violations": [
+            {
+              "code": "budget",
+              "message": "Remaining activities cost ฿650; only ฿400 remains."
+            }
+          ],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": [
+        {
+          "code": "budget",
+          "message": "Remaining activities cost ฿650; only ฿400 remains."
+        }
+      ]
+    },
+    {
+      "id": "case-26",
+      "name": "Locked dinner starts in the past",
+      "expectedFeasible": false,
+      "pass": true,
+      "validPlan": false,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 15 min from Siam to Siam before Dinner Reservation."
+            },
+            {
+              "code": "past_event",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation starts before current time 19:15."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 2,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 15 min from Siam to Siam before Dinner Reservation."
+            },
+            {
+              "code": "past_event",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation starts before current time 19:15."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 3,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 15 min from Siam to Siam before Dinner Reservation."
+            },
+            {
+              "code": "past_event",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation starts before current time 19:15."
+            }
+          ],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 2,
+      "violations": [
+        {
+          "code": "travel_time",
+          "eventId": "e-dinner",
+          "message": "Allow 15 min from Siam to Siam before Dinner Reservation."
+        },
+        {
+          "code": "past_event",
+          "eventId": "e-dinner",
+          "message": "Dinner Reservation starts before current time 19:15."
+        }
+      ]
+    },
+    {
+      "id": "case-27",
+      "name": "Cannot reach locked dinner in time",
+      "expectedFeasible": false,
+      "pass": true,
+      "validPlan": false,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 45 min from Ari to Siam before Dinner Reservation."
+            }
+          ],
+          "durationMs": 1
+        },
+        {
+          "attempt": 2,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 45 min from Ari to Siam before Dinner Reservation."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 3,
+          "violations": [
+            {
+              "code": "travel_time",
+              "eventId": "e-dinner",
+              "message": "Allow 45 min from Ari to Siam before Dinner Reservation."
+            }
+          ],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": [
+        {
+          "code": "travel_time",
+          "eventId": "e-dinner",
+          "message": "Allow 45 min from Ari to Siam before Dinner Reservation."
+        }
+      ]
+    },
+    {
+      "id": "case-28",
+      "name": "Locked restaurant reported closed",
+      "expectedFeasible": false,
+      "pass": true,
+      "validPlan": false,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [
+            {
+              "code": "opening_hours",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation is unavailable, or outside 17:00–22:00."
+            }
+          ],
+          "durationMs": 1
+        },
+        {
+          "attempt": 2,
+          "violations": [
+            {
+              "code": "opening_hours",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation is unavailable, or outside 17:00–22:00."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 3,
+          "violations": [
+            {
+              "code": "opening_hours",
+              "eventId": "e-dinner",
+              "message": "Dinner Reservation is unavailable, or outside 17:00–22:00."
+            }
+          ],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": [
+        {
+          "code": "opening_hours",
+          "eventId": "e-dinner",
+          "message": "Dinner Reservation is unavailable, or outside 17:00–22:00."
+        }
+      ]
+    },
+    {
+      "id": "case-29",
+      "name": "Two locked events overlap",
+      "expectedFeasible": false,
+      "pass": true,
+      "validPlan": false,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [
+            {
+              "code": "time_conflict",
+              "eventId": "second-lock",
+              "message": "Dinner Reservation overlaps Chinatown tea house."
+            },
+            {
+              "code": "travel_time",
+              "eventId": "second-lock",
+              "message": "Allow 45 min from Siam to Chinatown before Chinatown tea house."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 2,
+          "violations": [
+            {
+              "code": "time_conflict",
+              "eventId": "second-lock",
+              "message": "Dinner Reservation overlaps Chinatown tea house."
+            },
+            {
+              "code": "travel_time",
+              "eventId": "second-lock",
+              "message": "Allow 45 min from Siam to Chinatown before Chinatown tea house."
+            }
+          ],
+          "durationMs": 0
+        },
+        {
+          "attempt": 3,
+          "violations": [
+            {
+              "code": "time_conflict",
+              "eventId": "second-lock",
+              "message": "Dinner Reservation overlaps Chinatown tea house."
+            },
+            {
+              "code": "travel_time",
+              "eventId": "second-lock",
+              "message": "Allow 45 min from Siam to Chinatown before Chinatown tea house."
+            }
+          ],
+          "durationMs": 1
+        }
+      ],
+      "durationMs": 1,
+      "violations": [
+        {
+          "code": "time_conflict",
+          "eventId": "second-lock",
+          "message": "Dinner Reservation overlaps Chinatown tea house."
+        },
+        {
+          "code": "travel_time",
+          "eventId": "second-lock",
+          "message": "Allow 45 min from Siam to Chinatown before Chinatown tea house."
+        }
+      ]
+    },
+    {
+      "id": "case-30",
+      "name": "Last trip day: no future move",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-31",
+      "name": "Favourite indoor venues closed",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 0,
+      "violations": []
+    },
+    {
+      "id": "case-32",
+      "name": "Explicit rest preference",
+      "expectedFeasible": true,
+      "pass": true,
+      "validPlan": true,
+      "attempts": [
+        {
+          "attempt": 1,
+          "violations": [],
+          "durationMs": 0
+        }
+      ],
+      "durationMs": 1,
+      "violations": []
+    }
+  ]
+}

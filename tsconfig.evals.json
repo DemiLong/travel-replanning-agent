@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "./work/eval-build",
+    "incremental": false,
+    "isolatedModules": false,
+    "target": "ES2022"
+  },
+  "include": [
+    "types/**/*.ts",
+    "agents/**/*.ts",
+    "validators/**/*.ts",
+    "data/demo.ts",
+    "data/places.ts",
+    "lib/time.ts",
+    "services/openai.ts",
+    "services/place-service.ts",
+    "evals/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}
