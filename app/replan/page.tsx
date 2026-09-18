@@ -1,4 +1,5 @@
-import { TravelApp } from "@/components/travel-app";
+import { redirect } from "next/navigation";
+
 export default function Page() {
-  return <TravelApp page="replan" />;
+  redirect("/rescue");
 }

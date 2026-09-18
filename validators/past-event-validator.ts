@@ -9,7 +9,7 @@ export function pastEventValidator(
           {
             code: "past_event" as const,
             eventId: e.id,
-            message: `${e.name} starts before current time ${c.state.currentTime}.`,
+            message: `${e.name} 早于当前时间 ${c.state.currentTime} 开始。`,
           },
         ]
       : [],

@@ -10,18 +10,32 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import type { runEvals } from "@/evals/harness";
 import type { AnalyticsEvent } from "@/services/trip-service";
 type Report = typeof import("../data/eval-report.json");
 const percentage = (n: number) => `${(n * 100).toFixed(1)}%`;
+const violationLabels: Record<string, string> = {
+  locked: "锁定安排",
+  overlap: "时间重叠",
+  travel: "路程不足",
+  opening_hours: "营业时间",
+  closure: "地点关闭",
+  budget: "超出预算",
+  past: "时间已过",
+  duration: "时长无效",
+  identity: "地点身份",
+  accounting: "行程遗漏",
+};
 export function EvalDashboard({ report }: { report: Report }) {
   const [analytics, setAnalytics] = useState<AnalyticsEvent[]>([]);
   useEffect(() => {
-    try {
-      setAnalytics(
-        JSON.parse(localStorage.getItem("travel-analytics") ?? "[]"),
-      );
-    } catch {}
+    const timeout = window.setTimeout(() => {
+      try {
+        setAnalytics(
+          JSON.parse(localStorage.getItem("travel-analytics") ?? "[]"),
+        );
+      } catch {}
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, []);
   const generated = new Set(
     analytics
@@ -39,70 +53,68 @@ export function EvalDashboard({ report }: { report: Report }) {
   return (
     <div className="workspace">
       <Link className="text-link" href="/trip">
-        <ArrowLeft size={15} /> Back to my day
+        <ArrowLeft size={15} /> 返回我的今日行程
       </Link>
       <div className="page-heading" style={{ marginTop: 30 }}>
         <div>
-          <span className="eyebrow">AGENT EVALUATION · PORTFOLIO VIEW</span>
-          <h1>Trust is a constraint.</h1>
-          <p>32 synthetic scenarios. Clear rules. Measurable outcomes.</p>
+          <span className="eyebrow">智能体评测 · 作品集视图</span>
+          <h1>可信，本身就是约束。</h1>
+          <p>32 个模拟场景，规则清晰，结果可衡量。</p>
         </div>
       </div>
       <div className="success-box">
         <ShieldCheck style={{ display: "inline", marginRight: 10 }} />
-        <b>Demo planner benchmark</b>
+        <b>模拟规划器基准</b>
         <p>
-          This report tests deterministic simulation and the validation loop. It
-          does not measure live OpenAI quality. Five cases are deliberately
-          impossible and should be refused.
+          这份报告测试确定性模拟和校验流程，不代表实时 OpenAI 模型的质量。其中 5
+          个场景被刻意设为无解，系统应当拒绝它们。
         </p>
       </div>
       <div className="metrics">
         <div className="metric">
           <strong>{percentage(report.scenarioPassRate)}</strong>
-          <span>Expected outcomes · {report.total} cases</span>
+          <span>预期结果 · {report.total} 个场景</span>
         </div>
         <div className="metric">
           <strong>{percentage(report.hardConstraintPassRate)}</strong>
-          <span>Valid plans / all scenarios</span>
+          <span>有效方案 / 全部场景</span>
         </div>
         <div className="metric">
           <strong>{percentage(report.feasibleCasePassRate)}</strong>
-          <span>Valid plans / feasible scenarios</span>
+          <span>有效方案 / 可行场景</span>
         </div>
       </div>
       <div className="card form-card">
-        <h2>Attempt-level violation rates</h2>
+        <h2>每次尝试的违规率</h2>
         <p className="muted" style={{ marginTop: 8 }}>
-          Includes rejected candidates and retries, including intentionally
-          impossible scenarios.
+          包含被拒绝的候选方案和重试，也包含那些刻意设置为无解的场景。
         </p>
         <div className="metrics">
           {Object.entries(report.violationRates).map(([code, rate]) => (
             <div className="metric" key={code}>
               <strong>{percentage(rate)}</strong>
-              <span>{code.replaceAll("_", " ")}</span>
+              <span>{violationLabels[code] ?? code.replaceAll("_", " ")}</span>
             </div>
           ))}
         </div>
         <p className="muted">
-          Average regenerations per case:{" "}
-          {report.averageRegenerationCount.toFixed(2)} · Model: {report.model}
+          每个场景平均重生成次数：{report.averageRegenerationCount.toFixed(2)} ·
+          模型：{report.model}
         </p>
       </div>
       <div className="card" style={{ marginTop: 25, overflow: "hidden" }}>
         <div className="card-heading">
-          <h2>Scenario results</h2>
-          <span>Run {report.generatedAt.slice(0, 10)}</span>
+          <h2>场景结果</h2>
+          <span>运行于 {report.generatedAt.slice(0, 10)}</span>
         </div>
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Case</TableHead>
-              <TableHead>Scenario</TableHead>
-              <TableHead>Expected</TableHead>
-              <TableHead>Outcome</TableHead>
-              <TableHead>Attempts</TableHead>
+              <TableHead>编号</TableHead>
+              <TableHead>场景</TableHead>
+              <TableHead>预期</TableHead>
+              <TableHead>结果</TableHead>
+              <TableHead>尝试次数</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -111,10 +123,10 @@ export function EvalDashboard({ report }: { report: Report }) {
                 <TableCell>{r.id}</TableCell>
                 <TableCell>{r.name}</TableCell>
                 <TableCell>
-                  {r.expectedFeasible ? "Valid plan" : "Safe refusal"}
+                  {r.expectedFeasible ? "有效方案" : "安全拒绝"}
                 </TableCell>
                 <TableCell>
-                  <span className="badge">{r.pass ? "Pass" : "Fail"}</span>
+                  <span className="badge">{r.pass ? "通过" : "失败"}</span>
                 </TableCell>
                 <TableCell>{r.attempts.length}</TableCell>
               </TableRow>
@@ -123,19 +135,18 @@ export function EvalDashboard({ report }: { report: Report }) {
         </Table>
       </div>
       <div className="card form-card" style={{ marginTop: 25 }}>
-        <h2>Your demo session</h2>
+        <h2>你的示例会话</h2>
         <p className="muted">
-          Browser-local interaction events; cloud copies are written to Supabase
-          when configured.
+          记录当前浏览器中的本地交互事件，不会上传到外部服务。
         </p>
         <div className="metrics">
           <div className="metric">
             <strong>{generated.size}</strong>
-            <span>Valid plans generated</span>
+            <span>生成的有效方案</span>
           </div>
           <div className="metric">
             <strong>{accepted.size}</strong>
-            <span>Unique plans accepted</span>
+            <span>接受的不同方案</span>
           </div>
           <div className="metric">
             <strong>
@@ -143,16 +154,15 @@ export function EvalDashboard({ report }: { report: Report }) {
                 ? percentage(accepted.size / generated.size)
                 : "—"}
             </strong>
-            <span>Plan acceptance rate</span>
+            <span>方案接受率</span>
           </div>
         </div>
       </div>
       <div className="demo-note">
-        <b>Human evaluation</b>
+        <b>人工评估</b>
         <p>
-          Score relevance, personalization, reasonableness, preference alignment
-          and explanation quality from 1–5 using the supplied SoftEvaluation
-          schema. Live model comparison runs use the same cases and validators.
+          请使用 SoftEvaluation 结构，从 1–5
+          分别评价相关性、个性化、合理性、偏好匹配度和解释质量。实时模型对比会使用同一组场景和校验器。
         </p>
       </div>
     </div>

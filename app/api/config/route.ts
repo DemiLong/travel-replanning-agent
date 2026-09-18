@@ -1,17 +1,16 @@
-export const dynamic = "force-dynamic";
 export function GET() {
+  const semanticParserEnabled = Boolean(
+    process.env.DEEPSEEK_API_KEY && process.env.DEEPSEEK_MODEL,
+  );
   return Response.json(
     {
-      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
-      supabaseKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
-      liveAvailable: Boolean(
-        process.env.OPENAI_API_KEY &&
-        process.env.OPENAI_MODEL &&
-        ((process.env.NEXT_PUBLIC_SUPABASE_URL &&
-          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) ||
-          (process.env.NODE_ENV !== "production" &&
-            process.env.ALLOW_LOCAL_LIVE === "true")),
-      ),
+      externalServicesEnabled: semanticParserEnabled && Boolean(process.env.AMAP_API_KEY),
+      persistence: "browser",
+      planner: semanticParserEnabled ? "deepseek-grounded-candidates" : "not-configured",
+      worldProvider: process.env.AMAP_API_KEY ? "amap" : "not-configured",
+      semanticParser: semanticParserEnabled
+        ? "deepseek-structured-outputs"
+        : "not-configured",
     },
     { headers: { "Cache-Control": "no-store" } },
   );

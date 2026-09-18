@@ -1,208 +1,159 @@
-# Dayshift · Dynamic Travel Replanning Agent
+# 接住你 · Dayshift 今日行程救援助手
 
-**动态旅行重规划智能体**。一个移动端优先的 AI 产品经理作品集 MVP：当天的计划遇到下雨、晚点、疲劳或地点关闭时，只重规划接下来半天／一天，同时保留预约等硬约束。
+用户把原行程、当前变化、当前位置和必须保留的安排写在同一段话里。服务端 `/api/assist` 串联 DeepSeek 解析、影响分析、高德查询、DeepSeek 候选规划与 Validator，直接给出今日新方案。先推断、查询验证；只有实质影响规划且无法可靠确定的信息才单项追问。接受方案后才更新正式今日行程。
 
-## Quick start
+真实模式调用服务端 DeepSeek 和高德 Web 服务 API，不要求注册，也不会自动部署。真实行程只保存在当前浏览器的 `travel-session-real-v2` 中。完整变更与验收说明见 [真实世界服务改造报告](docs/real-world-upgrade.md)。
 
-需要 Node.js 22.13+（推荐 Node 24）和 npm。
+## 本地运行
+
+需要 Node.js 22.13+ 和 npm。
 
 ```sh
 npm ci
-npm run dev:next
+npm run dev
 # http://localhost:3000
 ```
 
-无需账号或 API Key：点击 **Try Bangkok Demo → My plans changed → Replan my day → Accept plan**。
+交付检查：
 
-这是明确标识的 **模拟规划模式**，不调用大模型，不声称具有模型推理能力。默认曼谷场景为 2026-09-10 15:00、Siam、下雨、低体力。已完成大皇宫和午餐，错过 Wat Arun，原计划 17:00 ICONSIAM，19:00–20:30 晚餐锁定。
-
-### 开启真实 OpenAI 规划
-
-复制 `.env.example` 为 `.env.local`，设置：
-
-```dotenv
-OPENAI_API_KEY=your-server-side-key
-OPENAI_MODEL=gpt-5.6-sol
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-public-anon-or-publishable-key
+```sh
+npm run typecheck
+npm test
+npm run build
+node scripts/smoke.mjs http://127.0.0.1:3000
 ```
 
-模型名称仅由环境变量控制。`gpt-5.6-sol` 是文档确认支持 Structured Outputs 的示例，可改为账号有权限使用的其他兼容模型。所有 OpenAI 调用发生在服务端，通过 Responses API 的 `responses.parse` 和 `zodTextFormat` 返回结构化数据。禁止将 API Key 加上 `NEXT_PUBLIC_` 前缀。
+## 用户流程
 
-Supabase 配置步骤见下节。重启后，变化输入页的 Planning mode 可选择 **Live · OpenAI planner**。仅限本地调试时，可不配置 Supabase，设置 `ALLOW_LOCAL_LIVE=true`；生产环境不允许该绕过。
+- `/`：统一入口。输入今天原有安排、当前变化、当前位置和需要保留的事项，也可使用五个快捷场景。
+- `/onboarding`：主动创建今日行程。填写目的地、日期、当前时间与地点，粘贴行程文本，检查并编辑解析结果，再保存。
+- `/trip`：查看真实今日行程，并从这里发起突发救援。
+- `/rescue`：兼容的深度分析与编辑入口，不是首页到结果的必经页面。
+- `/result`：查看新时间线、调整原因、影响、估算项和逐项决策记录，再接受或修改。
+- `/demo`：独立示例。只使用页面内存中的示例数据，不读取或写入真实会话。
+- `/replan`：兼容旧地址，重定向到 `/rescue`。
+- `/evals`：仅开发环境可通过直达地址访问；生产环境返回 404，导航不显示入口。
 
-真实模型与远程数据库需要你自己的凭据。交付时完成的是代码集成与模拟验证，**未使用真实密钥运行 LLM 或执行远程数据库迁移**。
+首次用户不需要预先创建行程。首页提交“原计划＋变化”后直接调用 `/api/assist`，成功进入 `/result`；必要补问留在首页，保留原文。仍需至少一项可识别安排，不能凭空规划已有行程。用户在结果页接受方案，而不是先强制确认一张结构化表格。
 
-## Problem
+## 状态与数据边界
 
-静态旅行计划假设时间、天气和体力保持不变。旅行中的一次晚点或突发降雨，会让后续多个活动不再可行。旅行者真正的负担不是寻找更多攻略，而是在地图、预约、预算和个人偏好之间重新做一组局部决策。
-
-## Product hypothesis
-
-如果用户能快速报告当前状态，并看到一个保留关键预约、解释改动原因、可直接接受的新方案，就能减少重新规划的认知负担。第一版验证的是 **State → Disruption → Replan → Compare → Accept** 的完整闭环。计划接受率是产品假设的反馈信号，不代表真实旅行满意度。
-
-## Product flow
-
-- `/`：产品入口和 Bangkok Demo。
-- `/onboarding`：城市、日期、每日预算、节奏、兴趣、厌恶与步行接受度。
-- `/trip`：当前状态、已完成与未完成行程、锁定事件、主要 CTA。
-- `/replan`：七种变化原因、自由文本、时间、位置、体力、天气、预算、关闭地点。
-- `/result`：Old vs New、逐项解释、约束结果、接受、重新生成、偏好调整、显式记忆。
-- `/evals`：真实运行生成的模拟评测报告与当前浏览器的交互统计。
-
-接受方案先再次运行服务端校验，再保存今天的行程。已完成记录不被替换。跨日建议不自动插入未来日程。偏好改变会废弃尚未接受的旧结果。保存时进行 revision 比较，防止另一个标签页的旧方案覆盖新状态。
-
-## AI architecture
-
-```mermaid
-flowchart LR
-  S[Current state + preferences + itinerary] --> C[Context Builder]
-  C --> P[Planner adapter]
-  P --> J[Structured JSON + Zod]
-  J --> V[Deterministic validators]
-  V -->|Pass| R[Old / New comparison]
-  R --> A[User accepts]
-  A --> V2[Revalidate + revision check]
-  V2 --> DB[Persist updated day]
-  V -->|Fail: precise violations| Retry[Regenerate: max 2 retries]
-  Retry --> P
-  Retry -->|Exhausted| F[Safe failure; no invalid plan]
-```
-
-`agents/context-builder.ts` 将 UserProfile、Trip、TripState、现有行程、剩余事件、锁定事件、变化、26 个地点和交通矩阵整理为 JSON Context。不会读取或发送无关数据库字段。
-
-`services/openai.ts` 定义 Planner 接口及 OpenAI 实现。`agents/demo-planner.ts` 是同接口的确定性模拟器；基于状态与偏好打分并筛选可行活动，不使用模型，也不理解自由文本。
-
-`agents/replanning-agent.ts` 负责生成、解析、校验、反馈重试和返回审计记录。首次生成 + 最多 2 次重试；OpenAI SDK 自身重试被关闭，单次超时 25 秒，避免叠加造成无限等待。拒答、截断、非结构化输出、API 错误和最终校验失败都返回友好状态。
-
-### Why LLM
-
-低体力时取消哪个活动、下雨时保留哪些体验、如何兼顾咖啡偏好与少改行程，存在情境性的软取舍。大模型适合解释这些取舍，而固定规则很难覆盖自然语言表达。真实模式使用完整用户偏好、记忆和变化文本；手动状态字段是时间和天气等事实的来源。
-
-### Why deterministic validators
-
-锁定预约、时间和预算属于确定性规则，不能只依赖概率模型遵守 Prompt。即便输出格式正确，也不保证内容可行。
-
-实际校验包括：
-
-1. **Locked event**：保留原 ID、地点、名称、地点区域、价格、开始／结束时间和锁定状态。
-2. **Time conflict**：按时间比较活动，拒绝任意重叠。
-3. **Travel time**：检查从当前地点出发及活动间交通时间；使用服务端目录和矩阵，不相信模型填写的交通时间。
-4. **Opening hours / closure**：按地点目录营业时间和手动上报关闭列表校验，不允许模型伪造营业时间。
-5. **Budget**：剩余活动总额不超过剩余预算，同时校验价格与目录一致。
-6. **Past event**：未来候选不能开始于当前时间以前；已完成历史不能混入候选。
-7. **Duration**：结束时间严格晚于开始时间。
-8. **Identity / accounting**：拒绝未知地点、重复 ID、篡改元数据、静默遗漏旧活动和未经用户授权新增锁定。
-
-只有校验通过的计划才提供 Accept。无解时最多三次尝试后保留原行程并要求调整约束。即使某个锁定地点关闭，也不会自动删除预约。
-
-## Project structure
+真实／示例和业务阶段分开保存：
 
 ```text
-app/                 Next.js App Router pages + API routes
-components/          Travel UI, workflows, eval dashboard, bundled UI primitives
-lib/time.ts          Time conversion helpers
-services/            OpenAI adapter, places, browser storage, server authentication
-agents/              Context, prompts, demo planner, bounded replanning loop
-validators/          Modular hard constraints and combined validation
- types/index.ts      TypeScript types and Zod contracts
- data/               26 Bangkok places, original itinerary, generated eval report
- evals/              32 synthetic cases, runner, adversarial validator tests
- supabase/migrations/ Postgres schema, RLS, atomic save, usage limit
- scripts/            Evaluation runner and HTTP smoke checks
- outputs/            User-facing evaluation JSON and packaged deliverables
+experienceMode: real | demo
+flowStage: NO_ITINERARY | HAS_ITINERARY | RESCUE_INPUT | RESCUE_CONFIRM | PLAN_READY
 ```
 
-No LangChain, LangGraph, vector store or agent framework is required.
+真实浏览器会话通过 `SessionRepository` 读写，包含真实行程、首页草稿、解析结果、最近变化和待确认方案。旧数据迁移只接受真实用户快照；旧 Demo、活动模式和未确认结果不会迁入。`/demo` 不调用该仓储，因此示例操作不会改变真实行程或流程阶段。
 
-## Supabase persistence and authentication
+当前时间、地点、天气、体力和突发情况都带有事实来源。系统时间可作为当前时间初值；其余没有由用户明确提供的信息保持“未提供”，不会从 Demo 补默认值。
 
-1. 新建 Supabase 项目。
-2. 在 SQL Editor 执行 `supabase/migrations/001_travel.sql`。
-3. 在 Auth 设置开启 **Anonymous Sign-Ins**。
-4. 设置公开项目 URL 和 anon/publishable key。不要把 service-role key 放入浏览器；本实现不需要 service-role key。
-5. 在生产站点配置同名环境变量并重新部署。
+## AI 语义解析、真实查询与规划
 
-匿名会话无需访客输入邮箱，数据库通过 `auth.uid()` 的 Row Level Security 隔离不同访客。资料、旅行状态、行程和显式记忆存为 `travel_snapshots.snapshot`，通过事务函数保存并比较 revision。Analytics 写入 `travel_analytics`。实时规划端点验证用户 token，使用独立数据库计数器限制每访客每分钟 5 次请求。
+真实流程采用以下边界：
 
-未配置 Supabase 时使用 LocalStorage 演示。配置后云端读取／保存失败会展示错误，保存失败不会假装成功。浏览器分析事件有本地副本；分析写入失败不阻塞规划。匿名身份绑定当前浏览器，清除浏览数据或换设备无法恢复，不承诺跨设备账号同步。
-
-生产公开使用还需在 Supabase 开启机器人防护并设置 OpenAI 项目费用限额；每访客限流不替代全站成本控制。当前部署面向私有作品集演示。
-
-## Evaluation
-
-```sh
-npm test
-npm run evals
-# Requires real key and model access; incurs API usage:
-npm run evals -- --live
+```text
+用户自然语言
+→ 服务端 LLM Structured Outputs 语义解析
+→ 合并已有 Session → 影响节点与时间窗分析
+→ 地点候选推断 → 高德查询验证 → 必要时首页单项补问
+→ 独立 DeepSeek Planner 动态提出 1～3 个候选
+→ 代码计算时间 → Validator 校验（失败最多尝试两轮）
+→ 可追溯结果
 ```
 
-`npm test` 覆盖 25 项规则／循环检查，包括伪造价格、伪造营业时间、删除和修改锁定、跨活动交通不足、零时长、重复 ID、无效结构、API 抛错、修复成功及最大重试次数。
+Parser 和 Planner 使用独立提示。Parser 抽取原文事实，推断作为查询依据单独记录；Planner 引用原安排及高德数据，不得编造路线耗时或坐标。Impact Analysis 只归纳影响节点与时间窗，休息还是新增活动由 Planner 判断，不机械填满空档。所有密钥仅在服务端读取，不进入浏览器包。
 
-32 个合成场景分别具有 UserProfile、TripState、现有行程、disruption 和期望约束。包含 27 个有解场景与 5 个故意无解场景：预算不足、已错过锁定、无法及时到达、锁定地点关闭、两个锁定冲突。Runner 调用真实 Agent Loop，再独立执行一次最终校验。
+本地启动前在 `.env.local` 配置：
 
-模拟基线：
-
-- Scenario expected outcome rate：32/32 = **100%**。
-- Feasible case valid-plan rate：27/27 = **100%**。
-- Hard Constraint Pass Rate（有效计划 / 所有案例）：27/32 = **84.375%**。
-- 五个无解案例均拒绝；无效计划不会应用。
-- 每次尝试的 locked/time/closing/budget/travel 等违规率另行输出，不隐藏失败候选。
-
-这些数字属于 **确定性模拟基线**，不是 LLM 质量或真实用户指标。CLI 输出和 `outputs/eval-demo.json` 可复查；`data/eval-report.json` 是仪表盘展示的已运行快照，不是在页面打开时偷偷调用模型。
-
-模型对比：设置 `EVAL_MODELS=model-a,model-b` 后运行 live eval，每个模型使用同一套案例和验证器，并单独输出 JSON。也记录耗时和重试次数。`SoftEvaluationSchema` 预留人工 1–5 分：Relevance、Personalization、Reasonableness、Preference Alignment、Explanation Quality；本版不实现 LLM-as-a-Judge。
-
-### Analytics definitions
-
-记录：trip_created、replan_started、replan_generated、replan_validation_failed、replan_regenerated、replan_accepted、replan_rejected、preference_saved。
-
-- Plan Acceptance Rate = 唯一 accepted plan IDs / 唯一 valid generated plan IDs。
-- Average Regeneration Count = generated 事件 regenerationCount 平均值；评测报告另统计全部案例。
-- Attempt Hard Constraint Pass Rate = 有效生成次数 /（有效生成次数 + 失败候选次数）。
-
-接受和拒绝按 plan ID 去重。事件属性不包含原始自由文本。演示与真实规划有 mode 字段，应分开分析。浏览器发送的产品事件不是防篡改的财务审计，也不把作品集模拟流量当成真实用户验证。
-
-## Deployment
-
-### Vercel (native Next.js)
-
-```sh
-npm run build:vercel
-npm run start:next
+```text
+DEEPSEEK_API_KEY=你的服务端密钥
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+AMAP_API_KEY=你的高德Web服务密钥
 ```
 
-将代码推送到自己的 Git 仓库后导入 Vercel。仓库提供 `vercel.json`：框架 Next.js，Build Command `npm run build:vercel`，Output `.next`。无环境变量可运行完整模拟闭环；配置 OpenAI 和 Supabase 后开启真实模式。设定支持 90 秒的服务端函数执行时间／套餐。
+缺少密钥时返回明确配置错误。真实模式没有本地解析或 Mock 规划兜底；上游失败会保留草稿，显示不可用并允许重试。文件名必须是 `.env.local`，不能是 `.env.local.txt`。
 
-### Sites (this environment)
+自然语言解析输出统一结构：
 
-本工作区同时保留 Sites 的 Vinext 构建适配层，复用同一套 Next.js App Router 源码。`npm run build` 用于 Cloudflare Workers / Sites 输出，`npm run dev` 用于 Sites 预览；Vercel 使用上面的 native Next.js 脚本。两种目标不混用构建产物。Sites 运行时环境变量需在站点环境中设置，不能把密钥写入 `.openai/hosting.json`。
+```text
+intent
+existingPlans
+disruptions
+constraints
+context
+missingFacts
+status
+```
 
-## Assumptions and limitations
+真实解析接受自由中文及英文行程文字，例如：
 
-- MVP 仅曼谷，时间为目的地当地 24 小时制；不支持跨午夜活动、时区换算或自动推进旅行时钟。
-- 全部地点的价格、营业时间和经纬度是作品演示数据，不是实时营业信息；不含每周休息日与节假日。
-- 不同地点同区域交通估算 15 分钟，相邻区域 30 分钟，其他区域 45 分钟；同一地点为 0。当前只记录区域，因此首次出发也保守预留交通。
-- 预算涵盖地点活动估算费用；交通时间只代表时长，不报价交通费。完成活动的价格用于初始化已花费预算；用户可手动修正剩余预算。
-- 全部候选引用已知地点；无法凭空推荐用户自由文本中的新店。Live 可解释／选择目录内替代项，Demo 使用结构化选择，不解析自然语言。
-- 未来移动是明确标注的建议，不验证未来整天交通／冲突，也不会自动确认。
-- 模拟器用于展示闭环，不模拟一般性的语言理解。真实模型输出仍需硬校验。
-- 无法撤销已完成事件；接受方案不会扣减尚未发生的费用。
-- 对称区域交通、当天时间模型和显式记忆为可替换服务边界。
+```text
+10:00 Grand Palace，12:30 lunch，19:00 booked dinner
+```
 
-## MVP scope
+完整活动位于 `existingPlans`，部分活动位于 `activityMentions`，编排层合并保留两者。普通活动缺少时长时允许 Planner 建议并标注来源；最后一项固定预约没有结束时间时只验证到达，不在其后安排活动。未知酒店／餐厅只有不能从 Session 或真实数据可靠确定、且影响路线时才追问。
 
-刻意不做 booking、完整旅行生成、酒店／机票购买、地图集成、语言学习、社交、RAG、embedding、多智能体或隐式长期记忆。新增功能应直接帮助用户在变化后重规划今天剩余的行程。
+正式方案必须具备可验证基础：
 
-## Future work
+1. 至少一项来源于用户输入或已有 Session 的活动。
+2. 有效日期与当前时间；城市可以从高德地点查询取得。
+3. 可解析的出发地点与必要活动地点；明确原文位置优先于 GPS，GPS 超过 10 分钟或精度超过 1000 米不复用。
+4. 存在变化或优化意图；方案通过适用硬规则。
 
-可扩展真实天气、地点搜索、地图交通、持续偏好学习、多城市／多国家、真正的跨日行程校验，并用真实用户样本验证节省时间和计划接受率。
+主入口 `/api/assist` 完成上述整合；旧 `/api/replan` 保留原来的确认契约。预算、体力和非关键偏好缺失不阻塞，适用但缺数据的检查显示“未检查”。未指定交通方式时比较真实步行、公共交通和驾车路线；无驾车上下文时以打车建议呈现。每项活动的交通方式、显示耗时和 Validator 使用同一条高德路线。
 
-## Sources and image credit
+例如“航班晚点，刚到虹桥，18:00 预约晚餐必须保留”：先查询上海虹桥国际机场取得真实城市，不问城市或默认交通方式。已有餐厅可识别时继续规划；没有餐厅信息时只问晚餐在哪里。泛称“美术馆”不能仅因匹配“上海美术馆”就静默选择，仍结合上下文消歧。
 
-- [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
-- [GPT-5.6 Sol model capabilities](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
-- [Supabase anonymous authentication](https://supabase.com/docs/guides/auth/auth-anonymous)
-- [Supabase Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
-- Hero image: AI-generated Bangkok-inspired riverfront illustration. Explicitly labelled as an imagined scene, not a documentary landmark photograph.
+## 决策记录与校验
+
+每次规划结果都保存一条可检查的决策链：
+
+```text
+用户输入事实 → 系统决定 → 决策理由 → 校验证据
+```
+
+硬规则覆盖锁定安排、时间冲突、路程时间、营业时间和关闭地点、预算、过去事件、活动时长、地点数据以及变更完整性。每项证据为 `passed`、`failed` 或 `not_checked`，并记录来源。
+
+真实地点与路线由高德提供；浏览器 WGS84 坐标先经高德官方接口转为 GCJ02。POI 基础数据不能验证营业状态，路线查询也不是未来到达保证，因此结果显示“已通过当前可验证规则”，不会显示完整硬约束保证。接受方案时会重新查询世界数据、检查会话版本和约束；失败保留原行程与草稿。
+
+## 项目结构
+
+```text
+app/          Next.js 页面与 API 路由
+components/   首页、创建、救援、结果与 Demo 流程
+services/     DeepSeek 解析与规划、影响分析、会话仓储、world 高德服务
+agents/       统一编排、Context、有限重规划与决策记录
+validators/   可复查的硬规则校验
+types/        Zod 数据契约与 TypeScript 类型
+evals/        解析、隔离、规则和 Agent 循环测试
+scripts/      测试与 HTTP 冒烟脚本
+outputs/      本地源码交付包
+```
+
+## 当前限制
+
+- 高德真实流程面向中国境内；泰国示例只在 `/demo` 使用。
+- 天气按问题需要查询；浏览器定位需要权限，拒绝后手动补充当前位置。
+- 不保证商户实时营业状态、票务名额及未来交通；未知费用不能当作免费。
+- 每轮最多 5 个替代地点、40 个不同起点／终点／方式组合；路线请求最多 3 个并发并缓存去重，最多调用 2 次候选规划。
+- 匿名数据只保存在本浏览器，清除浏览器数据或更换设备后无法恢复。账号同步属于后续版本。
+- AI 语义解析需要服务端 `DEEPSEEK_API_KEY`；未配置时，复杂自然语言不会被自动解释。
+
+## 更新记录（2026-09-16）
+
+- 排查并修复 DeepSeek 连接错误：清理旧的 Next.js 进程后重新构建、启动，确认服务端已通过 `DEEPSEEK_BASE_URL` 调用 Responses API。
+- 真实流程继续使用 DeepSeek 结构化解析，不回退到本地正则或 Demo 数据；复杂中文输入会保留已识别事实，并只追问会影响路线或预约判断的信息。
+- `/api/assist` 对模型未配置、上游连接失败和高德不可用分别返回明确的不可用状态，前端显示可重试提示。
+- 项目自己的 DeepSeek 复杂语义回归测试、类型检查、自动化测试、生产构建和 HTTP 冒烟检查均已通过。
+- 详细的服务层、调用链、坐标转换、真实联调与限制记录见 [真实世界服务改造报告](docs/real-world-upgrade.md)。
+
+## 追加更新：推断、查询与单项追问（2026-09-16）
+
+- `/api/assist` 移除城市、交通方式和普通活动时长的机械补问；合并原文、Session 与世界查询后只返回当前最关键的一项。
+- 增加地点查询依据记录、机场／酒店指代解析、真实 POI 选择与补充答案保留；无法查询与需要用户回答分开返回。
+- 自动比较交通并保存活动入站方式，校验使用同一真实路段；未知最后预约结束时间不虚构，也不安排后续活动。
+- 修复泛称“美术馆”被同名城市美术馆误判唯一的边界；增加隔离 HTTP 回归测试。实际 DeepSeek＋高德复验记录与自动测试分开，详见改造报告的最新追加章节。
+- 本轮不部署。源码归档使用 `scripts/package-source.ps1`，排除真实密钥、运行产物与旧交付包。

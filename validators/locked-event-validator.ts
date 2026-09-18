@@ -22,7 +22,7 @@ export function lockedEventValidator(
           {
             code: "locked_event" as const,
             eventId: old.id,
-            message: `Preserve locked ${old.name} at ${old.startTime}–${old.endTime}, including its identity and cost.`,
+            message: `请保留锁定安排 ${old.name} 的 ${old.startTime}–${old.endTime} 时间、地点身份和费用。`,
           },
         ]
       : [];

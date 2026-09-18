@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
-import { demo, event } from "../data/demo";
+import { runWorldTests } from "./world-tests";
+import { createStarterSnapshot, demo, event } from "../data/demo";
 import { buildContext } from "../agents/context-builder";
 import { DemoPlanner } from "../agents/demo-planner";
 import { replan } from "../agents/replanning-agent";
 import { validatePlan } from "../validators";
+import { parseItineraryText } from "../services/itinerary-parser";
+import { parseUnifiedInput } from "../services/input-parser";
+import {
+  normalizeSemanticExtraction,
+  SEMANTIC_PARSER_PROMPT,
+} from "../services/semantic-parser";
+import {
+  loadSession,
+  realSessionKey,
+  saveSession,
+} from "../services/trip-service";
 import type { ProposedPlan, Violation } from "../types";
 async function main() {
+  await runWorldTests();
   const input = {
     snapshot: structuredClone(demo),
     mode: "demo" as const,
@@ -216,10 +229,321 @@ async function main() {
   );
   assert(!validatePlan(boundary, good).some((v) => v.code === "budget"));
   assert.throws(() => buildContext({}), /./);
+  const phuket = structuredClone(demo);
+  phuket.trip.destination = "Phuket";
+  phuket.state.currentLocation = "Patong";
+  phuket.itinerary = [
+    {
+      ...phuket.itinerary.find((item) => item.locked)!,
+      id: "event-phuket-dinner",
+      placeId: "custom-phuket-dinner",
+      name: "Phuket dinner reservation",
+      location: "Patong",
+    },
+  ];
+  const phuketInput = {
+    snapshot: phuket,
+    mode: "demo" as const,
+    request: {
+      reason: "late" as const,
+      freeText: "My ferry arrived late.",
+      currentState: phuket.state,
+      closedPlaceIds: [],
+      variation: 0,
+    },
+  };
+  const phuketContext = buildContext(phuketInput);
+  const phuketPlan = await new DemoPlanner().generate(phuketContext);
+  assert.equal(validatePlan(phuketContext, phuketPlan).length, 0);
+  assert(phuketContext.places.some((place) => place.id === "phuket-rest"));
+  console.log("PASS Thailand destination with a user-entered fixed plan");
+  const user = createStarterSnapshot();
+  user.state = {
+    ...user.state,
+    currentTime: "11:00",
+    currentLocation: "Siam",
+  };
+  user.stateSources = {
+    currentTime: "user",
+    currentLocation: "user",
+    weather: "unset",
+    energyLevel: "unset",
+    disruption: "unset",
+  };
+  user.itinerary = [event("iconsiam", "user-stop", "12:00", "13:00")];
+  const closedOnly = {
+    snapshot: user,
+    mode: "local" as const,
+    request: {
+      reason: "closed" as const,
+      freeText: "有个地方关门了",
+      currentState: user.state,
+      closedPlaceIds: [],
+      variation: 0,
+      stateSources: { ...user.stateSources, disruption: "user" as const },
+    },
+    confirmation: {
+      status: "confirmed" as const,
+      confirmedAt: new Date().toISOString(),
+    },
+  };
+  assert.throws(
+    () => buildContext({ ...closedOnly, confirmation: undefined }),
+    /请先确认/,
+  );
+  const userContext = buildContext(closedOnly);
+  assert.equal(userContext.state.currentTime, "11:00");
+  assert.equal(userContext.state.weather, undefined);
+  assert.equal(userContext.state.energyLevel, undefined);
+  const userPlan = await new DemoPlanner().generate(userContext);
+  assert(userPlan.events.length > 0);
+  assert(userPlan.events.every((item) => item.startTime >= "11:00"));
+  assert(userPlan.events.some((item) => item.startTime < "15:00"));
+  const traced = await replan(closedOnly, new DemoPlanner(), "local");
+  assert(traced.ok);
+  assert(
+    traced.decisionTrace?.inputFacts.some(
+      (fact) =>
+        fact.field === "用户报告的变化" && fact.value === "有个地方关门了",
+    ),
+  );
+  assert(
+    traced.decisionTrace?.validationEvidence.every(
+      (item) => item.status !== "failed",
+    ),
+  );
+  assert.equal(
+    traced.decisionTrace?.validationEvidence.find(
+      (item) => item.check === "预算",
+    )?.status,
+    "not_checked",
+  );
+  const unknownCostInput = structuredClone(closedOnly);
+  unknownCostInput.snapshot.itinerary[0].estimatedCostKnown = false;
+  unknownCostInput.snapshot.state.remainingBudget = 1000;
+  unknownCostInput.request.currentState.remainingBudget = 1000;
+  const unknownCostResult = await replan(
+    unknownCostInput,
+    new DemoPlanner(),
+    "local",
+  );
+  assert.equal(
+    unknownCostResult.decisionTrace?.validationEvidence.find(
+      (item) => item.check === "预算",
+    )?.status,
+    "not_checked",
+  );
+  console.log(
+    "PASS user facts stay isolated from demo state and trace every plan",
+  );
+  const parsedItinerary = parseItineraryText(
+    "10:00 Grand Palace，12:30 lunch，19:00 booked dinner",
+    "Bangkok",
+    "Siam",
+  );
+  assert.equal(parsedItinerary.length, 3);
+  assert.equal(parsedItinerary[0].name, "Grand Palace");
+  assert.equal(parsedItinerary[2].locked, true);
+  console.log(
+    "PASS natural-language itinerary parsing and locked reservation detection",
+  );
+  const mixedSnapshot = createStarterSnapshot();
+  mixedSnapshot.state.currentTime = "11:00";
+  mixedSnapshot.stateSources.currentTime = "system";
+  const mixed = parseUnifiedInput(
+    mixedSnapshot,
+    "10:00 Grand Palace，12:30 lunch，19:00 booked dinner。现在下雨了，我在暹罗，希望保留晚餐。",
+  );
+  assert.equal(mixed.intent, "mixed");
+  assert.equal(mixed.existingPlans.length, 3);
+  assert(mixed.disruptions.some((item) => item.kind === "weather"));
+  assert.equal(mixed.context.weather, "rain");
+  assert.equal(mixed.context.currentLocation, "Siam");
+  assert.equal(mixed.context.currentTime, "11:00");
+  assert(mixed.existingPlans.some((item) => item.locked));
+  assert(mixed.constraints.some((item) => item.kind === "keep"));
+  console.log("PASS mixed input splits plans, disruption, location and lock");
+  const disruptionOnly = parseUnifiedInput(
+    createStarterSnapshot(),
+    "有个地方关门了",
+  );
+  assert(disruptionOnly.missingFacts.includes("existingPlans"));
+  assert(disruptionOnly.missingFacts.includes("closedPlace"));
+  assert.equal(disruptionOnly.context.weather, undefined);
+  assert.equal(disruptionOnly.context.energyLevel, undefined);
+  const planOnlyBase = createStarterSnapshot();
+  planOnlyBase.state.currentLocation = "Siam";
+  planOnlyBase.stateSources.currentLocation = "user";
+  const planOnly = parseUnifiedInput(
+    planOnlyBase,
+    "10:00 Grand Palace，12:30 lunch",
+  );
+  assert.equal(planOnly.intent, "create");
+  assert(planOnly.missingFacts.includes("disruptionOrOptimize"));
+  console.log("PASS partial inputs trigger only the necessary follow-up facts");
+
+  const ambiguousSentence =
+    "15:00 按摩，晚上预订了8点的游乐场，但是现在已经14点了，按摩需要1个小时，我还去吗？";
+  const safeFallback = parseItineraryText(
+    ambiguousSentence,
+    "Bangkok",
+    "Siam",
+  );
+  assert.equal(safeFallback.length, 0);
+  const safeFallbackFacts = parseUnifiedInput(
+    createStarterSnapshot(),
+    ambiguousSentence,
+  );
+  assert.equal(safeFallbackFacts.context.currentTime, "14:00");
+  assert.equal(safeFallbackFacts.existingPlans.length, 0);
+  assert(safeFallbackFacts.parseWarnings.length > 0);
+  const semantic = normalizeSemanticExtraction(
+    createStarterSnapshot(),
+    ambiguousSentence,
+    {
+      intent: "rescue",
+      activities: [
+        {
+          role: "considering",
+          name: "按摩",
+          startTime: null,
+          endTime: null,
+          durationMinutes: 60,
+          location: null,
+          estimatedCost: null,
+          locked: "no",
+          sourceText: "按摩需要1个小时，我还去吗",
+        },
+        {
+          role: "existing_plan",
+          name: "游乐场",
+          startTime: "20:00",
+          endTime: null,
+          durationMinutes: null,
+          location: null,
+          estimatedCost: null,
+          locked: "yes",
+          sourceText: "晚上预订了8点的游乐场",
+        },
+      ],
+      disruptions: [
+        {
+          kind: "other",
+          label: "询问是否仍适合去按摩",
+          sourceText: "我还去吗",
+        },
+      ],
+      constraints: [],
+      context: {
+        currentTime: { value: "14:00", sourceText: "现在已经14点了" },
+        currentLocation: { value: null, sourceText: null },
+        weather: { value: "rain", sourceText: "下雨" },
+        energyLevel: { value: null, sourceText: null },
+        remainingBudget: { value: null, sourceText: null },
+      },
+      question: "我还去按摩吗？",
+      ambiguities: ["按摩的开始时间和地点尚未明确。"],
+    },
+    "fixture-model",
+  );
+  assert.equal(semantic.parser, "llm");
+  assert.equal(semantic.context.currentTime, "14:00");
+  assert.equal(semantic.context.weather, undefined);
+  assert.equal(semantic.context.energyLevel, undefined);
+  assert.equal(semantic.existingPlans.length, 0);
+  assert.equal(semantic.activityMentions.length, 2);
+  assert(
+    semantic.activityMentions.some(
+      (item) =>
+        item.name === "游乐场" &&
+        item.startTime === "20:00" &&
+        item.locked === "yes",
+    ),
+  );
+  assert(
+    semantic.activityMentions.some(
+      (item) =>
+        item.name === "按摩" &&
+        item.role === "considering" &&
+        item.durationMinutes === 60 &&
+        item.locked === "no",
+    ),
+  );
+  assert(!semantic.activityMentions.some((item) => item.name === ambiguousSentence));
+  assert(SEMANTIC_PARSER_PROMPT.includes("currentTime"));
+  assert(SEMANTIC_PARSER_PROMPT.includes("nearest named activity"));
+  const chineseContext = normalizeSemanticExtraction(
+    createStarterSnapshot(),
+    "现在14点，我在暹罗，下雨了。",
+    {
+      intent: "rescue",
+      activities: [],
+      disruptions: [
+        { kind: "weather", label: "下雨", sourceText: "下雨了" },
+      ],
+      constraints: [],
+      context: {
+        currentTime: { value: "14:00", sourceText: "现在14点" },
+        currentLocation: { value: "暹罗", sourceText: "我在暹罗" },
+        weather: { value: "rain", sourceText: "下雨了" },
+        energyLevel: { value: null, sourceText: null },
+        remainingBudget: { value: null, sourceText: null },
+      },
+      question: null,
+      ambiguities: [],
+    },
+    "fixture-model",
+  );
+  assert.equal(chineseContext.context.currentLocation, "Siam");
+  assert.equal(chineseContext.context.weather, "rain");
+  console.log(
+    "PASS ambiguous question keeps current time, duration and booking attached to separate facts",
+  );
+
+  const storage = new Map<string, string>();
+  (globalThis as unknown as { localStorage: Storage }).localStorage = {
+    get length() {
+      return storage.size;
+    },
+    clear() {
+      storage.clear();
+    },
+    getItem(key: string) {
+      return storage.get(key) ?? null;
+    },
+    key(index: number) {
+      return [...storage.keys()][index] ?? null;
+    },
+    removeItem(key: string) {
+      storage.delete(key);
+    },
+    setItem(key: string, value: string) {
+      storage.set(key, value);
+    },
+  };
+  localStorage.setItem("travel-snapshot", JSON.stringify(demo));
+  localStorage.setItem("travel-result-demo", JSON.stringify({ leaked: true }));
+  const migrated = loadSession();
+  assert.equal(migrated.snapshot.mode, "user");
+  assert.equal(migrated.snapshot.itinerary.length, 0);
+  assert.equal(migrated.pendingPlan, null);
+  assert(localStorage.getItem(realSessionKey));
+  const persisted = saveSession({
+    ...migrated,
+    rawInput: "真实行程草稿",
+    flowStage: "RESCUE_INPUT",
+  });
+  assert.equal(loadSession().rawInput, "真实行程草稿");
+  assert.equal(persisted.experienceMode, "real");
+  console.log(
+    "PASS legacy demo and result keys cannot enter the real v2 session",
+  );
   console.log(
     "PASS schema, bounded regeneration, failure fallback, closure, exact budget and missing context",
   );
-  console.log("25 validator / agent-loop checks passed.");
+  console.log(
+    "Validator, parser, state isolation and agent-loop checks passed.",
+  );
 }
 main().catch((e) => {
   console.error(e);

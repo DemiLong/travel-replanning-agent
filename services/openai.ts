@@ -17,14 +17,16 @@ export interface Planner {
 export class OpenAIPlanner implements Planner {
   name: string;
   private client: OpenAI;
-  constructor(model = process.env.OPENAI_MODEL) {
-    if (!process.env.OPENAI_API_KEY || !model)
-      throw new Error(
-        "Live planning is not configured. Use Demo mode or configure the server.",
-      );
+  constructor(
+    model = process.env.DEEPSEEK_MODEL,
+    baseURL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
+  ) {
+    if (!process.env.DEEPSEEK_API_KEY || !model)
+      throw new Error("实时规划尚未配置，请使用模拟模式或配置服务端。");
     this.name = model;
     this.client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      baseURL,
       maxRetries: 0,
       timeout: 25000,
     });
@@ -53,7 +55,7 @@ export class OpenAIPlanner implements Planner {
       text: { format: zodTextFormat(ProposedPlanSchema, "travel_plan") },
     });
     if (result.status !== "completed" || !result.output_parsed)
-      throw new Error("The planner did not return a complete structured plan.");
+      throw new Error("规划器没有返回完整的结构化方案。");
     return ProposedPlanSchema.parse(result.output_parsed);
   }
 }

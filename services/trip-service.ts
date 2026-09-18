@@ -1,100 +1,160 @@
 "use client";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { SnapshotSchema, type Snapshot, type AgentResult } from "../types";
-import { demo } from "../data/demo";
-type Config = {
-  supabaseUrl: string;
-  supabaseKey: string;
-  liveAvailable: boolean;
+import {
+  RealSessionSchema,
+  SnapshotSchema,
+  type AgentResult,
+  type FlowStage,
+  type ParsedUserInput,
+  type PendingPlan,
+  type RealSession,
+  type ReplanningRequest,
+  type Snapshot,
+} from "../types";
+import { createStarterSnapshot } from "../data/demo";
+export type TripMode = Snapshot["mode"];
+export const realSessionKey = "travel-session-real-v2";
+const legacySnapshotKey = "travel-snapshot-user";
+export const resultKey = (mode: TripMode) => `travel-result-${mode}`;
+
+export function activeTripMode(): TripMode {
+  return "user";
+}
+
+function starterSession(): RealSession {
+  const snapshot = createStarterSnapshot();
+  snapshot.trip.destination = "待确认城市";
+  return RealSessionSchema.parse({
+    schemaVersion: 2,
+    experienceMode: "real",
+    flowStage: "NO_ITINERARY",
+    snapshot,
+    rawInput: "",
+    parsedInput: null,
+    lastDisruption: null,
+    pendingPlan: null,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function migrateLegacySession(): RealSession {
+  const rawUser = localStorage.getItem(legacySnapshotKey);
+  const legacy = localStorage.getItem("travel-snapshot");
+  const candidate = rawUser ?? legacy;
+  if (candidate) {
+    try {
+      const parsed = SnapshotSchema.parse(JSON.parse(candidate));
+      const isDemo =
+        parsed.mode === "demo" || parsed.trip.id === "bangkok-demo";
+      if (!isDemo) {
+        const session = RealSessionSchema.parse({
+          ...starterSession(),
+          flowStage: parsed.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+          snapshot: { ...parsed, mode: "user" },
+        });
+        localStorage.setItem(realSessionKey, JSON.stringify(session));
+        return session;
+      }
+    } catch {
+      // Invalid legacy data is ignored instead of contaminating a new session.
+    }
+  }
+  const session = starterSession();
+  localStorage.setItem(realSessionKey, JSON.stringify(session));
+  return session;
+}
+
+export interface SessionRepository {
+  load(): RealSession;
+  save(session: RealSession): RealSession;
+}
+
+export const browserSessionRepository: SessionRepository = {
+  load() {
+    const raw = localStorage.getItem(realSessionKey);
+    if (!raw) return migrateLegacySession();
+    try {
+      return RealSessionSchema.parse(JSON.parse(raw));
+    } catch {
+      return migrateLegacySession();
+    }
+  },
+  save(value) {
+    const session = RealSessionSchema.parse({
+      ...value,
+      experienceMode: "real",
+      snapshot: { ...value.snapshot, mode: "user" },
+      updatedAt: new Date().toISOString(),
+    });
+    localStorage.setItem(realSessionKey, JSON.stringify(session));
+    return session;
+  },
 };
-let configPromise: Promise<Config> | undefined;
-let client: SupabaseClient | null = null;
-export function getConfig() {
-  return (configPromise ??= fetch("/api/config")
-    .then((r) => {
-      if (!r.ok) throw new Error("Could not load app settings.");
-      return r.json() as Promise<Config>;
-    })
-    .catch((e) => {
-      configPromise = undefined;
-      throw e;
-    }));
+
+export function loadSession() {
+  return browserSessionRepository.load();
 }
-// Share concurrent initialization so two mounted views cannot create two guests.
-let sessionInFlight: ReturnType<typeof resolveSession> | undefined;
-function session() {
-  return (sessionInFlight ??= resolveSession().finally(() => {
-    sessionInFlight = undefined;
-  }));
+
+export function saveSession(value: RealSession) {
+  return browserSessionRepository.save(value);
 }
-async function resolveSession() {
-  const config = await getConfig();
-  if (!config.supabaseUrl && !config.supabaseKey) return null;
-  if (!config.supabaseUrl || !config.supabaseKey)
-    throw new Error("Cloud storage is not fully configured.");
-  client ??= createClient(config.supabaseUrl, config.supabaseKey);
-  const {
-    data: { session },
-  } = await client.auth.getSession();
-  if (session)
-    return { client, userId: session.user.id, token: session.access_token };
-  const { data, error } = await client.auth.signInAnonymously();
-  if (error || !data.session)
-    throw new Error(
-      "Could not start a private guest session. Please try again.",
-    );
-  return {
-    client,
-    userId: data.session.user.id,
-    token: data.session.access_token,
-  };
+
+export function updateSession(patch: Partial<RealSession>) {
+  return saveSession({ ...loadSession(), ...patch });
 }
+
+export function saveFlowDraft(
+  rawInput: string,
+  parsedInput: ParsedUserInput | null,
+  flowStage: FlowStage,
+) {
+  return updateSession({ rawInput, parsedInput, flowStage });
+}
+
+export function savePendingPlan(
+  pendingPlan: PendingPlan,
+  lastDisruption: ReplanningRequest,
+) {
+  return updateSession({
+    pendingPlan,
+    lastDisruption,
+    flowStage: "PLAN_READY",
+  });
+}
+
+export function clearPendingPlan(flowStage?: FlowStage) {
+  const session = loadSession();
+  return saveSession({
+    ...session,
+    pendingPlan: null,
+    flowStage:
+      flowStage ??
+      (session.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY"),
+  });
+}
+
 export function localTrip(): Snapshot {
-  const raw = localStorage.getItem("travel-snapshot");
-  return raw ? SnapshotSchema.parse(JSON.parse(raw)) : structuredClone(demo);
+  return loadSession().snapshot;
 }
 export async function loadTrip() {
-  const auth = await session();
-  if (!auth) return localTrip();
-  const { data, error } = await auth.client
-    .from("travel_snapshots")
-    .select("snapshot")
-    .eq("user_id", auth.userId)
-    .maybeSingle();
-  if (error) throw new Error("Could not load your saved trip. Please retry.");
-  const snapshot = data ? SnapshotSchema.parse(data.snapshot) : localTrip();
-  if (data) localStorage.setItem("travel-snapshot", JSON.stringify(snapshot));
-  return snapshot;
+  return localTrip();
 }
 export async function saveTrip(value: Snapshot, expectedRevision?: number) {
-  const snapshot = SnapshotSchema.parse(value);
-  const auth = await session();
-  if (auth) {
-    // Database RPC uses a row lock and revision comparison to prevent stale acceptance.
-    const { error } = await auth.client.rpc("save_travel_snapshot", {
-      new_snapshot: snapshot,
-      expected_revision: expectedRevision ?? null,
-    });
-    if (error)
-      throw new Error(
-        error.message.includes("stale")
-          ? "Your trip changed in another tab. Reload before saving."
-          : "Cloud save failed. Your existing trip has been kept; please retry.",
-      );
-  } else if (
+  const snapshot = SnapshotSchema.parse({ ...value, mode: "user" });
+  const session = loadSession();
+  if (
     expectedRevision !== undefined &&
-    localTrip().revision !== expectedRevision
+    session.snapshot.revision !== expectedRevision
   )
-    throw new Error("Your trip changed in another tab. Reload before saving.");
-  localStorage.setItem("travel-snapshot", JSON.stringify(snapshot));
+    throw new Error("另一个标签页修改了你的行程，请刷新后再保存。");
+  saveSession({
+    ...session,
+    snapshot: { ...snapshot, mode: "user" },
+    flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+  });
   return snapshot;
 }
 export async function requestHeaders() {
-  const auth = await session();
-  return {
-    "Content-Type": "application/json",
-    ...(auth ? { Authorization: `Bearer ${auth.token}` } : {}),
-  };
+  return { "Content-Type": "application/json" };
 }
 export type AnalyticsName =
   | "trip_created"
@@ -114,7 +174,7 @@ export type AnalyticsEvent = {
 export async function logEvent(
   name: AnalyticsName,
   properties: Record<string, unknown> = {},
-  id = crypto.randomUUID(),
+  id: string = crypto.randomUUID(),
 ) {
   const item: AnalyticsEvent = {
     id,
@@ -132,16 +192,6 @@ export async function logEvent(
         "travel-analytics",
         JSON.stringify(list.slice(-1000)),
       );
-    }
-    const auth = await session();
-    if (auth) {
-      const { error } = await auth.client
-        .from("travel_analytics")
-        .upsert(
-          { ...item, user_id: auth.userId },
-          { onConflict: "id", ignoreDuplicates: true },
-        );
-      if (error) return false;
     }
     return true;
   } catch {

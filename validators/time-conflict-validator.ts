@@ -13,7 +13,7 @@ export function timeConflictValidator(
         errors.push({
           code: "time_conflict",
           eventId: sorted[j].id,
-          message: `${sorted[i].name} overlaps ${sorted[j].name}.`,
+          message: `${sorted[i].name} 与 ${sorted[j].name} 时间重叠。`,
         });
   return errors;
 }

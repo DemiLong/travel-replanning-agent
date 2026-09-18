@@ -9,6 +9,24 @@ export function travelTimeValidator(
     previousLocation = c.state.currentLocation,
     previousPlace = "";
   const errors: Violation[] = [];
+  if (c.world) {
+    let from="current";
+    for(const e of [...p.events].sort((a,b)=>a.startTime.localeCompare(b.startTime))){
+      const mode=e.travelMode??c.world.travelMode;
+      const route=c.world.routes.find(r=>r.origin.id===from&&r.destination.id===e.placeId&&r.travelMode===mode&&r.status==="available");
+      const allowed=c.disruption.worldOptions?.allowedTravelModes;
+      if(mode&&allowed&&!allowed.includes(mode))errors.push({code:"travel_time",eventId:e.id,message:"交通方式违反用户明确限制。"});
+      if(from!==e.placeId && (!route || route.durationSeconds===null || Date.now()-Date.parse(route.fetchedAt)>c.world.dataFreshness.routeMaxAgeSeconds*1000)) {
+        errors.push({code:"travel_time",eventId:e.id,message:`缺少抵达 ${e.name} 的新鲜高德路线，无法判断是否来得及。`});
+      }else{
+        const required=from===e.placeId?0:Math.ceil((route!.trafficDurationSeconds??route!.durationSeconds!)/60);
+        if(previousEnd+required>minutes(e.startTime))errors.push({code:"travel_time",eventId:e.id,message:`按高德路线需要 ${required} 分钟，无法在 ${e.startTime} 前到达 ${e.name}。`});
+        if(e.travelTimeFromPrevious!==required)errors.push({code:"travel_time",eventId:e.id,message:"展示的路程时间与高德数据不一致。"});
+      }
+      previousEnd=minutes(e.endTime);from=e.placeId;
+    }
+    return errors;
+  }
   for (const e of [...p.events].sort((a, b) =>
     a.startTime.localeCompare(b.startTime),
   )) {
@@ -22,7 +40,7 @@ export function travelTimeValidator(
       errors.push({
         code: "travel_time",
         eventId: e.id,
-        message: `Allow ${required} min from ${previousLocation} to ${place.district} before ${e.name}.`,
+        message: `在 ${e.name} 之前，请为从 ${previousLocation} 到 ${place.district} 预留 ${required} 分钟路程。`,
       });
     previousEnd = minutes(e.endTime);
     previousLocation = place.district;

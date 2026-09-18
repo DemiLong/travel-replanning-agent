@@ -18,6 +18,10 @@
     "lib/time.ts",
     "services/openai.ts",
     "services/place-service.ts",
+    "services/itinerary-parser.ts",
+    "services/rescue-intent.ts",
+    "services/input-parser.ts",
+    "services/trip-service.ts",
     "evals/**/*.ts"
   ],
   "exclude": ["node_modules"]

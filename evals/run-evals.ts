@@ -5,13 +5,13 @@ import { OpenAIPlanner } from "../services/openai";
 async function main() {
   const live = process.argv.includes("--live");
   const models = live
-    ? (process.env.EVAL_MODELS || process.env.OPENAI_MODEL || "")
+    ? (process.env.EVAL_MODELS || process.env.DEEPSEEK_MODEL || "")
         .split(",")
         .filter(Boolean)
     : ["demo"];
   if (!models.length)
     throw new Error(
-      "Set OPENAI_MODEL or EVAL_MODELS before running live evals.",
+      "Set DEEPSEEK_MODEL or EVAL_MODELS before running live evals.",
     );
   mkdirSync("outputs", { recursive: true });
   mkdirSync("data", { recursive: true });
