@@ -44,6 +44,7 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+/draft_8cf79000_folder/
 
 !.env.example
 *.tsbuildinfo
