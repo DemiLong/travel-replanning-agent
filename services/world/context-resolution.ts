@@ -2,6 +2,13 @@ import type { Snapshot } from "../../types";
 import type { BrowserLocation, TravelMode, WorldPoi } from "../../types/world";
 
 export const genericLocation = (text = "") => !text.trim() || /^(我|我们)?(的|住的|住在的)?(酒店|宾馆|美术馆|博物馆|景点|另一个景点|已预约景点|预约景点|晚餐|预约晚餐|餐厅|集合地点)(集合|参观)?$/.test(text.trim());
+export const broadHotelQuery = (text = "") => {
+  const value=text.trim();
+  if(!/(酒店|宾馆)$/.test(value))return false;
+  const brand=value.replace(/酒店|宾馆/g,"").trim();
+  return !brand || /^(全季|汉庭|如家|亚朵|维也纳|锦江|速8|七天)$/.test(brand);
+};
+export const normalizeCity = (city = "") => city.trim().replace(/市$/g, "");
 export function freshBrowserLocation(location?: BrowserLocation) {
   if (!location) return false;
   const age = Date.now() - Date.parse(location.capturedAt);
@@ -32,6 +39,21 @@ export function uniquePlace(candidates: WorldPoi[], query: string, city: string)
   const alias=pool.filter(p=>p.name.split(/[（）()]/).some(part=>normalize(part)===normalize(query)) && !/(地铁站|停车场|售票|航站楼|\d+口)/.test(p.name));
   if(alias.length===1)return alias[0];
   return pool.length===1 ? pool[0] : null;
+}
+
+export function selectCityEvidence(entries: Array<{field:string;query:string;poi:WorldPoi}>){
+  const grouped=new Map<string,Array<{field:string;query:string;poi:WorldPoi}>>();
+  for(const entry of entries){
+    const city=normalizeCity(entry.poi.city);
+    if(!city)continue;
+    const list=grouped.get(city)??[];list.push(entry);grouped.set(city,list);
+  }
+  const ranked=[...grouped.entries()].sort((a,b)=>b[1].length-a[1].length);
+  if(!ranked.length)return {city:null,evidence:[],competingCities:[] as string[]};
+  const [winner,winnerEntries]=ranked[0];
+  const tied=ranked.slice(1).some(([,items])=>items.length===winnerEntries.length);
+  if(tied || (ranked.length>1 && winnerEntries.length<2))return {city:null,evidence:[] as typeof winnerEntries,competingCities:ranked.map(([city])=>city)};
+  return {city:winnerEntries[0].poi.city,evidence:winnerEntries,competingCities:ranked.slice(1).map(([city])=>city)};
 }
 export function allowedModes(text: string, explicit?: TravelMode, retained?: TravelMode, constraints: string[] = []): TravelMode[] {
   const input = [text,...constraints].join("；");

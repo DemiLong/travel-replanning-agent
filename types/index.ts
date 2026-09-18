@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BrowserLocationSchema, WorldOptionsSchema, RealWorldContextSchema, type RealWorldContext } from "./world";
+import { BrowserLocationSchema, WorldOptionsSchema, RealWorldContextSchema, ResolutionEvidenceSchema, type RealWorldContext } from "./world";
 
 export const TimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 export const DateSchema = z
@@ -282,7 +282,7 @@ export const ParsedUserInputSchema = z.object({
   parseWarnings: z.array(z.string().max(300)).max(20).default([]),
   activityMentions: z.array(ActivityMentionSchema).max(30).default([]),
   question: z.string().max(500).nullable().optional(),
-  resolutionEvidence: z.array(z.object({field:z.string(),query:z.string(),reason:z.string(),poiId:z.string().optional()})).optional(),
+  resolutionEvidence: ResolutionEvidenceSchema.array().optional(),
   worldOptions: WorldOptionsSchema.optional(),
 });
 export const MissingFactSchema = z.object({

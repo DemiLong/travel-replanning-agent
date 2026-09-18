@@ -42,6 +42,23 @@ export const WorldOptionsSchema = z.object({
   selectedPois: z.record(z.string().min(1)),
 });
 export const MissingWorldFactSchema = z.object({kind:z.enum(["user","world"]),field:z.string(),message:z.string()});
+export const CitySourceSchema = z.enum(["current_location","place_evidence","trip_destination","none"]);
+export const ResolutionEvidenceSchema = z.object({
+  field:z.string(), query:z.string(), reason:z.string(), poiId:z.string().optional(),
+  lookupCity:z.string().optional(), citySource:CitySourceSchema.optional(),
+  conflict:z.boolean().optional(), evidenceFields:z.array(z.string()).optional(),
+});
+export const CityEvidenceSchema = z.object({
+  field:z.string().min(1), query:z.string().min(1), city:z.string().min(1), poiId:z.string().min(1),
+});
+export const CityConflictSchema = z.object({
+  source:z.enum(["trip_destination","place_evidence","current_location"]),
+  expected:z.string().min(1), actual:z.string().min(1), message:z.string().min(1),
+});
+export const CityResolutionSchema = z.object({
+  city:z.string().nullable(), source:CitySourceSchema,
+  evidence:z.array(CityEvidenceSchema), conflicts:z.array(CityConflictSchema),
+});
 export const RealWorldContextSchema = z.object({
   currentTime:z.object({value:z.string(),date:z.string(),source:z.enum(["user","system"]),confirmedAt:z.string().datetime()}),
   currentLocation:RouteEndpointSchema.extend({coordinateSystem:z.literal("GCJ02"),source:z.enum(["user","browser_geolocation"]),capturedAt:z.string(),accuracy:z.number().optional(),adcode:z.string()}).nullable(),
@@ -51,7 +68,8 @@ export const RealWorldContextSchema = z.object({
   missingWorldFacts:z.array(MissingWorldFactSchema),
   ambiguities:z.array(z.object({field:z.string(),label:z.string(),candidates:z.array(PoiSchema)})),
   travelMode:TravelModeSchema.nullable(),
-  resolutionEvidence:z.array(z.object({field:z.string(),query:z.string(),reason:z.string(),poiId:z.string().optional()})).optional(),
+  cityResolution:CityResolutionSchema.optional(),
+  resolutionEvidence:z.array(ResolutionEvidenceSchema).optional(),
   status:z.enum(["ready","needs_input","unavailable"]),
 });
 export type RealWorldContext = z.infer<typeof RealWorldContextSchema>;

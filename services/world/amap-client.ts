@@ -12,7 +12,8 @@ export function requireAmapKey() {
 const cache = new Map<string, { expires: number; value: Promise<Record<string, unknown>> }>();
 let nextRequestAt=0;
 export function clearWorldCache() { cache.clear(); }
-export async function amapGet(path: string, params: Record<string, string>, ttl = 300000): Promise<Record<string, unknown>> {
+export type AmapRequestOptions = { paced?: boolean };
+export async function amapGet(path: string, params: Record<string, string>, ttl = 300000, options: AmapRequestOptions = {}): Promise<Record<string, unknown>> {
   const key = requireAmapKey();
   const query = new URLSearchParams(params); query.sort();
   const cacheKey = createHash("sha256").update(key + path + query.toString()).digest("hex");
@@ -20,9 +21,11 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
   if (found && found.expires > Date.now()) return found.value;
   const promise = (async () => {
     try {
-      const wait=Math.max(0,nextRequestAt-Date.now());
-      nextRequestAt=Math.max(Date.now(),nextRequestAt)+400;
-      if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+      if(options.paced!==false){
+        const wait=Math.max(0,nextRequestAt-Date.now());
+        nextRequestAt=Math.max(Date.now(),nextRequestAt)+400;
+        if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+      }
       query.set("key", key); query.set("output", "JSON");
       const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal: AbortSignal.timeout(12000) });
       if (!response.ok) throw new Error("http");

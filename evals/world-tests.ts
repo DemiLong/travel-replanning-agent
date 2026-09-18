@@ -3,7 +3,7 @@ import { createStarterSnapshot } from "../data/demo";
 import { DeepSeekSemanticParser } from "../services/semantic-parser";
 import { normalizeSemanticExtraction } from "../services/semantic-parser";
 import { LocationService } from "../services/world/location-service";
-import type { SemanticExtraction } from "../types";
+import { EventSchema, type SemanticExtraction } from "../types";
 import { CoordinateService } from "../services/world/coordinate-service";
 import { AmapPlacesService } from "../services/world/amap-places-service";
 import { clearWorldCache } from "../services/world/amap-client";
@@ -33,6 +33,72 @@ export const regressionExtraction: SemanticExtraction = {
   question: "是否还应该去故宫，并能赶上后续安排？",
   ambiguities: ["你住哪家酒店？", "17 点预约的是哪个景点？", "每项活动预计停留多久？"],
 };
+
+const guangzhouInputs = [
+  "我早上 10 点要去华南师范大学石牌校区参观，但是现在已经 10 点半了。我现在在北京路的全季酒店，我下午3点和朋友约好了要到永庆坊，然后晚上吃完饭后去小蛮腰，我下午还能去学校参观吗?",
+  "我早上 10 点要去华南师范大学石牌校区参观，但是现在已经 10 点半了。我现在在全季酒店，我下午 3 点和朋友约好了要到永庆坊，然后晚上吃完饭后去小蛮腰，我下午还能去学校参观吗?",
+];
+const guangzhouEvent = (id:string,name:string,startTime:string,endTime:string,locked=false) => EventSchema.parse({id,placeId:id,name,category:"user activity",startTime,endTime,location:name,status:locked?"locked":"planned",locked,estimatedCost:0,estimatedCostKnown:false,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"用户原计划",constraint:locked?"固定约定":"原计划"});
+
+async function runGuangzhouCityEvidenceTests(){
+  const oldFetch=globalThis.fetch, oldKey=process.env.AMAP_API_KEY;
+  process.env.AMAP_API_KEY="test-guangzhou-city";
+  try{
+    for(const [index,text] of guangzhouInputs.entries()){
+      clearWorldCache();let active=0,maxActive=0;const queries:URL[]=[];
+      globalThis.fetch=async url=>{
+        const u=new URL(String(url));
+        if(u.pathname.includes("/place/text")){
+          active++;maxActive=Math.max(maxActive,active);queries.push(u);await new Promise(resolve=>setTimeout(resolve,0));active--;
+          const q=u.searchParams.get("keywords")??"";
+          const name=q.includes("小蛮腰")?"广州塔":q;
+          return Response.json({status:"1",pois:[{id:`gz-${q}`,name,location:"113.27,23.13",cityname:"广州市",adname:"越秀区",adcode:"440104",type:"景点"}]});
+        }
+        if(u.pathname.includes("/direction/"))return Response.json({status:"1",route:u.pathname.includes("transit")?{transits:[{distance:"5000",duration:"1200",cost:"4"}]}:{paths:[{distance:"5000",duration:"600"}]}});
+        throw new Error(`Unexpected test HTTP path: ${u.pathname}`);
+      };
+      const snapshot=createStarterSnapshot();
+      snapshot.trip.destination="北京";
+      snapshot.state.currentTime="10:30";
+      snapshot.state.currentLocation=index===0?"北京路的全季酒店":"全季酒店";
+      snapshot.stateSources.currentTime="user";
+      snapshot.stateSources.currentLocation="user";
+      snapshot.itinerary=[guangzhouEvent("school","华南师范大学石牌校区","10:00","12:00"),guangzhouEvent("yqf","永庆坊","15:00","17:00",true),guangzhouEvent("tower","小蛮腰","20:00","21:00")];
+      const world=await new WorldContextService().ground({snapshot,request:{reason:"late",freeText:text,currentState:snapshot.state,closedPlaceIds:[],variation:0,stateSources:snapshot.stateSources,worldOptions:{selectedPois:{},travelMode:"WALKING"}},mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()}});
+      assert.equal(world.status,"ready");
+      assert.equal(world.cityResolution?.city,"广州市");
+      assert.equal(world.cityResolution?.source,"current_location");
+      assert.equal(world.currentLocation?.city,"广州市");
+      assert(world.resolvedPlaces.every(({poi})=>poi.city!=="北京"&&poi.city!=="北京市"));
+      assert(world.resolutionEvidence?.some(item=>item.field==="city"&&item.citySource==="place_evidence"&&item.evidenceFields?.length));
+      assert(world.cityResolution?.conflicts.some(item=>item.source==="trip_destination"&&item.expected==="北京"&&item.actual==="广州市"));
+      assert(queries.some(query=>query.searchParams.get("keywords")?.includes("华南师范大学")&&!query.searchParams.has("city")));
+      assert(queries.some(query=>query.searchParams.get("keywords")==="永庆坊"&&!query.searchParams.has("city")));
+      assert(queries.some(query=>query.searchParams.get("keywords")?.includes("小蛮腰")&&!query.searchParams.has("city")));
+      if(index===0)assert(queries.some(query=>query.searchParams.get("keywords")?.includes("北京路")&&query.searchParams.get("city")==="广州市"));
+      if(index===1)assert(queries.some(query=>query.searchParams.get("keywords")==="全季酒店"&&query.searchParams.get("city")==="广州市"));
+      assert(maxActive>=2&&maxActive<=3,"city evidence queries must use controlled concurrency");
+      console.log(`PASS Guangzhou city evidence, conflict trace and bounded concurrency: ${index===0?"北京路版本":"无北京路版本"}`);
+    }
+
+    clearWorldCache();
+    globalThis.fetch=async url=>{
+      const u=new URL(String(url));
+      if(u.pathname.includes("/place/text"))throw new Error("generic hotel must not be searched without city evidence");
+      throw new Error(`Unexpected test HTTP path: ${u.pathname}`);
+    };
+    const noEvidence=createStarterSnapshot();
+    noEvidence.trip.destination="北京";noEvidence.state.currentTime="10:30";noEvidence.state.currentLocation="全季酒店";noEvidence.stateSources.currentTime="user";noEvidence.stateSources.currentLocation="user";
+    noEvidence.itinerary=[guangzhouEvent("dinner","晚餐","18:00","19:00")];
+    const unresolved=await new WorldContextService().ground({snapshot:noEvidence,request:{reason:"late",freeText:"我在全季酒店",currentState:noEvidence.state,closedPlaceIds:[],variation:0,stateSources:noEvidence.stateSources,worldOptions:{selectedPois:{},travelMode:"WALKING"}},mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()}});
+    assert.equal(unresolved.status,"needs_input");
+    assert(unresolved.missingWorldFacts.some(item=>item.kind==="user"&&item.field==="currentLocation"));
+    console.log("PASS generic hotel without city evidence asks for a branch instead of choosing Beijing");
+  }finally{
+    globalThis.fetch=oldFetch;clearWorldCache();
+    if(oldKey===undefined)delete process.env.AMAP_API_KEY;else process.env.AMAP_API_KEY=oldKey;
+  }
+}
 
 export async function runWorldTests() {
   const originalFetch = globalThis.fetch;
@@ -273,5 +339,6 @@ export async function runWorldTests() {
     if (readyAmapKey === undefined) delete process.env.AMAP_API_KEY; else process.env.AMAP_API_KEY = readyAmapKey;
   }
   console.log("PASS unified Agent Orchestrator completes mocked parse → impact → world → planner → validator with one candidate");
+  await runGuangzhouCityEvidenceTests();
   await runAssistResolutionTests();
 }

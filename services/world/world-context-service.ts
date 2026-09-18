@@ -5,7 +5,16 @@ import { AmapRoutesService, MAX_ROUTE_PAIRS } from "./amap-routes-service";
 import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
 import { requireAmapKey, WorldServiceError } from "./amap-client";
-import { freshBrowserLocation, genericLocation, locationQuery, uniquePlace, allowedModes } from "./context-resolution";
+import { broadHotelQuery, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes } from "./context-resolution";
+
+const CITY_EVIDENCE_CONCURRENCY=3;
+async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promise<R>):Promise<R[]>{
+  const output=new Array<R>(items.length);let next=0;
+  await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{
+    while(true){const index=next++;if(index>=items.length)return;output[index]=await worker(items[index]);}
+  }));
+  return output;
+}
 
 export function validateRealInput(raw: unknown) {
   const input = ReplanInputSchema.parse(raw);
@@ -27,55 +36,118 @@ export class WorldContextService {
     requireAmapKey();
     const {snapshot,request}=input, state=request.currentState, options=request.worldOptions;
     const now=new Date().toISOString();
-    const result:RealWorldContext={currentTime:{value:state.currentTime,date:state.currentDate,source:(request.stateSources??snapshot.stateSources).currentTime==="user"?"user":"system",confirmedAt:input.confirmation!.confirmedAt},currentLocation:null,resolvedPlaces:[],alternatives:[],routes:[],weather:emptyWeather("not_requested"),dataFreshness:{groundedAt:now,routeMaxAgeSeconds:120,locationMaxAgeSeconds:600},missingWorldFacts:[],ambiguities:[],travelMode:options?.travelMode??null,status:"needs_input"};
+    const result:RealWorldContext={currentTime:{value:state.currentTime,date:state.currentDate,source:(request.stateSources??snapshot.stateSources).currentTime==="user"?"user":"system",confirmedAt:input.confirmation!.confirmedAt},currentLocation:null,resolvedPlaces:[],alternatives:[],routes:[],weather:emptyWeather("not_requested"),dataFreshness:{groundedAt:now,routeMaxAgeSeconds:120,locationMaxAgeSeconds:600},missingWorldFacts:[],ambiguities:[],travelMode:options?.travelMode??null,cityResolution:{city:null,source:"none",evidence:[],conflicts:[]},status:"needs_input"};
     result.resolutionEvidence=[];
-    let city=snapshot.trip.destination==="待确认城市"?"":snapshot.trip.destination;
+    const tripCity=snapshot.trip.destination==="待确认城市"?"":snapshot.trip.destination;
+    let city="";
+    let citySource:"current_location"|"place_evidence"|"trip_destination"|"none"="none";
     const userModes=allowedModes(request.freeText,options?.travelMode,undefined,[...snapshot.profile.preferences,...snapshot.profile.dislikes]);
     const modes=userModes.filter(m=>!options?.allowedTravelModes||options.allowedTravelModes.includes(m));
     const missing=(kind:"user"|"world",field:string,message:string)=>result.missingWorldFacts.push({kind,field,message});
-    const resolve=async (field:string,query:string):Promise<WorldPoi|null>=>{
+    const events=snapshot.itinerary.filter(e=>e.status!=="completed");
+    const preResolved=new Map<string,WorldPoi>();
+    const cityAnchors=[...new Map(events.map(event=>{
+      const inferred=locationQuery(event.location.trim()||event.name,request.freeText,snapshot);
+      return [inferred.query,{field:event.placeId,query:inferred.query}] as const;
+    })).values()].filter(anchor=>anchor.query.trim()&&!genericLocation(anchor.query)&&!broadHotelQuery(anchor.query));
+    const cityResults=await mapConcurrent(cityAnchors,CITY_EVIDENCE_CONCURRENCY,async anchor=>{
+      try{
+        const selected=options?.selectedPois[anchor.field];
+        if(selected){
+          const poi=await this.places.detail(selected);
+          return poi?{...anchor,evidencePoi:poi,resolvedPoi:poi}:null;
+        }
+        const response=await this.places.searchUnbounded(anchor.query);
+        const resolvedPoi=uniquePlace(response.candidates,anchor.query,"");
+        const candidateCities=[...new Set(response.candidates.map(p=>normalizeCity(p.city)).filter(Boolean))];
+        const evidencePoi=resolvedPoi??(candidateCities.length===1?response.candidates[0]:null);
+        return evidencePoi?{...anchor,evidencePoi,resolvedPoi}:null;
+      }catch(error){
+        if(error instanceof WorldServiceError&&error.code==="AMAP_NOT_CONFIGURED")throw error;
+        return null;
+      }
+    });
+    const cityEvidenceEntries=cityResults.filter((item):item is {field:string;query:string;evidencePoi:WorldPoi;resolvedPoi:WorldPoi|null}=>Boolean(item&&item.evidencePoi)).map(item=>({field:item.field,query:item.query,poi:item.evidencePoi}));
+    for(const item of cityResults){
+      if(item?.resolvedPoi)preResolved.set(item.field,item.resolvedPoi);
+    }
+    const selectedCity=selectCityEvidence(cityEvidenceEntries);
+    if(selectedCity.city){
+      city=selectedCity.city;citySource="place_evidence";
+      result.cityResolution={city,source:citySource,evidence:selectedCity.evidence.map(item=>({field:item.field,query:item.query,city:item.poi.city,poiId:item.poi.poiId})),conflicts:[]};
+      for(const item of selectedCity.evidence)result.resolutionEvidence!.push({field:"city",query:item.query,reason:"明确行程地点的高德结果提供城市证据。",poiId:item.poi.poiId,lookupCity:"",citySource:"place_evidence",evidenceFields:[item.field]});
+      if(tripCity&&normalizeCity(tripCity)!==normalizeCity(city))result.cityResolution.conflicts.push({source:"trip_destination",expected:tripCity,actual:city,message:`Session 城市“${tripCity}”与明确地点证据“${city}”不一致，优先使用地点证据。`});
+    }else if(selectedCity.competingCities.length){
+      result.cityResolution={city:null,source:"none",evidence:[],conflicts:[{source:"place_evidence",expected:selectedCity.competingCities[0],actual:selectedCity.competingCities[1]??selectedCity.competingCities[0],message:"明确地点对应多个城市，无法安全确定行程城市。"}]};
+    }else if(tripCity){
+      city=tripCity;citySource="trip_destination";result.cityResolution={city,source:citySource,evidence:[],conflicts:[]};
+    }
+    const resolve=async (field:string,query:string,lookupCity?:string,traceSource?:typeof citySource):Promise<WorldPoi|null>=>{
       const inferred=locationQuery(query,request.freeText,snapshot);
       query=inferred.query;
-      result.resolutionEvidence!.push({field,query,reason:inferred.reason});
+      const searchCity=lookupCity??city;
+      result.resolutionEvidence!.push({field,query,reason:inferred.reason,lookupCity:searchCity,citySource:traceSource??citySource});
       if (!query.trim()) {missing("user",field,"你现在在哪里？告诉我地点名称即可。");return null;}
       try {
+        const cached=preResolved.get(field);
+        if(cached){
+          result.resolutionEvidence!.push({field,query,reason:"复用城市证据阶段已确认的高德地点。",poiId:cached.poiId,lookupCity:searchCity,citySource:traceSource??citySource});
+          return cached;
+        }
         const selected=options?.selectedPois[field];
         if (selected) {
           const match=await this.places.detail(selected);
-          if(match) {result.resolutionEvidence!.push({field,query,reason:"复核此前已解析或用户选择的高德地点；保留原始解析依据。",poiId:match.poiId});return match;}
+          if(match) {result.resolutionEvidence!.push({field,query,reason:"复核此前已解析或用户选择的高德地点；保留原始解析依据。",poiId:match.poiId,lookupCity:searchCity,citySource:traceSource??citySource});return match;}
           missing("world",field,"此前选择的地点暂时无法从高德复核。");return null;
         }
         // An unknown booked restaurant cannot be discovered by searching nearby restaurants.
         if (/^(预约)?晚餐|^餐厅$/.test(query) || /^(我的|我们住的|住的)?(酒店|宾馆|预约景点|已预约景点|景点)(集合|参观)?$/.test(query)) {
           missing("user",field,`“${query}”具体在哪里？告诉我名称或定位即可。`);return null;
         }
-        const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":city);
-        const match=uniquePlace(response.candidates,query,city);
-        if(match) {result.resolutionEvidence!.push({field,query,reason:"高德查询结合名称、场景及城市得到唯一匹配。",poiId:match.poiId});return match;}
+        if(broadHotelQuery(query)&&!searchCity){
+          missing("user",field,`“${query}”可能对应多个分店，请补充所在城市、道路或具体分店。`);return null;
+        }
+        const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity);
+        const match=uniquePlace(response.candidates,query,searchCity);
+        if(match) {result.resolutionEvidence!.push({field,query,reason:"高德查询结合名称、场景及城市得到唯一匹配。",poiId:match.poiId,lookupCity:searchCity,citySource:traceSource??citySource});return match;}
         if(response.candidates.length) result.ambiguities.push({field,label:query,candidates:response.candidates});
         else missing("world",field,`高德没有找到“${query}”的有效地点；未使用本地目录替代。`);
       }catch(error){if(error instanceof WorldServiceError && error.code==="AMAP_NOT_CONFIGURED")throw error;missing("world",field,`“${query}”的高德地点数据暂不可用。`);}
       return null;
     };
-    // An explicit text location always wins over browser coordinates.
+    // An explicit text location always wins over browser coordinates. Explicit
+    // text is first validated without the saved city; broad hotel brands may
+    // use a verified place-evidence city, but never a stale trip city.
     const currentQuery=locationQuery(state.currentLocation,request.freeText,snapshot).query;
+    const currentLookupCity=citySource==="place_evidence"&&/(酒店|宾馆)/.test(currentQuery)?city:"";
     if(currentQuery.trim() && currentQuery!=="浏览器定位" && !(genericLocation(currentQuery)&&freshBrowserLocation(state.browserLocation))) {
-      const poi=await resolve("currentLocation",state.currentLocation);
-      if(poi){result.currentLocation={...poi,id:"current",source:"user",capturedAt:input.confirmation!.confirmedAt,adcode:poi.adcode};city=poi.city;}
+      const poi=await resolve("currentLocation",state.currentLocation,currentLookupCity,"current_location");
+      if(poi){
+        const previousCity=city;
+        result.currentLocation={...poi,id:"current",source:"user",capturedAt:input.confirmation!.confirmedAt,adcode:poi.adcode};
+        if(previousCity&&normalizeCity(previousCity)!==normalizeCity(poi.city))result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:poi.city,message:`当前位置城市“${poi.city}”与既有城市证据“${previousCity}”不一致，优先使用当前位置。`});
+        city=poi.city;citySource="current_location";result.cityResolution={...(result.cityResolution??{city:null,source:"none",evidence:[],conflicts:[]}),city,source:citySource};
+      }
     } else if(state.browserLocation) {
       const age=Date.now()-Date.parse(state.browserLocation.capturedAt);
       if(age>600000 || age< -60000 || state.browserLocation.accuracy>1000) missing("user","currentLocation","浏览器位置已过期或精度不足，请重新定位或填写当前位置。");
       else try {
         const coordinate=await this.coordinates.toGCJ02(state.browserLocation);
         const address=await this.places.reverse(coordinate);
-        result.currentLocation={...coordinate,id:"current",city:address.city,adcode:address.adcode,source:"browser_geolocation",capturedAt:state.browserLocation.capturedAt,accuracy:state.browserLocation.accuracy};city=address.city;
+        const previousCity=city;
+        result.currentLocation={...coordinate,id:"current",city:address.city,adcode:address.adcode,source:"browser_geolocation",capturedAt:state.browserLocation.capturedAt,accuracy:state.browserLocation.accuracy};
+        if(previousCity&&normalizeCity(previousCity)!==normalizeCity(address.city))result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:address.city,message:`浏览器定位城市“${address.city}”与既有城市证据“${previousCity}”不一致，优先使用当前位置。`});
+        city=address.city;citySource="current_location";result.cityResolution={...(result.cityResolution??{city:null,source:"none",evidence:[],conflicts:[]}),city,source:citySource};
       }catch{missing("world","currentLocation","高德坐标转换或逆地理编码不可用。");}
     }else missing("user","currentLocation","请允许浏览器定位，或填写当前位置。");
     if(!modes.length)missing("user","travelMode","已有交通限制互相冲突，这次有哪些出行方式可以使用？");
-    const events=snapshot.itinerary.filter(e=>e.status!=="completed");
+    if(selectedCity.competingCities.length&&!result.currentLocation)missing("user","destination",`明确地点对应多个城市（${selectedCity.competingCities.join("、")}），请确认这次行程所在城市。`);
     for(const event of events){
       if(result.resolvedPlaces.some(p=>p.placeId===event.placeId))continue;
-      const poi=await resolve(event.placeId,event.location.trim()||event.name);
+      const rawQuery=event.location.trim()||event.name;
+      const inferred=locationQuery(rawQuery,request.freeText,snapshot);
+      const eventLookupCity=broadHotelQuery(inferred.query)&&citySource==="trip_destination"?"":city;
+      const poi=await resolve(event.placeId,rawQuery,eventLookupCity,citySource);
       if(poi)result.resolvedPlaces.push({placeId:event.placeId,poi});
     }
     const needsWeather=request.reason==="weather" || state.weather!==undefined || /天气|下雨|高温|暴雨|暴晒/.test(request.freeText);

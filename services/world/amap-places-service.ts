@@ -17,6 +17,9 @@ export class AmapPlacesService {
     const knownCity = city.trim() && city !== "待确认城市";
     return this.normalize(await amapGet("/v3/place/text", { keywords, ...(knownCity ? {city, citylimit:"true"} : {}), offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }));
   }
+  async searchUnbounded(keywords: string): Promise<PlaceResolution> {
+    return this.normalize(await amapGet("/v3/place/text", { keywords, offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }, 300000, {paced:false}));
+  }
   async around(keywords: string, location: Coordinate): Promise<PlaceResolution> {
     return this.normalize(await amapGet("/v3/place/around", { keywords, location: await this.coordinates.format(location), radius: "3000", offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }));
   }
