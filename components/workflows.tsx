@@ -15,11 +15,6 @@ import {
   Wallet,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { demo } from "@/data/demo";
-import {
-  thailandDestinationLabels,
-  thailandDestinations,
-} from "@/data/thailand";
 import { LocationService } from "@/services/world/location-service";
 import { RealWorldContextSchema, type RealWorldContext, type TravelMode } from "@/types/world";
 import { confirmParsedInput } from "@/services/input-parser";
@@ -70,26 +65,8 @@ const quickReasons: Array<{
   { label: "我还没有安排今天", text: "", create: true },
 ];
 
-const placeLabels: Record<string, string> = {
-  Siam: "暹罗",
-  "Old Town": "老城",
-  Riverside: "河畔",
-  Chinatown: "唐人街",
-  Sukhumvit: "素坤逸",
-  Silom: "是隆",
-  "Grand Palace": "大皇宫",
-  "Wat Arun": "郑王庙",
-  "Wat Pho": "卧佛寺",
-  ICONSIAM: "暹罗天地",
-  "Dinner Reservation": "晚餐预约",
-  "Siam lunch stop": "暹罗午餐",
-  "Hotel rest": "酒店休息",
-  "Siam unwind massage": "暹罗舒缓按摩",
-};
-
-const displayPlace = (value: string) => placeLabels[value] ?? value;
-const displayDestination = (value: string) =>
-  thailandDestinationLabels[value] ?? value;
+const displayPlace = (value: string) => value;
+const displayDestination = (value: string) => value;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请再试一次。";
 
@@ -333,9 +310,6 @@ export function HomeFlow() {
             <Link className="secondary" href="/onboarding">
               创建今天的行程
             </Link>
-            <Link className="text-button" href="/demo">
-              查看示例
-            </Link>
           </div>
         </div>
       </div>
@@ -432,7 +406,7 @@ export function HomeFlow() {
         <div className="field rescue-field">
           <label htmlFor="home-input">告诉我今天的安排和现在发生的变化</label>
           <small className="input-hint">
-            例如：10 点大皇宫，19 点已预订晚餐。现在下雨了，我在暹罗，希望保留晚餐。
+            例如：10 点去城市博物馆，19 点已预订晚餐。现在下雨了，我在城市中心，希望保留晚餐。
           </small>
           <textarea
             id="home-input"
@@ -477,9 +451,6 @@ export function HomeFlow() {
         <div className="form-actions home-secondary-actions">
           <Link className="secondary" href="/onboarding">
             创建今天的行程
-          </Link>
-          <Link className="text-button" href="/demo">
-            查看示例
           </Link>
         </div>
         <p className="small-note">
@@ -701,7 +672,7 @@ export function OnboardingFlow() {
                     },
                   })
                 }
-                placeholder="例如：暹罗、酒店或车站"
+                placeholder="例如：城市中心、酒店或车站"
               />
             </div>
           </div>
@@ -723,7 +694,7 @@ export function OnboardingFlow() {
                 setRaw(event.target.value);
                 persist(snapshot, event.target.value);
               }}
-              placeholder="10 点大皇宫，12:30 午餐，19 点已预订晚餐"
+              placeholder="10 点去城市博物馆，12:30 午餐，19 点已预订晚餐"
             />
           </div>
           <button
@@ -2123,72 +2094,12 @@ export function ResultFlow() {
   );
 }
 
-export function DemoFlow() {
-  const [accepted, setAccepted] = useState(false);
-  const [lighter, setLighter] = useState(false);
-  const proposal = demo.itinerary.filter(
-    (event) => event.id === "e-mall" || event.locked,
-  );
-  return (
-    <div className="workspace">
-      <div className="demo-note" role="status">
-        <b>示例模式</b>
-        <p>
-          下列内容只用于展示“下雨后如何调整今天的行程”，不会读取、覆盖或更新你的真实行程。
-        </p>
-      </div>
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">示例：曼谷雨天救援</span>
-          <h1>保留晚餐，把下午移到室内。</h1>
-          <p>15:00，暹罗，下雨且体力较低；19:00 晚餐保持不变。</p>
-        </div>
-      </div>
-      <div className="compare-grid">
-        <section className="card">
-          <h2>原计划</h2>
-          <Timeline
-            events={demo.itinerary.filter(
-              (event) => event.status !== "completed",
-            )}
-          />
-        </section>
-        <section className="card">
-          <h2>{lighter ? "更轻松的示例方案" : "示例调整方案"}</h2>
-          <Timeline
-            events={
-              lighter ? proposal.filter((event) => event.locked) : proposal
-            }
-          />
-        </section>
-      </div>
-      {accepted && (
-        <div className="success-box">
-          已在示例页面中接受。真实行程没有发生变化。
-        </div>
-      )}
-      <div className="form-actions">
-        <button className="primary" onClick={() => setAccepted(true)}>
-          接受示例方案
-        </button>
-        <button className="secondary" onClick={() => setLighter(true)}>
-          示例：少走一点路
-        </button>
-        <Link className="secondary" href="/">
-          开始使用我的真实行程
-        </Link>
-      </div>
-    </div>
-  );
-}
-
 export function SessionWorkflow({ page }: { page: string }) {
   if (page === "home") return <HomeFlow />;
   if (page === "onboarding") return <OnboardingFlow />;
   if (page === "trip") return <TripFlow />;
   if (page === "rescue") return <RescueFlow />;
   if (page === "result") return <ResultFlow />;
-  if (page === "demo") return <DemoFlow />;
   return <HomeFlow />;
 }
 

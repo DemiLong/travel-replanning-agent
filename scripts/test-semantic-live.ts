@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createStarterSnapshot } from "../data/demo";
+import { createStarterSnapshot } from "../data/session-defaults";
 import { OpenAISemanticParser } from "../services/semantic-parser";
 import { regressionText } from "../evals/world-tests";
 

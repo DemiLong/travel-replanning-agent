@@ -135,7 +135,7 @@ a svg {
   color: var(--primary);
   font-weight: 700;
 }
-.demo-label {
+.site-mode-label {
   font-size: 12px;
   border: 1px solid var(--line);
   border-radius: 30px;
@@ -570,17 +570,17 @@ a svg {
   color: var(--muted);
   margin-top: 5px;
 }
-.demo-note {
+.info-note {
   border-top: 1px solid var(--line);
   padding: 18px 5px;
   color: var(--muted);
 }
-.demo-note b {
+.info-note b {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
 }
-.demo-note p {
+.info-note p {
   font-size: 13px;
   margin-top: 5px;
 }
@@ -631,15 +631,6 @@ a svg {
   margin: 12px 0 0 20px;
 }
 
-.demo-mode .header,
-.demo-mode .demo-note {
-  border-color: #d59a31;
-}
-
-.demo-mode .demo-label {
-  background: #fff1ca;
-  color: #6d4700;
-}
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1151,7 +1142,7 @@ a svg {
   .header nav a:last-child {
     display: none;
   }
-  .demo-label {
+  .site-mode-label {
     display: none;
   }
   .hero {
@@ -1246,10 +1237,10 @@ a svg {
     margin: 17px 0;
   }
   .reservation-note,
-  .demo-note {
+  .info-note {
     margin: 14px 0;
   }
-  .demo-note {
+  .info-note {
     padding: 10px 5px;
   }
   .event-title {

@@ -37,14 +37,6 @@ function aliases(name: string) {
   return [normalized, normalized.replace(/\bbooked\b/g, "").trim()];
 }
 
-const localizedPlaceAliases: Record<string, string[]> = {
-  "Grand Palace": ["大皇宫"],
-  "Wat Arun": ["郑王庙", "黎明寺"],
-  "Wat Pho": ["卧佛寺"],
-  ICONSIAM: ["暹罗天地"],
-  "Dinner Reservation": ["晚餐", "晚餐预约"],
-};
-
 export function parseItineraryText(
   text: string,
   destination: string,
@@ -79,7 +71,6 @@ export function parseItineraryText(
       const matchedPlace = places.find((place) => {
         const names = [
           ...aliases(place.name),
-          ...(localizedPlaceAliases[place.name] ?? []),
         ].map((value) => value.toLowerCase());
         return names.some(
           (alias) =>

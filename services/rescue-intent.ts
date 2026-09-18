@@ -55,20 +55,12 @@ export function inferRescueRequest(
   const places = [
     ...getPlaces(snapshot.trip.destination).map((place) => place.district),
     ...snapshot.itinerary.map((event) => event.location),
+    "城市中心",
+    "历史街区",
+    "河畔区域",
+    "测试区域",
   ];
-  const locationAliases: Record<string, string> = {
-    暹罗: "Siam",
-    老城: "Old Town",
-    河畔: "Riverside",
-    唐人街: "Chinatown",
-    素坤逸: "Sukhumvit",
-    是隆: "Silom",
-  };
-  const aliasedLocation = Object.entries(locationAliases).find(([alias]) =>
-    text.includes(alias),
-  )?.[1];
   const location =
-    aliasedLocation ??
     [...new Set(places)]
       .sort((a, b) => b.length - a.length)
       .find((candidate) => lower.includes(candidate.toLowerCase()));

@@ -10,7 +10,7 @@ import {
   type ReplanningRequest,
   type Snapshot,
 } from "../types";
-import { createStarterSnapshot } from "../data/demo";
+import { createStarterSnapshot } from "../data/session-defaults";
 export type TripMode = Snapshot["mode"];
 export const realSessionKey = "travel-session-real-v2";
 const legacySnapshotKey = "travel-snapshot-user";
@@ -43,8 +43,7 @@ function migrateLegacySession(): RealSession {
   if (candidate) {
     try {
       const parsed = SnapshotSchema.parse(JSON.parse(candidate));
-      const isDemo =
-        parsed.mode === "demo" || parsed.trip.id === "bangkok-demo";
+      const isDemo = parsed.mode === "demo";
       if (!isDemo) {
         const session = RealSessionSchema.parse({
           ...starterSession(),

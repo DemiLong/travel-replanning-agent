@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createStarterSnapshot } from "../data/demo";
+import { createStarterSnapshot } from "../data/session-defaults";
 import { DeepSeekSemanticParser } from "../services/semantic-parser";
 import { normalizeSemanticExtraction } from "../services/semantic-parser";
 import { LocationService } from "../services/world/location-service";
@@ -10,7 +10,7 @@ import { clearWorldCache } from "../services/world/amap-client";
 import { AmapRoutesService } from "../services/world/amap-routes-service";
 import { AmapWeatherService } from "../services/world/amap-weather-service";
 import { WorldContextService } from "../services/world/world-context-service";
-import { event } from "../data/demo";
+import { event } from "./test-helpers";
 import { buildRealContext } from "../agents/real-context-builder";
 import { CandidateSetSchema, DeepSeekPlanner, materializeCandidate, type PlanCandidate } from "../services/deepseek-planner";
 import { replanReal, MAX_REPLAN_ATTEMPTS } from "../agents/real-replanning-agent";
@@ -203,7 +203,7 @@ export async function runWorldTests() {
       return Response.json({status:"1",pois:[{id:"real-"+u.searchParams.get("keywords"),name:u.searchParams.get("keywords"),location:"116.4,39.9",cityname:"北京",adcode:"110101"}]});
     };
     const snapshot=createStarterSnapshot();snapshot.trip.destination="北京";
-    snapshot.itinerary=[{...event("palace","palace-event","12:00","13:00"),name:"故宫",location:"故宫",estimatedCostKnown:false}];
+    snapshot.itinerary=[{...event("museum","museum-event","12:00","13:00"),name:"城市博物馆",location:"历史街区",estimatedCostKnown:false}];
     const request={reason:"late",freeText:"我睡过头了",currentState:{...snapshot.state,currentTime:"11:46",currentLocation:"天安门"},closedPlaceIds:[],variation:0,worldOptions:{selectedPois:{},travelMode:"WALKING"}};
     const input={snapshot,request,mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()}};
     const grounded=await new WorldContextService().ground(input);
@@ -211,7 +211,7 @@ export async function runWorldTests() {
     assert.equal(grounded.weather.status,"not_requested");assert.equal(weatherCalls,0);
     assert.equal(grounded.routes[0].source,"amap");
     const ctx=buildRealContext(input,grounded);
-    const candidate:PlanCandidate={title:"保留故宫",tradeOff:"按真实路程出发，营业状态待核实",steps:[{eventId:"palace-event",poiId:null,durationMinutes:null,reason:"保留原活动"}],removed:[]};
+    const candidate:PlanCandidate={title:"保留城市博物馆",tradeOff:"按真实路程出发，营业状态待核实",steps:[{eventId:"museum-event",poiId:null,durationMinutes:null,reason:"保留原活动"}],removed:[]};
     const materialized=materializeCandidate(ctx,candidate);
     assert.equal(materialized.events[0].startTime,"12:00");
     assert.equal(materialized.events[0].travelTimeFromPrevious,3);
@@ -222,7 +222,7 @@ export async function runWorldTests() {
       assert.equal(String(url),"https://api.deepseek.com/responses");
       const body=JSON.parse(String(options?.body));assert(body.input[0].content.includes("distinct from the semantic parser"));
       assert(!body.input[1].content.includes("test-planner"));
-      return Response.json({id:"planner-test",object:"response",status:"completed",output:[{type:"message",role:"assistant",id:"msg",status:"completed",content:[{type:"output_text",text:JSON.stringify({candidates:[candidate,{...candidate,title:"取消故宫",steps:[],removed:[{eventId:"palace-event",reason:"早点休息"}]}]}),annotations:[]}]}]});
+      return Response.json({id:"planner-test",object:"response",status:"completed",output:[{type:"message",role:"assistant",id:"msg",status:"completed",content:[{type:"output_text",text:JSON.stringify({candidates:[candidate,{...candidate,title:"取消城市博物馆",steps:[],removed:[{eventId:"museum-event",reason:"早点休息"}]}]}),annotations:[]}]}]});
     };
     const candidates=await new DeepSeekPlanner().generateCandidates(ctx,[],0);assert.equal(candidates.length,2);
     assert.equal(CandidateSetSchema.parse({candidates:[candidate]}).candidates.length,1);
@@ -232,7 +232,7 @@ export async function runWorldTests() {
     assert.deepEqual(validatePlan(ctx,materialized),[]);
     const lockedInput=structuredClone(input);lockedInput.snapshot.itinerary[0].locked=true;lockedInput.snapshot.itinerary[0].status="locked";
     const lockedCtx=buildRealContext(lockedInput,grounded);
-    const removed={...candidate,steps:[],removed:[{eventId:"palace-event",reason:"移除"}]};
+      const removed={...candidate,steps:[],removed:[{eventId:"museum-event",reason:"移除"}]};
     assert(validatePlan(lockedCtx,materializeCandidate(lockedCtx,removed)).some(v=>v.code==="locked_event"));
     let attempts=0;
     const recovered=await replanReal(lockedInput,{name:"fixture-planner",generateCandidates:async (_c,feedback)=>{attempts++;if(attempts>1)assert(feedback.length);return attempts===1?[removed,removed]:[candidate,candidate];}},{ground:async()=>grounded});
@@ -270,7 +270,7 @@ export async function runWorldTests() {
   const impactSnapshot = createStarterSnapshot();
   impactSnapshot.state.currentTime = "13:00";
   impactSnapshot.itinerary = [
-    { ...event("palace", "done-event", "10:00", "12:00"), status: "completed" },
+    { ...event("museum", "done-event", "10:00", "12:00"), status: "completed" },
     { ...event("dinner", "fixed-event", "18:00", "19:00"), locked: true, status: "locked" },
   ];
   const impact = analyzeImpact(impactSnapshot, { reason: "weather", freeText: "现在下雨了", currentState: impactSnapshot.state, closedPlaceIds: [], variation: 0, stateSources: impactSnapshot.stateSources, worldOptions: { selectedPois: {}, travelMode: "WALKING" } });

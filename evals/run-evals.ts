@@ -1,6 +1,6 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { runEvals } from "./harness";
-import { DemoPlanner } from "../agents/demo-planner";
+import { DeterministicTestPlanner } from "./deterministic-planner";
 import { OpenAIPlanner } from "../services/openai";
 async function main() {
   const live = process.argv.includes("--live");
@@ -8,7 +8,7 @@ async function main() {
     ? (process.env.EVAL_MODELS || process.env.DEEPSEEK_MODEL || "")
         .split(",")
         .filter(Boolean)
-    : ["demo"];
+    : ["local"];
   if (!models.length)
     throw new Error(
       "Set DEEPSEEK_MODEL or EVAL_MODELS before running live evals.",
@@ -17,8 +17,8 @@ async function main() {
   mkdirSync("data", { recursive: true });
   for (const model of models) {
     const report = await runEvals(
-      live ? new OpenAIPlanner(model) : new DemoPlanner(),
-      live ? "live" : "demo",
+      live ? new OpenAIPlanner(model) : new DeterministicTestPlanner(),
+      live ? "live" : "local",
     );
     const suffix = model.replace(/[^a-zA-Z0-9_-]/g, "-");
     writeFileSync(

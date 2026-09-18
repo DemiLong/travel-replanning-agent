@@ -37,18 +37,8 @@ function addMinutes(value: string, amount: number) {
   return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
 }
 
-const locationAliases: Record<string, string> = {
-  暹罗: "Siam",
-  老城: "Old Town",
-  河畔: "Riverside",
-  唐人街: "Chinatown",
-  素坤逸: "Sukhumvit",
-  是隆: "Silom",
-  芭东: "Patong",
-};
-
 function canonicalLocation(value: string) {
-  return locationAliases[value.trim()] ?? value.trim();
+  return value.trim();
 }
 
 

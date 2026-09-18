@@ -1,13 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { Compass, Route } from "lucide-react";
+import { Route } from "lucide-react";
 import { SessionWorkflow } from "./workflows";
 
 export function TravelApp({ page }: { page: string }) {
-  const demoMode = page === "demo";
   return (
-    <div className={`site ${demoMode ? "demo-mode" : ""}`}>
+    <div className="site">
       <header className="header">
         <Link className="brand" href="/" aria-label="接住你 首页">
           <span className="brand-icon" aria-hidden="true">
@@ -30,10 +29,7 @@ export function TravelApp({ page }: { page: string }) {
             创建行程
           </Link>
         </nav>
-        <span className="demo-label">
-          <Compass size={14} aria-hidden="true" />
-          {demoMode ? "示例模式" : "真实行程 · 本地保存"}
-        </span>
+        <span className="site-mode-label">真实行程 · 本地保存</span>
       </header>
       <main>
         <SessionWorkflow page={page} />
@@ -43,7 +39,7 @@ export function TravelApp({ page }: { page: string }) {
           dayshift <span> / </span> 今日行程救援助手
         </span>
         <span>
-          {demoMode ? "示例不会影响真实行程。" : "为旅途中的意外而生。"}
+          为旅途中的意外而生。
         </span>
       </footer>
     </div>

@@ -6,7 +6,7 @@ const compile=spawnSync(process.execPath,["node_modules/typescript/bin/tsc","-p"
 if(compile.status!==0)process.exit(compile.status??1);
 mkdirSync("work/eval-build",{recursive:true});writeFileSync("work/eval-build/package.json",'{"type":"commonjs"}');
 const require=createRequire(import.meta.url);
-const {createStarterSnapshot}=require("../work/eval-build/data/demo.js");
+const {createStarterSnapshot}=require("../work/eval-build/data/session-defaults.js");
 const {regressionText}=require("../work/eval-build/evals/world-tests.js");
 const {DeepSeekSemanticParser}=require("../work/eval-build/services/semantic-parser.js");
 const {WorldContextService}=require("../work/eval-build/services/world/world-context-service.js");
@@ -32,7 +32,7 @@ try{
   if(!process.argv.includes("--semantic-only")){
     const places=new AmapPlacesService(),selectedPois={};
     // Explicit TEST answers only. These are not inferred answers to the user's unknown hotel/booking.
-    const venues=[{id:"palace",name:"故宫博物院",start:"10:00",end:"12:00",locked:false},{id:"hotel",name:"北京饭店",start:"15:00",end:"15:15",locked:true},{id:"booking",name:"天坛公园",start:"17:00",end:"18:00",locked:true}];
+    const venues=[{id:"museum",name:"故宫博物院",start:"10:00",end:"12:00",locked:false},{id:"hotel",name:"北京饭店",start:"15:00",end:"15:15",locked:true},{id:"booking",name:"天坛公园",start:"17:00",end:"18:00",locked:true}];
     const locate=async(field,name)=>{const response=await places.search(name,"北京");const match=response.candidates.find(p=>p.name===name);assert(match,`TEST venue ${name} requires a matching returned POI`);selectedPois[field]=match.poiId;return match;};
     const origin=await locate("currentLocation","天安门广场");
     for(const v of venues){await locate(v.id,v.name);snapshot.itinerary.push({id:v.id,placeId:v.id,name:v.name,category:"user activity",startTime:v.start,endTime:v.end,location:v.name,status:v.locked?"locked":"planned",locked:v.locked,estimatedCost:0,estimatedCostKnown:false,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"测试中明确补充并确认",constraint:v.locked?"固定预约":"原安排"});}

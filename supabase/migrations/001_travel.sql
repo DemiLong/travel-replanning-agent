@@ -38,7 +38,7 @@ end; $$;
 revoke all on function public.save_travel_snapshot(jsonb,integer) from public;
 grant execute on function public.save_travel_snapshot(jsonb,integer) to authenticated;
 
--- Portfolio query: deduplicated plan-level acceptance (filter mode for live/demo).
+-- Portfolio query: deduplicated plan-level acceptance (filter mode for live/local).
 create view public.travel_metrics with (security_invoker=true) as
 select user_id,
  count(distinct properties->>'planId') filter(where name='replan_accepted')::float /

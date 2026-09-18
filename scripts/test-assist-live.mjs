@@ -8,7 +8,7 @@ const compile=spawnSync(process.execPath,["node_modules/typescript/bin/tsc","-p"
 if(compile.status!==0)process.exit(compile.status??1);
 mkdirSync("work/eval-build",{recursive:true});writeFileSync("work/eval-build/package.json",'{"type":"commonjs"}');
 const require=createRequire(import.meta.url);
-const {createStarterSnapshot}=require("../work/eval-build/data/demo.js");
+const {createStarterSnapshot}=require("../work/eval-build/data/session-defaults.js");
 const {EventSchema}=require("../work/eval-build/types/index.js");
 const {runAgentAssist}=require("../work/eval-build/agents/agent-orchestrator.js");
 const {validatePlan}=require("../work/eval-build/validators/index.js");

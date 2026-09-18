@@ -2,7 +2,7 @@ import { cases, violationCodes } from "./cases";
 import { replan } from "../agents/replanning-agent";
 import { validatePlan } from "../validators";
 import type { Planner } from "../services/openai";
-export async function runEvals(planner: Planner, mode: "demo" | "live") {
+export async function runEvals(planner: Planner, mode: "local" | "live") {
   const results = [];
   for (const c of cases) {
     const started = Date.now();

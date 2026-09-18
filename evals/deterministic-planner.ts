@@ -1,9 +1,12 @@
-import type { AgentContext, ProposedPlan, ItineraryEvent } from "../types";
+import type { AgentContext, ItineraryEvent, ProposedPlan } from "../types";
 import type { Planner } from "../services/openai";
 import { minutes, time } from "../lib/time";
 import { travelMinutes } from "../services/place-service";
-export class DemoPlanner implements Planner {
-  name = "deterministic-local-v1";
+
+/** Deterministic planner used by offline validator/evaluation tests only. */
+export class DeterministicTestPlanner implements Planner {
+  name = "deterministic-test-v1";
+
   async generate(c: AgentContext): Promise<ProposedPlan> {
     const events: ItineraryEvent[] = [...c.lockedEvents.map((e) => ({ ...e }))];
     let cursor = minutes(c.state.currentTime),
@@ -11,10 +14,10 @@ export class DemoPlanner implements Planner {
       previousPlace = "";
     let budget =
       (c.state.remainingBudget ?? Number.POSITIVE_INFINITY) -
-      events.reduce((s, e) => s + e.estimatedCost, 0);
+      events.reduce((sum, event) => sum + event.estimatedCost, 0);
     const restful =
       c.state.energyLevel === "low" ||
-      c.profile.preferences.some((p) => /rest|休息/i.test(p));
+      c.profile.preferences.some((preference) => /rest|休息/i.test(preference));
     const adjustments = c.disruption.adjustments ?? [];
     const lessWalking = adjustments.includes("less_walking");
     const cheaper = adjustments.includes("cheaper");
@@ -27,37 +30,46 @@ export class DemoPlanner implements Planner {
           ? 3
           : 2;
     const candidates = c.places.filter(
-      (p) =>
-        !c.disruption.closedPlaceIds.includes(p.id) &&
-        !events.some((e) => e.placeId === p.id) &&
+      (place) =>
+        !c.disruption.closedPlaceIds.includes(place.id) &&
+        !events.some((event) => event.placeId === place.id) &&
         !c.existingItinerary.some(
-          (e) => e.placeId === p.id && e.status === "completed",
+          (event) => event.placeId === place.id && event.status === "completed",
         ),
     );
-    const score = (p: (typeof candidates)[number]) => {
-      let n = c.profile.interests.filter((i) => p.tags.includes(i)).length * 6;
-      if (restful && p.tags.includes("rest")) n += 18;
-      if (c.state.weather === "rain" && p.indoorOutdoor === "outdoor") n -= 80;
-      if (c.state.weather === "hot" && p.indoorOutdoor === "outdoor") n -= 30;
-      if (c.profile.walkingTolerance === "low" && p.indoorOutdoor === "outdoor")
-        n -= 12;
-      if (lessWalking && p.indoorOutdoor === "outdoor") n -= 45;
-      if (cheaper && p.estimatedCost > 350) n -= 25;
-      if (p.district === c.state.currentLocation) n += 7;
-      if (c.remainingEvents.some((e) => e.placeId === p.id))
-        n += keepStops || !restful ? 25 : 0;
+    const score = (place: (typeof candidates)[number]) => {
+      let value =
+        c.profile.interests.filter((interest) => place.tags.includes(interest))
+          .length * 6;
+      if (restful && place.tags.includes("rest")) value += 18;
+      if (c.state.weather === "rain" && place.indoorOutdoor === "outdoor")
+        value -= 80;
+      if (c.state.weather === "hot" && place.indoorOutdoor === "outdoor")
+        value -= 30;
       if (
-        c.profile.dislikes.some((d) =>
-          `${p.name} ${p.category} ${p.tags.join(" ")}`
+        c.profile.walkingTolerance === "low" &&
+        place.indoorOutdoor === "outdoor"
+      )
+        value -= 12;
+      if (lessWalking && place.indoorOutdoor === "outdoor") value -= 45;
+      if (cheaper && place.estimatedCost > 350) value -= 25;
+      if (place.district === c.state.currentLocation) value += 7;
+      if (c.remainingEvents.some((event) => event.placeId === place.id))
+        value += keepStops || !restful ? 25 : 0;
+      if (
+        c.profile.dislikes.some((dislike) =>
+          `${place.name} ${place.category} ${place.tags.join(" ")}`
             .toLowerCase()
-            .includes(d.toLowerCase()),
+            .includes(dislike.toLowerCase()),
         )
       )
-        n -= 100;
-      if (c.disruption.variation % 2 === 1 && p.category === "cafe") n += 22;
-      return n;
+        value -= 100;
+      if (c.disruption.variation % 2 === 1 && place.category === "cafe")
+        value += 22;
+      return value;
     };
     candidates.sort((a, b) => score(b) - score(a) || a.id.localeCompare(b.id));
+
     let added = 0;
     for (const place of candidates) {
       if (added >= maxStops || score(place) < 0 || place.estimatedCost > budget)
@@ -68,26 +80,25 @@ export class DemoPlanner implements Planner {
           : travelMinutes(district, place.district);
       let start = Math.max(cursor + transit, minutes(place.openingTime));
       const old = c.remainingEvents.find(
-        (e) => e.placeId === place.id && !e.locked,
+        (event) => event.placeId === place.id && !event.locked,
       );
-      if (old && minutes(old.startTime) >= start)
-        start = minutes(old.startTime);
+      if (old && minutes(old.startTime) >= start) start = minutes(old.startTime);
       const end = start + place.averageDuration;
       if (end > minutes(place.closingTime) || end > 23 * 60) continue;
       if (earlier && end > 18 * 60) continue;
       const conflicting = events.some(
-        (e) =>
+        (event) =>
           start <
-            minutes(e.endTime) + travelMinutes(e.location, place.district) &&
-          end + travelMinutes(place.district, e.location) >
-            minutes(e.startTime),
+            minutes(event.endTime) + travelMinutes(event.location, place.district) &&
+          end + travelMinutes(place.district, event.location) >
+            minutes(event.startTime),
       );
       if (conflicting) continue;
-      const why = place.tags.includes("rest")
-        ? "先好好歇一会儿，晚餐前把体力养回来。"
+      const reason = place.tags.includes("rest")
+        ? "先安排一段休息，给后续行程留出体力。"
         : c.state.weather === "rain"
-          ? "留在室内，选一处适合雨天、节奏更从容的安排。"
-          : "附近有一处符合你兴趣的去处，留出时间慢慢享受。";
+          ? "选择适合当前天气和节奏的室内安排。"
+          : "这是符合当前偏好的通用测试安排。";
       events.push({
         id: old?.id ?? `new-${place.id}`,
         placeId: place.id,
@@ -104,9 +115,7 @@ export class DemoPlanner implements Planner {
         closingTime: place.closingTime,
         travelTimeFromPrevious: transit,
         reason:
-          old && old.startTime === time(start)
-            ? "原定安排仍然合适，所以保留。"
-            : why,
+          old && old.startTime === time(start) ? "原定安排仍然合适，所以保留。" : reason,
         constraint: `${restful ? "体力较低 · " : ""}${c.state.weather === "rain" ? "下雨 · " : ""}路程约 ${transit} 分钟${c.state.remainingBudget === undefined ? "" : " · 剩余预算"}`,
       });
       cursor = end;
@@ -115,22 +124,26 @@ export class DemoPlanner implements Planner {
       budget -= place.estimatedCost;
       added++;
     }
+
     events.sort((a, b) => a.startTime.localeCompare(b.startTime));
-    let priorDistrict = c.state.currentLocation,
-      priorPlace = "";
-    for (const e of events) {
-      e.travelTimeFromPrevious =
-        priorPlace === e.placeId ? 0 : travelMinutes(priorDistrict, e.location);
-      priorDistrict = e.location;
-      priorPlace = e.placeId;
+    let priorDistrict = c.state.currentLocation;
+    let priorPlace = "";
+    for (const event of events) {
+      event.travelTimeFromPrevious =
+        priorPlace === event.placeId
+          ? 0
+          : travelMinutes(priorDistrict, event.location);
+      priorDistrict = event.location;
+      priorPlace = event.placeId;
     }
-    const movedEvents: ProposedPlan["movedEvents"] = [],
-      removedEvents: ProposedPlan["removedEvents"] = [];
+
+    const movedEvents: ProposedPlan["movedEvents"] = [];
+    const removedEvents: ProposedPlan["removedEvents"] = [];
     const tomorrow = new Date(`${c.state.currentDate}T00:00:00Z`);
     tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     const nextDate = tomorrow.toISOString().slice(0, 10);
     for (const old of c.remainingEvents.filter(
-      (e) => !events.some((n) => n.id === e.id),
+      (event) => !events.some((next) => next.id === event.id),
     )) {
       const change = {
         eventId: old.id,
@@ -139,12 +152,12 @@ export class DemoPlanner implements Planner {
           ? "你报告了这里已经关门。"
           : old.startTime < c.state.currentTime
             ? "原定时间已经过去，不必再赶回去。"
-            : "减少几项安排，给旅程留出呼吸空间，同时保留你的预约。",
+            : "减少几项安排，为行程留出余量。",
         constraint: c.disruption.closedPlaceIds.includes(old.placeId)
           ? "已报告关门"
           : old.startTime < c.state.currentTime
             ? "当前时间"
-            : "体力 · 路程 · 锁定晚餐",
+            : "体力 · 路程 · 锁定安排",
       };
       if (
         old.category === "temple" &&
@@ -155,19 +168,17 @@ export class DemoPlanner implements Planner {
           ...change,
           suggestedDate: nextDate,
           suggestedStart: "09:00",
-          note: "这只是暂定建议，请确认明日行程和营业时间；系统不会自动替你安排。",
+          note: "这只是暂定建议，请确认明日行程和营业时间。",
         });
       else removedEvents.push(change);
     }
+
     return {
-      summary: restful
-        ? "少一点奔波，多一点从容。"
-        : "留住值得的部分，为变化腾出位置。",
+      summary: restful ? "少一点奔波，多一点从容。" : "留住值得的部分，为变化腾出位置。",
       events,
       movedEvents,
       removedEvents,
-      explanation:
-        "接下来的行程已根据你当前的状态调整。路程和锁定预约会受到保护；移动建议只是暂定方案，并非预订。",
+      explanation: "测试规划已根据当前状态调整，并通过代码校验。",
     };
   }
 }

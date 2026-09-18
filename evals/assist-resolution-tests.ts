@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createStarterSnapshot } from "../data/demo";
+import { createStarterSnapshot } from "../data/session-defaults";
 import { EventSchema, type SemanticExtraction, type Snapshot } from "../types";
 import { runAgentAssist } from "../agents/agent-orchestrator";
 import { clearWorldCache } from "../services/world/amap-client";

@@ -1,4 +1,4 @@
-import { demo, event } from "../data/demo";
+import { createDeterministicTestSnapshot, event } from "./test-helpers";
 import type { Snapshot, ReplanningRequest, Violation } from "../types";
 export type EvalCase = {
   id: string;
@@ -16,7 +16,7 @@ export type EvalCase = {
 const states = ["15:00", "16:00", "17:00", "18:00", "18:30"];
 const budgets = [650, 800, 1000, 1750];
 export const cases: EvalCase[] = Array.from({ length: 32 }, (_, i) => {
-  const snapshot = structuredClone(demo);
+  const snapshot = createDeterministicTestSnapshot();
   snapshot.state.currentTime = states[i % 5];
   snapshot.state.weather = (["rain", "sunny", "hot"] as const)[i % 3];
   snapshot.state.energyLevel = (["low", "medium", "high"] as const)[

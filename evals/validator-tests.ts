@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { runWorldTests } from "./world-tests";
-import { createStarterSnapshot, demo, event } from "../data/demo";
+import { createStarterSnapshot } from "../data/session-defaults";
+import {
+  createDeterministicTestSnapshot,
+  createLegacyDemoSnapshot,
+  event,
+} from "./test-helpers";
 import { buildContext } from "../agents/context-builder";
-import { DemoPlanner } from "../agents/demo-planner";
+import { DeterministicTestPlanner } from "./deterministic-planner";
 import { replan } from "../agents/replanning-agent";
 import { validatePlan } from "../validators";
 import { parseItineraryText } from "../services/itinerary-parser";
@@ -19,19 +24,25 @@ import {
 import type { ProposedPlan, Violation } from "../types";
 async function main() {
   await runWorldTests();
+  const legacyDemo = createLegacyDemoSnapshot();
   const input = {
-    snapshot: structuredClone(demo),
-    mode: "demo" as const,
+    snapshot: createDeterministicTestSnapshot(),
+    mode: "local" as const,
     request: {
       reason: "tired",
       freeText: "rain",
-      currentState: demo.state,
+      currentState: createDeterministicTestSnapshot().state,
       closedPlaceIds: [],
       variation: 0,
     },
+    confirmation: {
+      status: "confirmed" as const,
+      confirmedAt: new Date().toISOString(),
+    },
   };
+  input.request.currentState = input.snapshot.state;
   const context = buildContext(input);
-  const good = await new DemoPlanner().generate(context);
+  const good = await new DeterministicTestPlanner().generate(context);
   assert.deepEqual(validatePlan(context, good), []);
   const tests: [string, Violation["code"], (p: ProposedPlan) => void][] = [
     [
@@ -81,7 +92,7 @@ async function main() {
       "opening_hours",
       (p) => {
         p.events.unshift(
-          event("national-museum", "late-museum", "16:00", "17:00"),
+          event("history-museum", "late-museum", "16:00", "17:00"),
         );
       },
     ],
@@ -89,7 +100,7 @@ async function main() {
       "over budget",
       "budget",
       (p) => {
-        p.events.push(event("sea-life", "expensive", "21:00", "22:00"));
+        p.events.push(event("nature-center", "expensive", "21:00", "22:00"));
       },
     ],
     [
@@ -160,7 +171,7 @@ async function main() {
       "historical output",
       "past_event",
       (p) => {
-        p.events.push(demo.itinerary[0]);
+        p.events.push(legacyDemo.itinerary[0]);
       },
     ],
   ];
@@ -190,7 +201,7 @@ async function main() {
         return good;
       },
     },
-    "demo",
+    "local",
   );
   assert(repaired.ok && calls === 2);
   calls = 0;
@@ -203,7 +214,7 @@ async function main() {
         return {};
       },
     },
-    "demo",
+    "local",
   );
   assert(!failed.ok && calls === 3 && failed.plan === null);
   calls = 0;
@@ -229,21 +240,21 @@ async function main() {
   );
   assert(!validatePlan(boundary, good).some((v) => v.code === "budget"));
   assert.throws(() => buildContext({}), /./);
-  const phuket = structuredClone(demo);
-  phuket.trip.destination = "Phuket";
-  phuket.state.currentLocation = "Patong";
+  const phuket = createDeterministicTestSnapshot();
+  phuket.trip.destination = "test-city";
+  phuket.state.currentLocation = "测试区域";
   phuket.itinerary = [
     {
       ...phuket.itinerary.find((item) => item.locked)!,
       id: "event-phuket-dinner",
       placeId: "custom-phuket-dinner",
-      name: "Phuket dinner reservation",
-      location: "Patong",
+      name: "测试城市晚餐预约",
+      location: "测试区域",
     },
   ];
   const phuketInput = {
     snapshot: phuket,
-    mode: "demo" as const,
+    mode: "local" as const,
     request: {
       reason: "late" as const,
       freeText: "My ferry arrived late.",
@@ -251,17 +262,21 @@ async function main() {
       closedPlaceIds: [],
       variation: 0,
     },
+    confirmation: {
+      status: "confirmed" as const,
+      confirmedAt: new Date().toISOString(),
+    },
   };
   const phuketContext = buildContext(phuketInput);
-  const phuketPlan = await new DemoPlanner().generate(phuketContext);
+  const phuketPlan = await new DeterministicTestPlanner().generate(phuketContext);
   assert.equal(validatePlan(phuketContext, phuketPlan).length, 0);
-  assert(phuketContext.places.some((place) => place.id === "phuket-rest"));
-  console.log("PASS Thailand destination with a user-entered fixed plan");
+  assert(phuketContext.places.some((place) => place.id === "test-city-rest"));
+  console.log("PASS generic destination with a user-entered fixed plan");
   const user = createStarterSnapshot();
   user.state = {
     ...user.state,
     currentTime: "11:00",
-    currentLocation: "Siam",
+    currentLocation: "城市中心",
   };
   user.stateSources = {
     currentTime: "user",
@@ -270,7 +285,7 @@ async function main() {
     energyLevel: "unset",
     disruption: "unset",
   };
-  user.itinerary = [event("iconsiam", "user-stop", "12:00", "13:00")];
+  user.itinerary = [event("shopping-center", "user-stop", "12:00", "13:00")];
   const closedOnly = {
     snapshot: user,
     mode: "local" as const,
@@ -295,11 +310,15 @@ async function main() {
   assert.equal(userContext.state.currentTime, "11:00");
   assert.equal(userContext.state.weather, undefined);
   assert.equal(userContext.state.energyLevel, undefined);
-  const userPlan = await new DemoPlanner().generate(userContext);
+  const userPlan = await new DeterministicTestPlanner().generate(userContext);
   assert(userPlan.events.length > 0);
   assert(userPlan.events.every((item) => item.startTime >= "11:00"));
   assert(userPlan.events.some((item) => item.startTime < "15:00"));
-  const traced = await replan(closedOnly, new DemoPlanner(), "local");
+  const traced = await replan(
+    closedOnly,
+    new DeterministicTestPlanner(),
+    "local",
+  );
   assert(traced.ok);
   assert(
     traced.decisionTrace?.inputFacts.some(
@@ -324,7 +343,7 @@ async function main() {
   unknownCostInput.request.currentState.remainingBudget = 1000;
   const unknownCostResult = await replan(
     unknownCostInput,
-    new DemoPlanner(),
+    new DeterministicTestPlanner(),
     "local",
   );
   assert.equal(
@@ -337,12 +356,12 @@ async function main() {
     "PASS user facts stay isolated from demo state and trace every plan",
   );
   const parsedItinerary = parseItineraryText(
-    "10:00 Grand Palace，12:30 lunch，19:00 booked dinner",
-    "Bangkok",
-    "Siam",
+    "10:00 城市博物馆，12:30 午餐，19:00 booked dinner",
+    "测试城市",
+    "城市中心",
   );
   assert.equal(parsedItinerary.length, 3);
-  assert.equal(parsedItinerary[0].name, "Grand Palace");
+  assert.equal(parsedItinerary[0].name, "城市博物馆");
   assert.equal(parsedItinerary[2].locked, true);
   console.log(
     "PASS natural-language itinerary parsing and locked reservation detection",
@@ -352,13 +371,13 @@ async function main() {
   mixedSnapshot.stateSources.currentTime = "system";
   const mixed = parseUnifiedInput(
     mixedSnapshot,
-    "10:00 Grand Palace，12:30 lunch，19:00 booked dinner。现在下雨了，我在暹罗，希望保留晚餐。",
+    "10:00 城市博物馆，12:30 午餐，19:00 booked dinner。现在下雨了，我在城市中心，希望保留晚餐。",
   );
   assert.equal(mixed.intent, "mixed");
   assert.equal(mixed.existingPlans.length, 3);
   assert(mixed.disruptions.some((item) => item.kind === "weather"));
   assert.equal(mixed.context.weather, "rain");
-  assert.equal(mixed.context.currentLocation, "Siam");
+  assert.equal(mixed.context.currentLocation, "城市中心");
   assert.equal(mixed.context.currentTime, "11:00");
   assert(mixed.existingPlans.some((item) => item.locked));
   assert(mixed.constraints.some((item) => item.kind === "keep"));
@@ -372,11 +391,11 @@ async function main() {
   assert.equal(disruptionOnly.context.weather, undefined);
   assert.equal(disruptionOnly.context.energyLevel, undefined);
   const planOnlyBase = createStarterSnapshot();
-  planOnlyBase.state.currentLocation = "Siam";
+  planOnlyBase.state.currentLocation = "城市中心";
   planOnlyBase.stateSources.currentLocation = "user";
   const planOnly = parseUnifiedInput(
     planOnlyBase,
-    "10:00 Grand Palace，12:30 lunch",
+    "10:00 城市博物馆，12:30 午餐",
   );
   assert.equal(planOnly.intent, "create");
   assert(planOnly.missingFacts.includes("disruptionOrOptimize"));
@@ -386,8 +405,8 @@ async function main() {
     "15:00 按摩，晚上预订了8点的游乐场，但是现在已经14点了，按摩需要1个小时，我还去吗？";
   const safeFallback = parseItineraryText(
     ambiguousSentence,
-    "Bangkok",
-    "Siam",
+    "测试城市",
+    "城市中心",
   );
   assert.equal(safeFallback.length, 0);
   const safeFallbackFacts = parseUnifiedInput(
@@ -474,7 +493,7 @@ async function main() {
   assert(SEMANTIC_PARSER_PROMPT.includes("nearest named activity"));
   const chineseContext = normalizeSemanticExtraction(
     createStarterSnapshot(),
-    "现在14点，我在暹罗，下雨了。",
+    "现在14点，我在城市中心，下雨了。",
     {
       intent: "rescue",
       activities: [],
@@ -484,7 +503,7 @@ async function main() {
       constraints: [],
       context: {
         currentTime: { value: "14:00", sourceText: "现在14点" },
-        currentLocation: { value: "暹罗", sourceText: "我在暹罗" },
+        currentLocation: { value: "城市中心", sourceText: "我在城市中心" },
         weather: { value: "rain", sourceText: "下雨了" },
         energyLevel: { value: null, sourceText: null },
         remainingBudget: { value: null, sourceText: null },
@@ -494,7 +513,7 @@ async function main() {
     },
     "fixture-model",
   );
-  assert.equal(chineseContext.context.currentLocation, "Siam");
+  assert.equal(chineseContext.context.currentLocation, "城市中心");
   assert.equal(chineseContext.context.weather, "rain");
   console.log(
     "PASS ambiguous question keeps current time, duration and booking attached to separate facts",
@@ -521,7 +540,7 @@ async function main() {
       storage.set(key, value);
     },
   };
-  localStorage.setItem("travel-snapshot", JSON.stringify(demo));
+  localStorage.setItem("travel-snapshot", JSON.stringify(legacyDemo));
   localStorage.setItem("travel-result-demo", JSON.stringify({ leaked: true }));
   const migrated = loadSession();
   assert.equal(migrated.snapshot.mode, "user");

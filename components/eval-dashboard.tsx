@@ -11,7 +11,23 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import type { AnalyticsEvent } from "@/services/trip-service";
-type Report = typeof import("../data/eval-report.json");
+type Report = {
+  scenarioPassRate: number;
+  hardConstraintPassRate: number;
+  feasibleCasePassRate: number;
+  total: number;
+  violationRates: Record<string, number>;
+  averageRegenerationCount: number;
+  model: string;
+  generatedAt: string;
+  results: Array<{
+    id: string;
+    name: string;
+    expectedFeasible: boolean;
+    pass: boolean;
+    attempts: unknown[];
+  }>;
+};
 const percentage = (n: number) => `${(n * 100).toFixed(1)}%`;
 const violationLabels: Record<string, string> = {
   locked: "锁定安排",
@@ -25,7 +41,7 @@ const violationLabels: Record<string, string> = {
   identity: "地点身份",
   accounting: "行程遗漏",
 };
-export function EvalDashboard({ report }: { report: Report }) {
+export function EvalDashboard({ report }: { report?: Report }) {
   const [analytics, setAnalytics] = useState<AnalyticsEvent[]>([]);
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -50,6 +66,21 @@ export function EvalDashboard({ report }: { report: Report }) {
       )
       .map((e) => e.properties.planId),
   );
+  if (!report)
+    return (
+      <div className="workspace narrow">
+        <Link className="text-link" href="/trip">
+          <ArrowLeft size={15} /> 返回我的今日行程
+        </Link>
+        <div className="page-heading" style={{ marginTop: 30 }}>
+          <div>
+            <span className="eyebrow">智能体评测</span>
+            <h1>暂无离线评测报告。</h1>
+            <p>运行评测命令后，报告会保存在本地工作目录，不作为应用运行时数据。</p>
+          </div>
+        </div>
+      </div>
+    );
   return (
     <div className="workspace">
       <Link className="text-link" href="/trip">
@@ -158,7 +189,7 @@ export function EvalDashboard({ report }: { report: Report }) {
           </div>
         </div>
       </div>
-      <div className="demo-note">
+      <div className="info-note">
         <b>人工评估</b>
         <p>
           请使用 SoftEvaluation 结构，从 1–5
