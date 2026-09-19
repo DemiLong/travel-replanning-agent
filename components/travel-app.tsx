@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { Route } from "lucide-react";
+import { CalendarDays, Route, UserRound } from "lucide-react";
 import { SessionWorkflow } from "./workflows";
 
 export function TravelApp({ page }: { page: string }) {
+  const isMe = page === "me";
   return (
     <div className="site">
       <header className="header">
@@ -31,7 +32,7 @@ export function TravelApp({ page }: { page: string }) {
         </nav>
         <span className="site-mode-label">真实行程 · 本地保存</span>
       </header>
-      <main>
+      <main className={isMe ? "app-main me-main" : "app-main"}>
         <SessionWorkflow page={page} />
       </main>
       <footer className="site-footer">
@@ -42,6 +43,16 @@ export function TravelApp({ page }: { page: string }) {
           为旅途中的意外而生。
         </span>
       </footer>
+      <nav className="mobile-bottom-nav" aria-label="底部导航">
+        <Link className={page === "trip" ? "active" : ""} href="/trip">
+          <CalendarDays size={19} />
+          <span>今日</span>
+        </Link>
+        <Link className={page === "me" ? "active" : ""} href="/me">
+          <UserRound size={19} />
+          <span>我的</span>
+        </Link>
+      </nav>
     </div>
   );
 }

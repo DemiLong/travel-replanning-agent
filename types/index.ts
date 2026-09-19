@@ -95,6 +95,8 @@ export const planAdjustments = [
   "cheaper",
   "keep_stop",
   "earlier",
+  "less_plan",
+  "more_plan",
 ] as const;
 export const ReplanningRequestSchema = z.object({
   reason: z.enum(reasons),
@@ -423,6 +425,7 @@ export type Attempt = {
 };
 export type AgentResult = {
   candidateComparisons?: Array<{title:string;tradeOff:string;feasible:boolean;conflicts:string[]}>;
+  candidatePlans?: Array<{id:string;title:string;tradeOff:string;feasible:boolean;plan:ProposedPlan|null;conflicts:PlanConflict[]}>;
   conflicts?: PlanConflict[];
   resolutionOptions?: ResolutionOption[];
   impactAnalysis?: ImpactAnalysis;
@@ -439,6 +442,7 @@ export type AgentResult = {
 };
 export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
   candidateComparisons:z.array(z.object({title:z.string(),tradeOff:z.string(),feasible:z.boolean(),conflicts:z.array(z.string())})).optional(),
+  candidatePlans:z.array(z.object({id:z.string(),title:z.string(),tradeOff:z.string(),feasible:z.boolean(),plan:ProposedPlanSchema.nullable(),conflicts:z.array(PlanConflictSchema)})).optional(),
   conflicts:z.array(PlanConflictSchema).optional(),
   resolutionOptions:z.array(ResolutionOptionSchema).optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),

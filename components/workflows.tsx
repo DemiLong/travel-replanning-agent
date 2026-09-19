@@ -6,15 +6,25 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  CloudRain,
-  Footprints,
+  ChevronRight,
+  CloudSun,
   LockKeyhole,
   MapPin,
+  Settings2,
   ShieldCheck,
+  Sparkles,
   Trash2,
-  Wallet,
 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerTrigger,
+} from "@/components/ui/drawer";
 import { LocationService } from "@/services/world/location-service";
 import { RealWorldContextSchema, type RealWorldContext, type TravelMode } from "@/types/world";
 import { confirmParsedInput } from "@/services/input-parser";
@@ -66,21 +76,15 @@ const reasonLabels: Record<ReplanningRequest["reason"], string> = {
   other: "其他变化",
 };
 
-const quickReasons: Array<{
-  reason?: ReplanningRequest["reason"];
-  label: string;
-  text: string;
-  create?: boolean;
-}> = [
-  { reason: "weather", label: "下雨了", text: "现在下雨了。" },
-  { reason: "late", label: "我快迟到了", text: "我现在快迟到了。" },
-  { reason: "tired", label: "我太累了", text: "我现在太累了。" },
-  { reason: "closed", label: "有个地方关门了", text: "有个地方关门了。" },
-  { label: "我还没有安排今天", text: "", create: true },
-];
-
 const displayPlace = (value: string) => value;
 const displayDestination = (value: string) => value;
+const eventDurationLabel = (event: ItineraryEvent) => {
+  if (event.durationSource === "unknown") return "停留时间待定";
+  const [startHour, startMinute] = event.startTime.split(":").map(Number);
+  const [endHour, endMinute] = event.endTime.split(":").map(Number);
+  const duration = Math.max(0, endHour * 60 + endMinute - (startHour * 60 + startMinute));
+  return event.durationSource === "suggested" ? `预计停留 ${duration} 分钟` : `停留至 ${event.endTime}`;
+};
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请再试一次。";
 
@@ -173,7 +177,7 @@ function Timeline({ events }: { events: ItineraryEvent[] }) {
         >
           <div className="event-time">
             {event.startTime}
-            <small>{event.durationSource === "unknown" ? "结束时间未提供" : event.endTime}</small>
+            <small>{event.durationSource === "unknown" ? "停留时间待定" : event.endTime}</small>
           </div>
           <div className="event-marker">
             {event.locked ? <LockKeyhole size={14} /> : <span />}
@@ -182,7 +186,7 @@ function Timeline({ events }: { events: ItineraryEvent[] }) {
             <div className="event-title">
               <h3>{displayPlace(event.name)}</h3>
               <span className={`badge ${event.locked ? "locked" : ""}`}>
-                {event.locked ? "已锁定" : "待进行"}
+                {event.locked ? "保留" : "待进行"}
               </span>
             </div>
             <p>
@@ -192,7 +196,7 @@ function Timeline({ events }: { events: ItineraryEvent[] }) {
                 : `฿${event.estimatedCost}`}
             </p>
             {event.travelMode && <p>{({WALKING:"步行",TRANSIT:"公共交通",DRIVING:"驾车 / 打车建议"})[event.travelMode]} · 预计 {event.travelTimeFromPrevious} 分钟</p>}
-            {event.durationSource === "suggested" && <small>停留时长为方案建议</small>}
+            {event.durationSource === "suggested" && <small>预计停留时间</small>}
           </div>
         </div>
       ))}
@@ -206,98 +210,53 @@ export function HomeFlow() {
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [missingFacts, setMissingFacts] = useState<MissingFact[]>([]);
-  const [assistAnswers, setAssistAnswers] = useState<{ destination?: string; currentLocation?: string; travelMode?: TravelMode; venueSelections?:Record<string,string> }>({});
+  const [assistAnswers, setAssistAnswers] = useState<{ destination?: string; currentLocation?: string; travelMode?: TravelMode; venueSelections?: Record<string, string> }>({});
   const [followUp, setFollowUp] = useState("");
   const [ambiguities, setAmbiguities] = useState<RealWorldContext["ambiguities"]>([]);
   useEffect(() => {
+    if (!session || ready) return;
     const timeout = window.setTimeout(() => {
-      if (session && !ready) {
-        setRaw(session.rawInput);
-        setAssistAnswers({venueSelections:session.parsedInput?.worldOptions?.selectedPois??{},travelMode:session.lastDisruption?.worldOptions?.travelMode});
-        setReady(true);
-      }
+      setRaw(session.rawInput);
+      setAssistAnswers({ venueSelections: session.parsedInput?.worldOptions?.selectedPois ?? {}, travelMode: session.lastDisruption?.worldOptions?.travelMode });
+      setReady(true);
     }, 0);
     return () => window.clearTimeout(timeout);
   }, [session, ready]);
   if (!session) return <Loading error={error} />;
   const activeSession = session;
-  if (session.flowStage === "PLAN_READY" && session.pendingPlan)
-    return (
-      <div className="workspace rescue-workspace">
-        <div className="rescue-intro">
-          <span className="eyebrow">上次操作尚未完成</span>
-          <h1>调整方案正在等你确认。</h1>
-          <p>你的原行程和输入都还在，可以继续查看，也可以重新描述变化。</p>
-        </div>
-        <div className="card rescue-card">
-          <div className="form-actions">
-            <Link className="primary" href="/result">
-              继续确认上次方案 <ArrowRight size={18} />
-            </Link>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => {
-                saveSession({
-                  ...activeSession,
-                  flowStage: "RESCUE_INPUT",
-                  pendingPlan: null,
-                });
-                location.reload();
-              }}
-            >
-              重新描述变化
-            </button>
-          </div>
-          <div className="form-actions home-secondary-actions">
-            <Link className="secondary" href="/onboarding">
-              创建今天的行程
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  const hasItinerary = session.snapshot.itinerary.length > 0;
-  const hasDraft =
-    Boolean(session.rawInput.trim()) &&
-    ["RESCUE_INPUT", "RESCUE_CONFIRM"].includes(session.flowStage);
+  const hasItinerary = activeSession.snapshot.itinerary.length > 0;
+  const lastUpdated = new Date(activeSession.updatedAt);
+  const updatedLabel = Number.isNaN(lastUpdated.getTime()) ? "刚刚更新" : lastUpdated.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 
-  function chooseQuick(item: (typeof quickReasons)[number]) {
-    if (item.create) {
-      window.location.assign("/onboarding");
-      return;
-    }
-    setRaw(item.text);
-    saveFlowDraft(item.text, null, "RESCUE_INPUT");
+  function chooseQuick(text: string) {
+    setRaw(text);
+    saveFlowDraft(text, null, "RESCUE_INPUT");
   }
 
-  async function submitAssist(event?: FormEvent, selection?:{field:string;poiId:string}) {
+  async function submitAssist(event?: FormEvent, selection?: { field: string; poiId: string }) {
     event?.preventDefault();
     if (!raw.trim()) {
-      setError("请先写下今天原本的安排、当前变化，或选择一个快捷场景。");
+      setError("先写下今天发生的变化吧。");
       return;
     }
     setBusy(true);
     setError("");
-    const text=followUp.trim() ? `${raw}\n补充回答（${missingFacts[0]?.reason??"补充说明"}）：${followUp.trim()}` : raw;
-    const answers=selection?{...assistAnswers,venueSelections:{...assistAnswers.venueSelections,[selection.field]:selection.poiId}}:assistAnswers;
-    setRaw(text);setFollowUp("");setAssistAnswers(answers);
-    saveFlowDraft(text,activeSession.parsedInput,"RESCUE_INPUT");
+    const text = followUp.trim() ? `${raw}\n补充回答：${followUp.trim()}` : raw;
+    const answers = selection ? { ...assistAnswers, venueSelections: { ...assistAnswers.venueSelections, [selection.field]: selection.poiId } } : assistAnswers;
+    setRaw(text);
+    setFollowUp("");
+    setAssistAnswers(answers);
+    saveFlowDraft(text, activeSession.parsedInput, "RESCUE_INPUT");
     try {
-      let browserLocation: Awaited<ReturnType<LocationService["getCurrentPosition"]>> | undefined;
-      // Parse and resolve text first. Request GPS once only if the server
-      // cannot establish an origin, before asking the traveler to type one.
-      let response = await fetch("/api/assist", {
-        method: "POST",
-        headers: await requestHeaders(),
-        body: JSON.stringify({ snapshot: activeSession.snapshot, rawText: text, userAnswers: answers, ...(browserLocation ? { browserLocation } : {}) }),
-      });
+      let response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: activeSession.snapshot, rawText: text, userAnswers: answers }) });
       let body = (await response.json()) as AssistBody;
-      if(response.ok && body.status==="needs_input" && body.missingFacts?.[0]?.field==="currentLocation" && !body.ambiguities?.length && !browserLocation){
-        try{browserLocation=await new LocationService().getCurrentPosition();}catch{/* Show the single question if location cannot be obtained. */}
-        if(browserLocation){
-          response=await fetch("/api/assist",{method:"POST",headers:await requestHeaders(),body:JSON.stringify({snapshot:activeSession.snapshot,rawText:text,userAnswers:answers,browserLocation})});
-          body=(await response.json()) as AssistBody;
+      if (response.ok && body.status === "needs_input" && body.missingFacts?.[0]?.field === "currentLocation" && !body.ambiguities?.length) {
+        try {
+          const browserLocation = await new LocationService().getCurrentPosition();
+          response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: activeSession.snapshot, rawText: text, userAnswers: answers, browserLocation }) });
+          body = (await response.json()) as AssistBody;
+        } catch {
+          // The normal follow-up card remains available when location is denied.
         }
       }
       if (!response.ok) throw new Error(body.error ?? "暂时无法接住这次变化，请稍后重试。");
@@ -305,14 +264,16 @@ export function HomeFlow() {
       if (body.status === "needs_input") {
         setMissingFacts(body.missingFacts ?? []);
         setAmbiguities(body.ambiguities ?? []);
-        setAssistAnswers(current=>({...current,venueSelections:body.parsedInput?.worldOptions?.selectedPois??current.venueSelections}));
+        setAssistAnswers(current => ({ ...current, venueSelections: body.parsedInput?.worldOptions?.selectedPois ?? current.venueSelections }));
         saveFlowDraft(text, body.parsedInput, "RESCUE_INPUT");
         setBusy(false);
         return;
       }
       if (body.status !== "ready") throw new Error(body.error ?? "真实信息暂时不可用，请稍后重试。");
       const result = AgentResultSchema.parse(body.result);
-      savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request: ReplanningRequestSchema.parse(body.request), accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, ReplanningRequestSchema.parse(body.request));
+      const base = SnapshotSchema.parse(body.base);
+      const request = ReplanningRequestSchema.parse(body.request);
+      savePendingPlan({ result, base, request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
       window.location.assign("/result");
     } catch (cause) {
       setError(errorText(cause));
@@ -321,86 +282,33 @@ export function HomeFlow() {
   }
 
   return (
-    <div className="workspace rescue-workspace">
-      <div className="rescue-intro">
-        <span className="eyebrow">
-          {hasItinerary ? "从你真实的今日行程出发" : "先说今天，再说变化"}
-        </span>
-        <h1>告诉我今天发生了什么？</h1>
-        <p>把原计划和现在发生的情况直接告诉我，不需要整理。</p>
+    <div className="mobile-workspace home-screen">
+      <div className="home-brand"><Sparkles size={18} /><span>接住你</span></div>
+      <div className="home-copy">
+        <span className="eyebrow">今天也可以慢慢来</span>
+        <h1>发生了森么？</h1>
+        <p>把你的原计划和突发情况直接告诉俺！</p>
       </div>
-      <form className="card rescue-card" onSubmit={submitAssist}>
-        {hasDraft && (
-          <div className="success-box" role="status">
-            上次输入已保存在本浏览器，可以继续确认。
-          </div>
-        )}
-        <div className="quick-reasons" aria-label="常见场景">
-          {quickReasons.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              className="quick-reason"
-              onClick={() => chooseQuick(item)}
-            >
-              {item.label}
-            </button>
-          ))}
+      <form className="mobile-card home-card" onSubmit={submitAssist}>
+        <textarea id="home-input" value={raw} maxLength={4000} onChange={event => { setRaw(event.target.value); saveFlowDraft(event.target.value, null, "RESCUE_INPUT"); }} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" />
+        <div className="example-row" aria-label="示例提示">
+          {["航班晚点了", "突然下雨了", "起晚了", "景点关闭"].map(item => <button key={item} type="button" className="example-chip" onClick={() => chooseQuick(item)}>{item}</button>)}
         </div>
-        <div className="field rescue-field">
-          <label htmlFor="home-input">告诉我今天的安排和现在发生的变化</label>
-          <small className="input-hint">
-            例如：10 点去城市博物馆，19 点已预订晚餐。现在下雨了，我在城市中心，希望保留晚餐。
-          </small>
-          <textarea
-            id="home-input"
-            value={raw}
-            maxLength={4000}
-            onChange={(event) => {
-              setRaw(event.target.value);
-              saveFlowDraft(event.target.value, null, "RESCUE_INPUT");
-            }}
-            placeholder="写下今天已有的安排、当前变化、想保留的事项或当前位置"
-          />
-          <small className="muted">
-            系统会结合真实地点和路线安排今天；只有关键信息无法确定时才补问。
-          </small>
-        </div>
-        {error && (
-          <div className="error-box" role="alert">
-            <p>{error}</p>
-            <button type="button" className="secondary" disabled={busy} onClick={() => void submitAssist()}>
-              重新尝试
-            </button>
-          </div>
-        )}
         {missingFacts.length > 0 && (
-          <div className="card" role="dialog" aria-label="补充必要信息">
-            <h2>还需要确认这一点</h2>
-            <div className="field"><label htmlFor="assist-follow-up">{missingFacts[0].reason}</label><input id="assist-follow-up" value={followUp} onChange={event=>setFollowUp(event.target.value)} placeholder="直接用自己的话回答即可" /></div>
-            {ambiguities.filter(a=>a.field===missingFacts[0].field).flatMap(a=>a.candidates.map(p=><button key={p.poiId} type="button" className="secondary" disabled={busy} onClick={()=>void submitAssist(undefined,{field:a.field,poiId:p.poiId})}>{p.name} · {p.address}</button>))}
-            <button type="button" className="primary" disabled={busy} onClick={() => submitAssist()}>{busy ? "正在接住你的行程……" : "继续安排今天"}</button>
+          <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
+            <span className="eyebrow">再确认一下</span>
+            <h2>{missingFacts[0].reason}</h2>
+            {ambiguities.filter(item => item.field === missingFacts[0].field).flatMap(item => item.candidates.map(candidate => <button className="poi-option" key={candidate.poiId} type="button" disabled={busy} onClick={() => void submitAssist(undefined, { field: item.field, poiId: candidate.poiId })}><span><b>{candidate.name}</b><small>{candidate.address}</small></span><ChevronRight size={17} /></button>))}
+            {!ambiguities.some(item => item.field === missingFacts[0].field) && <input value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder="直接用自己的话回答" />}
+            <button type="button" className="primary full" disabled={busy} onClick={() => void submitAssist()}>{busy ? "正在确认…" : "继续安排今天"}</button>
           </div>
         )}
-        <div className="form-actions rescue-actions">
-          <button className="primary" disabled={busy}>
-            {busy
-              ? "AI 正在拆解事实……"
-              : hasDraft
-              ? "继续完成上次操作"
-              : "帮我重新安排今天"}
-            <ArrowRight size={18} />
-          </button>
-        </div>
-        <div className="form-actions home-secondary-actions">
-          <Link className="secondary" href="/onboarding">
-            创建今天的行程
-          </Link>
-        </div>
-        <p className="small-note">
-          当前行程保存在本浏览器。登录后跨设备同步将在后续版本提供。
-        </p>
+        {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
+        <button className="primary full home-submit" disabled={busy}>{busy ? "正在帮你重新安排…" : "帮我重新安排今天"}<ArrowRight size={18} /></button>
+        {busy && <p className="loading-caption">正在查路线・正在规划…</p>}
       </form>
+      {hasItinerary && <Link className="continue-card" href="/trip"><span><b>继续今天的行程</b><small>已有 {activeSession.snapshot.itinerary.length} 个安排 · 上次更新 {updatedLabel}</small></span><ChevronRight size={21} /></Link>}
+      {!hasItinerary && <Link className="home-create-link" href="/onboarding">还没有安排？先创建今天的行程</Link>}
     </div>
   );
 }
@@ -424,7 +332,7 @@ export function OnboardingFlow() {
       }
     }, 0);
     return () => window.clearTimeout(timeout);
-  }, [session, initialized]);
+  }, [session, initialized, setError]);
   if (!session || !snapshot) return <Loading error={error} />;
   const activeSession = session;
   const activeSnapshot = snapshot;
@@ -518,26 +426,27 @@ export function OnboardingFlow() {
   }
 
   return (
-    <div className="workspace setup-workspace">
-      <div className="page-heading">
+    <div className="mobile-workspace onboarding-screen">
+      <div className="onboarding-brand"><Sparkles size={17} /><span>接住你</span></div>
+      <div className="onboarding-heading">
         <div>
-          <span className="eyebrow">首次创建今日行程</span>
-          <h1>把已有安排放进今天。</h1>
-          <p>只填写当前任务需要的信息；预算与偏好都可以跳过。</p>
+          <span className="eyebrow">第一次来，先填这几个就行</span>
+          <h1>把今天的安排放进来。</h1>
+          <p>不用一次写得很完整，之后也可以慢慢调整。</p>
         </div>
       </div>
       <form className="card form-card setup-form" onSubmit={submit}>
         <section className="setup-section">
           <div className="section-heading">
-            <span>1</span>
+            <span>01</span>
             <div>
-              <h2>今天在哪里？</h2>
-              <p>目的地、日期、当前时间和地点用于判断可执行性。</p>
+              <h2>先告诉我你现在在哪儿</h2>
+              <p>这几个信息够我判断接下来怎么走。</p>
             </div>
           </div>
           <div className="form-grid">
             <div className="field">
-              <label htmlFor="destination">所在城市（必填）</label>
+              <label htmlFor="destination">所在城市</label>
               <input
                 id="destination"
                 value={snapshot.trip.destination}
@@ -550,7 +459,7 @@ export function OnboardingFlow() {
               />
             </div>
             <div className="field">
-              <label htmlFor="day-date">日期（必填）</label>
+              <label htmlFor="day-date">今天是哪一天</label>
               <input
                 id="day-date"
                 required
@@ -571,7 +480,7 @@ export function OnboardingFlow() {
               />
             </div>
             <div className="field">
-              <label htmlFor="current-time">当前时间（必填）</label>
+              <label htmlFor="current-time">现在大概几点</label>
               <input
                 id="current-time"
                 required
@@ -593,7 +502,7 @@ export function OnboardingFlow() {
               />
             </div>
             <div className="field">
-              <label htmlFor="current-location">当前位置（必填）</label>
+              <label htmlFor="current-location">现在在哪儿</label>
               <input
                 id="current-location"
                 required
@@ -619,14 +528,14 @@ export function OnboardingFlow() {
         </section>
         <section className="setup-section">
           <div className="section-heading">
-            <span>2</span>
+            <span>02</span>
             <div>
-              <h2>今天已有的安排</h2>
-              <p>每项以时间开头，解析后可以逐项修改。</p>
+              <h2>再放进今天的安排</h2>
+              <p>直接粘贴一段话就好，整理后还能逐项修改。</p>
             </div>
           </div>
           <div className="field">
-            <label htmlFor="itinerary-input">粘贴或输入行程（必填）</label>
+            <label htmlFor="itinerary-input">你今天想怎么安排？</label>
             <textarea
               id="itinerary-input"
               value={raw}
@@ -643,7 +552,7 @@ export function OnboardingFlow() {
             disabled={parsing}
             onClick={parsePlans}
           >
-            {parsing ? "AI 正在解析……" : "解析这份行程"}
+            {parsing ? "正在整理你的安排…" : "整理这份行程"}
           </button>
           {items.length > 0 && (
             <div className="stop-list" style={{ marginTop: 18 }}>
@@ -761,7 +670,7 @@ export function OnboardingFlow() {
           )}
         </section>
         <details className="preferences-panel">
-          <summary>预算与偏好（可选）</summary>
+          <summary>想补充更多？预算与节奏（可选）</summary>
           <div className="form-grid" style={{ marginTop: 16 }}>
             <div className="field">
               <label htmlFor="budget">今天剩余预算（可选，泰铢）</label>
@@ -804,14 +713,14 @@ export function OnboardingFlow() {
         )}
         <div className="form-actions">
           <button className="primary" disabled={!items.length}>
-            创建今天的行程 <ArrowRight size={18} />
+            开始今天的行程 <ArrowRight size={18} />
           </button>
           <Link className="secondary" href="/">
             返回首页
           </Link>
         </div>
         <p className="small-note">
-          当前行程保存在本浏览器。登录后跨设备同步将在后续版本提供。
+          行程会保存在这台设备上，之后随时可以回来调整。
         </p>
       </form>
     </div>
@@ -824,81 +733,29 @@ export function TripFlow() {
   const { snapshot } = session;
   if (!snapshot.itinerary.length)
     return (
-      <div className="workspace narrow">
+      <div className="mobile-workspace empty-screen">
+        <span className="eyebrow">今日</span>
         <h1>今天还没有行程。</h1>
-        <p className="muted">直接告诉我原计划和今天发生的变化，就能开始安排。</p>
-        <Link className="primary" href="/">
-          告诉我今天发生了什么 <ArrowRight size={17} />
-        </Link>
+        <p className="muted">把今天的安排告诉我，我们一起慢慢排好。</p>
+        <Link className="primary full" href="/">开始安排今天 <ArrowRight size={17} /></Link>
       </div>
     );
   const currentMinutes = snapshot.state.currentTime.split(":").map(Number).reduce((h, m) => h * 60 + m, 0);
-  const nextEvent = snapshot.itinerary.find((event) => event.status !== "completed" && event.startTime.split(":").map(Number).reduce((h, m) => h * 60 + m, 0) >= currentMinutes);
+  const remaining = snapshot.itinerary.filter(event => event.status !== "completed").sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const nextEvent = remaining.find((event) => event.startTime.split(":").map(Number).reduce((h, m) => h * 60 + m, 0) >= currentMinutes) ?? remaining[0];
   return (
-    <div className="workspace">
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">
-            {snapshot.state.currentDate} ·{" "}
-            {displayDestination(snapshot.trip.destination)}
-          </span>
-          <h1>我的今日行程</h1>
-          <p>计划可以改变，固定安排会在调整前明确确认。</p>
-        </div>
-        <Link className="secondary" href="/onboarding">
-          编辑行程
-        </Link>
+    <div className="mobile-workspace today-screen">
+      <div className="today-heading">
+        <div><span className="eyebrow">{displayDestination(snapshot.trip.destination)} · {snapshot.state.currentDate}</span><h1>今天，慢慢走</h1></div>
+        <div className="today-meta"><span>{snapshot.state.currentTime}</span><span><CloudSun size={16} />{snapshot.state.weather === "rain" ? "有雨" : "天气不错"}</span></div>
       </div>
-      <div className="trip-grid">
-        <section className="card itinerary-card">
-          <div className="card-heading">
-            <h2>今天的安排</h2>
-            <span>{snapshot.itinerary.length} 项</span>
-          </div>
-          <Timeline events={snapshot.itinerary} />
-        </section>
-        <aside>
-          <div className="state-card">
-            <span className="eyebrow">此时此地</span>
-            <h2>{snapshot.state.currentTime}</h2>
-            <div className="state-location">
-              <MapPin size={16} />{" "}
-              {displayPlace(snapshot.state.currentLocation)}
-            </div>
-            <div className="state-tiles">
-              <div>
-                <CloudRain />
-                <b>{snapshot.state.weather ?? "未提供"}</b>
-                <small>天气</small>
-              </div>
-              <div>
-                <Footprints />
-                <b>{snapshot.state.energyLevel ?? "未提供"}</b>
-                <small>体力</small>
-              </div>
-            </div>
-            <div className="budget-line">
-              <Wallet size={17} />
-              <span>剩余预算</span>
-              <b>
-                {snapshot.state.remainingBudget === undefined
-                  ? "未提供"
-                  : `฿${snapshot.state.remainingBudget}`}
-              </b>
-            </div>
-            <div className="next-step" style={{ marginTop: 18 }}>
-              <span className="eyebrow">下一步去哪里</span>
-              {nextEvent ? <><h3>{displayPlace(nextEvent.location || nextEvent.name)}</h3><p>{nextEvent.startTime} · {nextEvent.travelTimeFromPrevious == null ? "路线待查询" : `预计 ${nextEvent.travelTimeFromPrevious} 分钟`}</p></> : <p className="muted">今天没有待执行安排。</p>}
-            </div>
-            <Link className="primary full" href="/rescue">
-              今天发生了变化 <ArrowRight size={18} />
-            </Link>
-          </div>
-          <p className="small-note">
-            当前行程保存在本浏览器。登录后跨设备同步将在后续版本提供。
-          </p>
-        </aside>
-      </div>
+      <section className="next-card">
+        <div><span className="eyebrow">下一步去哪</span>{nextEvent ? <><h2>{displayPlace(nextEvent.name)}</h2><p><MapPin size={14} /> {displayPlace(nextEvent.location)} · {nextEvent.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[nextEvent.travelMode] : "路线待查询"}</p></> : <h2>今天没有待执行安排</h2>}</div><ChevronRight size={24} />
+      </section>
+      <div className="route-strip"><span className="route-dot active" /><span /><span className="route-dot" /><span /><span className="route-dot" /><small>{nextEvent?.travelTimeFromPrevious ? `路上约 ${nextEvent.travelTimeFromPrevious} 分钟` : "按自己的节奏走"}</small></div>
+      <section className="today-list-section"><div className="section-title"><h2>今日剩余</h2><span>{remaining.length} 个安排</span></div><div className="mobile-timeline">{remaining.map((event, index) => <div className={`mobile-timeline-item ${event.id === nextEvent?.id ? "current" : ""}`} key={event.id}><div className="mobile-time"><b>{event.startTime}</b><small>{event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className="mobile-line"><span /></div><div className="mobile-event"><div><b>{displayPlace(event.name)}</b>{event.locked && <span className="status-pill kept">保留</span>}</div><p>{displayPlace(event.location)} · {event.durationSource === "unknown" ? "停留时间待定" : `${Math.max(0, event.endTime.split(":").map(Number).reduce((h, m) => h * 60 + m, 0) - event.startTime.split(":").map(Number).reduce((h, m) => h * 60 + m, 0))} 分钟`}</p>{index === 0 && <small className="now-label">进行中</small>}</div></div>)}</div></section>
+      <Link className="change-card" href="/"><span><b>发生变化？</b><small>随时告诉我，我来帮你重新安排</small></span><ArrowRight size={18} /></Link>
+      <Link className="today-edit-link" href="/onboarding">编辑今天的安排</Link>
     </div>
   );
 }
@@ -1699,394 +1556,128 @@ export function ResultFlow() {
   const { session, setSession, error, setError } = useRealSession();
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [analysisOpen, setAnalysisOpen] = useState(false);
   if (!session) return <Loading error={error} />;
-  const pending =
-    session.flowStage === "PLAN_READY" ? session.pendingPlan : null;
-  if (!pending || pending.result.mode!=="live")
-    return (
-      <div className="workspace narrow">
-        <h1>还没有待确认的方案。</h1>
-        <p className="muted">请先确认系统对行程和变化的理解。</p>
-        <Link
-          className="primary"
-          href={session.snapshot.itinerary.length ? "/rescue" : "/onboarding"}
-        >
-          返回正确入口 <ArrowRight size={17} />
-        </Link>
-      </div>
-    );
+  const pending = session.flowStage === "PLAN_READY" ? session.pendingPlan : null;
+  if (!pending || pending.result.mode !== "live") return <div className="mobile-workspace empty-screen"><span className="eyebrow">方案</span><h1>还没有待确认的方案。</h1><p className="muted">先从首页告诉我今天发生了什么。</p><Link className="primary full" href="/">返回首页 <ArrowRight size={17} /></Link></div>;
   const { result, base, request } = pending;
   const activePending = pending;
   const plan = result.plan;
+  const impact = pending.impactAnalysis ?? result.impactAnalysis;
   const activeSession = session;
+  const currentParsed = pending.parsedInput ? ParsedUserInputSchema.parse(pending.parsedInput) : null;
 
-  async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
+  async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = [], adjustments: ReplanningRequest["adjustments"] = []) {
     const confirmedDraft = confirmedDraftFromParsed(base, nextParsed, nextParsed.closedPlaceIds, removedLockedIds, removedEventIds);
-    const response = await fetch("/api/assist", {
-      method: "POST",
-      headers: await requestHeaders(),
-      body: JSON.stringify({
-        snapshot: base,
-        rawText: nextParsed.rawText,
-        confirmedDraft,
-        userAnswers: { venueSelections: nextParsed.worldOptions?.selectedPois },
-      }),
-    });
+    const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, rawText: nextParsed.rawText, confirmedDraft, adjustments, userAnswers: { venueSelections: nextParsed.worldOptions?.selectedPois } }) });
     const body = (await response.json()) as AssistBody;
     if (!response.ok) throw new Error(body.error ?? "暂时无法重新安排。");
-    if (body.status !== "ready" || !body.result || !body.base || !body.request || !body.parsedInput)
-      throw new Error(body.missingFacts?.[0]?.reason ?? "请先补充这次调整需要的信息。");
+    if (body.status !== "ready" || !body.result || !body.base || !body.request || !body.parsedInput) throw new Error(body.missingFacts?.[0]?.reason ?? "请先补充这次调整需要的信息。");
     const nextResult = AgentResultSchema.parse(body.result);
     const nextRequest = ReplanningRequestSchema.parse(body.request);
-    savePendingPlan({
-      result: nextResult,
-      base: SnapshotSchema.parse(body.base),
-      request: nextRequest,
-      accepted: false,
-      parsedInput: ParsedUserInputSchema.parse(body.parsedInput),
-      impactAnalysis: body.impactAnalysis,
-    }, nextRequest);
+    savePendingPlan({ result: nextResult, base: SnapshotSchema.parse(body.base), request: nextRequest, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, nextRequest);
     window.location.assign("/result");
   }
 
   async function applyResolutionOption(option: ResolutionOption) {
     if (option.requiresConfirmation && !window.confirm(`确认${option.label}吗？`)) return;
-    setBusy(true);
-    setError("");
+    setBusy(true); setError("");
     try {
       if (option.action === "edit_locked_arrangement") {
-        setSession(saveSession({
-          ...activeSession,
-          flowStage: "RESCUE_CONFIRM",
-          pendingPlan: null,
-        }));
+        setSession(saveSession({ ...activeSession, flowStage: "RESCUE_CONFIRM", pendingPlan: null }));
         window.location.assign("/rescue");
         return;
       }
-      const currentParsed = activePending.parsedInput ? ParsedUserInputSchema.parse(activePending.parsedInput) : null;
       if (!currentParsed) throw new Error("当前调整草稿已过期，请返回编辑页重新确认。");
-      const nextParsed = option.action === "remove_event"
-        ? { ...currentParsed, existingPlans: currentParsed.existingPlans.filter(item => item.id !== option.eventId) }
-        : {
-            ...currentParsed,
-            existingPlans: currentParsed.existingPlans.map(item => item.id === option.eventId
-              ? { ...item, endTime: null, durationMinutes: option.suggestedDuration ?? 60 }
-              : item),
-          };
-      const removedLockedIds = option.action === "remove_event" && base.itinerary.some(event => event.id === option.eventId && event.locked)
-        ? [option.eventId]
-        : [];
+      const nextParsed = option.action === "remove_event" ? { ...currentParsed, existingPlans: currentParsed.existingPlans.filter(item => item.id !== option.eventId) } : { ...currentParsed, existingPlans: currentParsed.existingPlans.map(item => item.id === option.eventId ? { ...item, endTime: null, durationMinutes: option.suggestedDuration ?? 60 } : item) };
+      const removedLockedIds = option.action === "remove_event" && base.itinerary.some(event => event.id === option.eventId && event.locked) ? [option.eventId] : [];
       await regenerateFromDraft(nextParsed, removedLockedIds, option.action === "remove_event" ? [option.eventId] : []);
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setBusy(false);
-    }
+    } catch (cause) { setError(errorText(cause)); setBusy(false); }
   }
 
-  if (!result.ok || !plan) {
-    const conflicts = result.conflicts ?? [];
-    const options = result.resolutionOptions ?? [];
-    return (
-      <div className="workspace">
-        <div className="page-heading">
-          <div>
-            <span className="eyebrow">需要换一种安排</span>
-            <h1>当前安排之间没有合适的衔接</h1>
-            <p>原行程和你的输入都已保留。你可以直接选择一种调整方式。</p>
-          </div>
-        </div>
-        {error && <div className="error-box" role="alert">{error}</div>}
-        <section className="card" aria-live="polite">
-          <h2>发生了什么</h2>
-          {conflicts.length ? conflicts.map(conflict => (
-            <div className="change-list" key={`${conflict.kind}-${conflict.eventId}-${conflict.nextAnchorEventId ?? ""}`}>
-              <b>{conflict.message}</b>
-              {conflict.availableMinutes !== undefined && conflict.requiredTransferMinutes !== undefined && (
-                <p>可安排约 {conflict.availableMinutes} 分钟，路程需要约 {conflict.requiredTransferMinutes} 分钟。</p>
-              )}
-            </div>
-          )) : <p>当前路线或时间安排无法同时满足，请从编辑页调整其中一项。</p>}
-        </section>
-        {options.length > 0 && (
-          <section className="card">
-            <h2>你可以这样调整</h2>
-            <div className="form-actions">
-              {options.map(option => (
-                <button key={option.id} type="button" className="secondary" disabled={busy} onClick={() => void applyResolutionOption(option)}>
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <p className="muted">涉及固定安排的修改都会先征得你的确认。</p>
-          </section>
-        )}
-        <div className="form-actions">
-          <Link className="primary" href="/rescue">返回编辑行程 <ArrowRight size={17} /></Link>
-        </div>
-      </div>
-    );
+  async function adjustPlan(adjustment: "less_plan" | "more_plan") {
+    if (!currentParsed) { setError("当前方案草稿已过期，请重新描述变化。"); return; }
+    setBusy(true); setError("");
+    try { await regenerateFromDraft(currentParsed, [], [], [adjustment]); } catch (cause) { setError(errorText(cause)); setBusy(false); }
   }
-  const activePlan = plan;
-  const baseIds = new Set(base.itinerary.map((event) => event.id));
-  const retained = plan.events.filter((event) => baseIds.has(event.id));
-  const added = plan.events.filter((event) => !baseIds.has(event.id));
-  const impact = pending.impactAnalysis ?? result.impactAnalysis;
-  const trace = result.decisionTrace;
-  const unconfirmed = [
-    "路线耗时来自高德查询，仍可能受出发时间、交通变化及入口选择影响。",
-    "POI 基础数据不等于已核实营业状态；新增停留时长为建议。",
-    ...(result.context.world?.weather.status!=="available"?["本次未取得或未请求高德天气，没有使用默认天气替代。"]:[]),
-    ...(request.currentState.remainingBudget === undefined
-      ? ["未提供预算，因此预算未检查。"]
-      : []),
-    ...(plan.events.some((event) => event.estimatedCostKnown === false)
-      ? ["至少一项活动的费用未提供，因此预算未完整检查。"]
-      : []),
-  ];
+
+  function chooseCandidate(candidate: NonNullable<typeof result.candidatePlans>[number]) {
+    if (!candidate.plan || !candidate.feasible) return;
+    const nextResult = AgentResultSchema.parse({ ...result, id: result.id, ok: true, plan: candidate.plan, message: candidate.tradeOff });
+    const updated = saveSession({ ...activeSession, pendingPlan: { base: activePending.base, request: activePending.request, accepted: false, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
+    setSession(updated);
+  }
 
   async function accept() {
-    setBusy(true);
-    setError("");
+    if (!plan) return;
+    setBusy(true); setError("");
     try {
       const latest = loadSession();
-      if (latest.snapshot.revision !== base.revision)
-        throw new Error("原行程已发生变化，请重新生成方案。");
-      if(result.context.world && Date.now()-Date.parse(result.context.world.currentTime.confirmedAt)>300000)throw new Error("距离确认时间已超过 5 分钟，请更新当前时间后重新生成。");
-      const response = await fetch("/api/validate", {
-        method: "POST",
-        headers: await requestHeaders(),
-        body: JSON.stringify({
-          snapshot: base,
-          request,
-          mode: result.mode,
-          confirmation: {
-            status: "confirmed",
-            confirmedAt: new Date().toISOString(),
-          },
-          plan,
-        }),
-      });
+      if (latest.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
+      if (result.context.world && Date.now() - Date.parse(result.context.world.currentTime.confirmedAt) > 300000) throw new Error("距离确认时间较久，请重新生成方案。");
+      const response = await fetch("/api/validate", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }) });
       const checked = (await response.json()) as { ok?: boolean };
-      if (!response.ok || !checked.ok)
-        throw new Error("方案已不再满足可验证规则，请重新生成。");
-      const next = SnapshotSchema.parse({
-        ...base,
-        state: request.currentState,
-        itinerary: [
-          ...latest.snapshot.itinerary.filter(
-            (event) => event.status === "completed",
-          ),
-          ...activePlan.events,
-        ],
-        revision: latest.snapshot.revision + 1,
-      });
+      if (!response.ok || !checked.ok) throw new Error("方案已不再满足当前安排，请重新生成。");
+      const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...latest.snapshot.itinerary.filter(event => event.status === "completed"), ...plan.events], revision: latest.snapshot.revision + 1 });
       await saveTrip(next, latest.snapshot.revision);
-      const updated = saveSession({
-        ...loadSession(),
-        snapshot: { ...next, mode: "user" },
-        flowStage: "HAS_ITINERARY",
-        rawInput: "",
-        parsedInput: null,
-        lastDisruption: request,
-        pendingPlan: null,
-      });
-      setSession(updated);
-      await logEvent("replan_accepted", { planId: result.id, mode: "real" });
-      setNotice("方案已接受，今日行程已经更新。");
-      window.location.assign("/trip");
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setBusy(false);
-    }
+      const updated = saveSession({ ...loadSession(), snapshot: { ...next, mode: "user" }, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null });
+      setSession(updated); await logEvent("replan_accepted", { planId: result.id, mode: "real" }); setNotice("方案已接受"); window.location.assign("/trip");
+    } catch (cause) { setError(errorText(cause)); setBusy(false); }
   }
 
-  async function editPlan(adjustment: string) {
-    setBusy(true);
-    setError("");
-    try {
-      const rawInput = `${activeSession.rawInput} ${adjustment}`.trim();
-      const parsedInput = await parseWithModel(activeSession.snapshot, rawInput);
-      const updated = saveSession({
-        ...activeSession,
-        rawInput,
-        parsedInput,
-        flowStage: "RESCUE_CONFIRM",
-      });
-      setSession(updated);
-      window.location.assign("/rescue");
-    } catch (cause) {
-      setError(errorText(cause));
-      setBusy(false);
-    }
-  }
+  const baseMap = new Map(base.itinerary.map(event => [event.id, event]));
+  const statusOf = (event: ItineraryEvent) => {
+    const original = baseMap.get(event.id);
+    if (!original) return { label: "新增", tone: "new" };
+    const changed = original.startTime !== event.startTime || original.endTime !== event.endTime || original.location !== event.location || original.travelTimeFromPrevious !== event.travelTimeFromPrevious;
+    return changed ? { label: "调整", tone: "adjusted" } : { label: "保留", tone: "kept" };
+  };
+  const originalCount = base.itinerary.filter(event => event.status !== "completed").length;
+  const retainedCount = plan ? plan.events.filter(event => baseMap.has(event.id)).length : 0;
+  const impactLabel = !plan ? "需要再调整" : plan.removedEvents.length + plan.movedEvents.length > 2 ? "较高" : plan.removedEvents.length + plan.movedEvents.length > 0 ? "中等" : "低";
+  const conflicts = result.conflicts ?? [];
+  const options = result.resolutionOptions ?? [];
+  const candidatePlans = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible);
 
   return (
-    <div className="workspace">
-      <div className="page-heading">
-        <div>
-          <span className="eyebrow">方案等待你的确认</span>
-          <h1>今天建议这样调整</h1>
-          <p>{plan.summary}。先看方案，再决定是否更新今日行程。</p>
-        </div>
-      </div>
-      {notice && (
-        <div className="success-box" role="status">
-          {notice}
-        </div>
-      )}
-      {error && (
-        <div className="error-box" role="alert">
-          {error}
-        </div>
-      )}
-      {!notice && (
-        <div className="success-box">
-          <ShieldCheck size={22} />
-          <div>
-            <b>
-                  {result.verificationLevel === "complete"
-                ? "固定安排与路线规则均已通过"
-                : "已通过当前可验证规则"}
-            </b>
-            <p>估算和未提供的信息单独列在下方。</p>
-          </div>
-        </div>
-      )}
-      {impact && (
-        <details className="audit" style={{ marginBottom: 18 }}>
-          <summary>查看我的情况分析</summary>
-          <div className="change-list">
-            <p><b>你告诉我的：</b>{request.freeText}</p>
-            <p><b>受到影响：</b>{impact.affectedActivities.length ? impact.affectedActivities.map((id) => base.itinerary.find((event) => event.id === id)?.name ?? id).join("、") : "暂未发现明确受影响的安排。"}</p>
-            <p><b>已经完成：</b>{impact.completedActivities.length ? impact.completedActivities.map((id) => base.itinerary.find((event) => event.id === id)?.name ?? id).join("、") : "暂无。"}</p>
-            <p><b>必须保留：</b>{impact.lockedActivities.length ? impact.lockedActivities.map((id) => base.itinerary.find((event) => event.id === id)?.name ?? id).join("、") : "暂无固定安排。"}</p>
-            <p><b>空档：</b>{impact.availableTimeWindows.length ? impact.availableTimeWindows.map((window) => `${window.startTime}–${window.endTime}`).join("、") : "没有可重新安排的时间窗。"}</p>
-          </div>
-        </details>
-      )}
-      <div className="result-sections">
-        {result.candidateComparisons && <details className="audit"><summary>查看候选方案比较</summary>{result.candidateComparisons.map((candidate,i)=><div className="card" key={i}><b>{candidate.title} · {candidate.feasible?"通过当前校验":"存在冲突"}</b><p>{candidate.tradeOff}</p>{candidate.conflicts.map((c,i)=><p key={i}>{userFacingPlanningMessage(c)}</p>)}</div>)}</details>}
-        <section className="card">
-          <h2>1. 当前变化</h2>
-          <p>{request.freeText}</p>
-        </section>
-        <section className="card">
-          <h2>2. 保留的安排</h2>
-          <Timeline events={retained} />
-        </section>
-        <section className="card">
-          <h2>3. 被替换或移动的安排</h2>
-          {[...plan.removedEvents, ...plan.movedEvents].length ? (
-            <div className="change-list">
-              {plan.removedEvents.map((item) => (
-                <div key={item.eventId}>
-                  <b>{displayPlace(item.name)} · 已移除</b>
-                  <p>{item.reason}</p>
-                </div>
-              ))}
-              {plan.movedEvents.map((item) => (
-                <div key={item.eventId}>
-                  <b>
-                    {displayPlace(item.name)} · 建议移动到 {item.suggestedDate}{" "}
-                    {item.suggestedStart}
-                  </b>
-                  <p>{item.reason}</p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="muted">没有活动被移除或移到其他日期。</p>
-          )}
-        </section>
-        <section className="card">
-          <h2>4. 新增推荐</h2>
-          <Timeline events={added} />
-        </section>
-        <section className="card">
-          <h2>5. 时间、路程和预算影响</h2>
-          <p>
-            新方案从 {request.currentState.currentTime} 之后开始，共{" "}
-            {plan.events.length} 项安排。
-          </p>
-          <p>
-            {request.currentState.remainingBudget === undefined
-              ? "预算未提供，未执行预算检查。"
-              : plan.events.some((event) => event.estimatedCostKnown === false)
-                ? "部分活动费用未提供，未执行完整预算检查。"
-              : `计划活动估算费用 ฿${plan.events.reduce((sum, event) => sum + event.estimatedCost, 0)}，可用预算 ฿${request.currentState.remainingBudget}。`}
-          </p>
-        </section>
-        <section className="card">
-          <h2>6. 未确认或仅为估算的信息</h2>
-          <ul>
-            {unconfirmed.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-        </section>
-        <details className="audit">
-          <summary>查看决策与校验证据</summary>
-          <div className="change-list">
-            {trace?.decisions.map((item, index) => (
-              <div key={`${item.eventId}-${index}`}>
-                <b>{item.decision}</b>
-                <p>理由：{item.reason}</p>
-                <p>证据：{item.evidence.join("；")}</p>
-              </div>
-            ))}
-            {trace?.validationEvidence.map((item) => (
-              <div key={item.check}>
-                <b>
-                  {item.status === "passed"
-                    ? "通过"
-                    : item.status === "failed"
-                      ? "未通过"
-                      : "未检查"}{" "}
-                  · {item.check}
-                </b>
-                <p>{item.detail}</p>
-              </div>
-            ))}
-          </div>
-        </details>
-      </div>
-      {!notice ? (
-        <div className="form-actions">
-          <button className="primary" disabled={busy} onClick={accept}>
-            {busy ? "正在确认……" : "接受并更新今日行程"}
-            <Check size={17} />
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => void editPlan("请减少步行。")}
-          >
-            少走一点路
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => void editPlan("请降低花费。")}
-          >
-            更省钱
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => void editPlan("请早点结束。")}
-          >
-            早点回去
-          </button>
-        </div>
-      ) : (
-        <Link className="primary" href="/trip">
-          查看更新后的今日行程 <ArrowRight size={17} />
-        </Link>
-      )}
+    <div className="mobile-workspace plan-screen">
+      <div className="plan-heading"><span className="eyebrow">方案等待你的确认</span><h1>今天建议这样调整</h1><p>{plan?.summary ?? result.message}</p></div>
+      {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
+      {plan && <div className="plan-summary-card"><div><b>保留 {retainedCount} / {originalCount} 个原安排</b><p>{plan.summary}</p></div><span className="impact-chip">影响程度：{impactLabel}</span></div>}
+      {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
+      {plan && <>
+        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><div className="drawer-scroll"><div className="analysis-quote">“{request.freeText}”</div><div className="analysis-block"><span className="eyebrow">识别到的变化</span><p>{result.context.disruption.freeText || request.freeText}</p></div><div className="analysis-block"><span className="eyebrow">受到影响的安排</span><p>{impact?.affectedActivities.length ? impact.affectedActivities.map(id => baseMap.get(id)?.name ?? id).join("、") : "暂未发现明确受影响的安排。"}</p></div><div className="analysis-block"><span className="eyebrow">为什么这样处理</span>{plan.removedEvents.length ? plan.removedEvents.map(item => <p className="reason-row" key={item.eventId}><b>{item.name}</b><span>{item.reason}</span></p>) : <p>尽量保留了原安排，把变化留在更有弹性的时间里。</p>}</div><div className="analysis-block"><span className="eyebrow">被留下的空白</span><p>{impact?.availableTimeWindows.length ? impact.availableTimeWindows.map(item => `${item.startTime}–${item.endTime}`).join("、") : "今天没有额外空档。"}</p></div></div><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
+        <div className="plan-timeline">{plan.events.map(event => { const status = statusOf(event); return <div className="plan-event" key={event.id}><div className="plan-event-time"><b>{event.startTime}</b><small>{event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className={`plan-event-line ${status.tone}`}><span /></div><div className={`plan-event-card ${status.tone}`}><div className="plan-event-top"><h2>{displayPlace(event.name)}</h2><span className={`status-pill ${status.tone}`}>{status.label}</span></div><p><MapPin size={14} /> {displayPlace(event.location)}</p><small>{event.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[event.travelMode] : "路线待查询"} · {eventDurationLabel(event)}</small></div></div>; })}</div>
+        {candidatePlans.length > 1 && <section className="candidate-section"><div className="section-title"><h2>其他方案</h2><span>{candidatePlans.length} 个可选</span></div><div className="candidate-list">{candidatePlans.map((candidate, index) => { const selected = candidate.plan?.summary === plan.summary && candidate.plan?.events.length === plan.events.length; return <button type="button" key={candidate.id} className={`candidate-card ${selected ? "selected" : ""}`} onClick={() => chooseCandidate(candidate)}><span><b>{candidate.title || `方案 ${index + 1}`}</b><small>{candidate.tradeOff}</small></span>{selected ? <Check size={18} /> : <ChevronRight size={18} />}</button>; })}</div></section>}
+      </>}
+      {!notice && plan && <div className="plan-actions"><button className="primary full" disabled={busy} onClick={() => void accept()}>{busy ? "正在确认…" : "接受方案"}<Check size={17} /></button><div className="action-pair"><button className="secondary" disabled={busy} onClick={() => void adjustPlan("less_plan")}>再少安排点</button><button className="secondary" disabled={busy} onClick={() => void adjustPlan("more_plan")}>再多安排点</button></div>{candidatePlans.length > 1 && <button className="text-action centered" type="button" onClick={() => document.querySelector<HTMLButtonElement>(".candidate-section .candidate-card")?.focus()}>看其他方案</button>}</div>}
+      {notice && <div className="success-box" role="status">{notice}</div>}
     </div>
   );
+}
+
+export function MineFlow() {
+  const { session, error } = useRealSession();
+  const [rescueCount, setRescueCount] = useState(0);
+  const [lastRescue, setLastRescue] = useState<string | null>(null);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        const events = JSON.parse(localStorage.getItem("travel-analytics") ?? "[]") as Array<{ name?: string; created_at?: string }>;
+        const accepted = events.filter(event => event.name === "replan_accepted").sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+        setRescueCount(accepted.length);
+        setLastRescue(accepted[0]?.created_at ?? null);
+      } catch {
+        setRescueCount(0);
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+  if (!session) return <Loading error={error} />;
+  const displayName = session.snapshot.profile.id === "local-traveler" ? "Ying Long" : session.snapshot.profile.id;
+  const latest = lastRescue ? new Date(lastRescue).toLocaleDateString("zh-CN", { month: "long", day: "numeric" }) : "还没有成功救援记录";
+  const settings = ["默认偏好", "历史救援记录", "数据与隐私", "关于接住你"];
+  return <div className="mobile-workspace mine-screen"><div className="mine-heading"><span className="eyebrow">个人设置</span><h1>我的</h1></div><section className="profile-card"><div className="avatar">{displayName.slice(0, 1).toUpperCase()}</div><div><h2>{displayName}</h2><p>已被接住 {rescueCount} 次</p></div><Sparkles size={22} /></section><section className="mine-stat"><div><span className="eyebrow">最近一次救援</span><b>{latest}</b></div><Settings2 size={20} /></section><div className="settings-list">{settings.map(label => <button type="button" className="settings-row" key={label}><span>{label}</span><ChevronRight size={18} /></button>)}</div><p className="mine-footnote">你的行程只保存在此设备的浏览器里。</p></div>;
 }
 
 export function SessionWorkflow({ page }: { page: string }) {
@@ -2095,6 +1686,7 @@ export function SessionWorkflow({ page }: { page: string }) {
   if (page === "trip") return <TripFlow />;
   if (page === "rescue") return <RescueFlow />;
   if (page === "result") return <ResultFlow />;
+  if (page === "me") return <MineFlow />;
   return <HomeFlow />;
 }
 

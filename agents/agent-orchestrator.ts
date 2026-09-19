@@ -13,6 +13,7 @@ export const AssistRequestSchema = z.object({
   snapshot: SnapshotSchema, rawText:z.string().trim().min(1).max(4000), browserLocation:BrowserLocationSchema.optional(),
   userAnswers:z.object({destination:z.string().trim().max(80).optional(),currentLocation:z.string().trim().max(100).optional(),travelMode:TravelModeSchema.optional(),venueSelections:z.record(z.string().min(1)).optional(),durations:z.record(z.number().int().positive().max(1440)).optional()}).optional(),
   confirmedDraft: ConfirmedDraftSchema.optional(), appendText:z.string().trim().max(4000).optional(), replaceRawText:z.string().trim().max(4000).optional(),
+  adjustments:z.array(z.enum(["less_plan","more_plan"])).max(1).optional(),
 });
 export type AssistRequest=z.infer<typeof AssistRequestSchema>;
 export type AssistResponse =
@@ -109,7 +110,7 @@ function mergeFacts(input:AssistRequest,parsed:ParsedUserInput):Snapshot {
   parsed.worldOptions={selectedPois:{...parsed.worldOptions?.selectedPois,...answers?.venueSelections},...(modes.length?{allowedTravelModes:modes}:{}),...(answers?.travelMode?{travelMode:answers.travelMode}:{})};
   return SnapshotSchema.parse({...snapshot,state:{...snapshot.state,...parsed.context},stateSources:parsed.contextSources,trip:{...snapshot.trip,destination:answers?.destination||snapshot.trip.destination},itinerary:next.sort((a,b)=>a.startTime.localeCompare(b.startTime))});
 }
-const buildRequest=(snapshot:Snapshot,parsed:ParsedUserInput,removedLockedIds:string[]=[] )=>ReplanningRequestSchema.parse({reason:parsed.disruptions[0]?.kind??"optimize",freeText:parsed.rawText,currentState:snapshot.state,closedPlaceIds:parsed.closedPlaceIds,variation:0,stateSources:parsed.contextSources,worldOptions:parsed.worldOptions,...(removedLockedIds.length?{confirmedDraftChanges:{removedLockedIds}}:{})});
+const buildRequest=(snapshot:Snapshot,parsed:ParsedUserInput,removedLockedIds:string[]=[],adjustments:AssistRequest["adjustments"]=[] )=>ReplanningRequestSchema.parse({reason:parsed.disruptions[0]?.kind??"optimize",freeText:parsed.rawText,currentState:snapshot.state,closedPlaceIds:parsed.closedPlaceIds,variation:0,stateSources:parsed.contextSources,worldOptions:parsed.worldOptions,...(adjustments.length?{adjustments}:{ } ),...(removedLockedIds.length?{confirmedDraftChanges:{removedLockedIds}}:{})});
 
 export async function runAgentAssist(raw:unknown):Promise<AssistResponse>{
   const input=AssistRequestSchema.parse(raw);
@@ -133,7 +134,7 @@ export async function runAgentAssist(raw:unknown):Promise<AssistResponse>{
     parsed=await new DeepSeekSemanticParser().parse(input.snapshot,input.rawText);
     snapshot=mergeFacts(input,parsed);
   }
-  const request=buildRequest(snapshot,parsed,input.confirmedDraft?.removedLockedIds??[]);
+  const request=buildRequest(snapshot,parsed,input.confirmedDraft?.removedLockedIds??[],input.adjustments);
   let impact=analyzeImpact(snapshot,request);
   const missingUserFacts:MissingFact[]=[];
   const add=(field:string,reason:string)=>missingUserFacts.push({field,importance:"blocking",reason});
