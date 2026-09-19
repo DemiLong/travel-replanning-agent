@@ -9,6 +9,7 @@ import {
   type SemanticExtraction,
   type Snapshot,
 } from "../types";
+import { addMinutesWithinDay } from "../lib/time";
 
 export const SEMANTIC_PARSER_PROMPT = `You extract facts from a traveler's Chinese or English message for a same-day itinerary rescue assistant.
 
@@ -30,12 +31,6 @@ Keep these concepts separate:
 Split multiple activities into separate objects. Never use the full user sentence as an activity name. Keep each sourceText as the shortest exact clause that supports the extracted fact. Every non-null context value also needs its exact sourceText; otherwise return both value and sourceText as null. If one phrase has several possible attachments, use locked=uncertain or add an ambiguity instead of guessing.
 
 The saved itinerary supplied by the application is context, not text to re-extract. Do not copy it into activities. The application will merge it deterministically after the traveler confirms the extraction.`;
-
-function addMinutes(value: string, amount: number) {
-  const [hours, minutes] = value.split(":").map(Number);
-  const total = Math.min(23 * 60 + 59, hours * 60 + minutes + amount);
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
-}
 
 function canonicalLocation(value: string) {
   return value.trim();
@@ -79,16 +74,19 @@ export function normalizeSemanticExtraction(
       ...activity,
       id: `mention-${index}-${crypto.randomUUID()}`,
     };
-    const endTime =
-      activity.endTime ??
-      (activity.startTime && activity.durationMinutes
-        ? addMinutes(activity.startTime, activity.durationMinutes)
-        : null);
+    let endTime = activity.endTime;
+    if (!endTime && activity.startTime && activity.durationMinutes) {
+      try {
+        endTime = addMinutesWithinDay(activity.startTime, activity.durationMinutes);
+      } catch {
+        parseWarnings.push(`“${activity.name}”的停留时长会跨日，当前行程暂不支持跨日活动。`);
+      }
+    }
     if (
       activity.role !== "existing_plan" ||
       !activity.name.trim() ||
       !activity.startTime ||
-      !endTime
+      !activity.location
     ) {
       activityMentions.push(mention);
       continue;
@@ -107,6 +105,7 @@ export function normalizeSemanticExtraction(
       name: activity.name.trim(),
       startTime: activity.startTime,
       endTime,
+      durationMinutes: activity.durationMinutes,
       location: activity.location
         ? canonicalLocation(activity.location)
         : "",
@@ -167,7 +166,6 @@ export function normalizeSemanticExtraction(
   for(const mention of activityMentions){
     if(!mention.location)missingFacts.push(`activity:${mention.id}:location`);
     if(!mention.startTime)missingFacts.push(`activity:${mention.id}:startTime`);
-    if(!mention.endTime&&!mention.durationMinutes)missingFacts.push(`activity:${mention.id}:duration`);
   }
   if (existingPlans.some((item) => !item.location.trim())) missingFacts.push("activityDetails");
   if (extraction.disruptions.some((item) => item.kind === "closed")) missingFacts.push("closedPlace");

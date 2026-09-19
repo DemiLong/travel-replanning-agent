@@ -67,6 +67,7 @@ export const RealWorldContextSchema = z.object({
   dataFreshness:z.object({groundedAt:z.string().datetime(),routeMaxAgeSeconds:z.number(),locationMaxAgeSeconds:z.number()}),
   missingWorldFacts:z.array(MissingWorldFactSchema),
   ambiguities:z.array(z.object({field:z.string(),label:z.string(),candidates:z.array(PoiSchema)})),
+  candidatePlaceIds:z.record(z.array(z.string())).optional(),
   travelMode:TravelModeSchema.nullable(),
   cityResolution:CityResolutionSchema.optional(),
   resolutionEvidence:z.array(ResolutionEvidenceSchema).optional(),

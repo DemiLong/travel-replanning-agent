@@ -1,10 +1,12 @@
 import { getPlaces } from "./place-service";
+import { addMinutesWithinDay } from "../lib/time";
 
 export type ParsedItineraryItem = {
   id: string;
   name: string;
   startTime: string;
-  endTime: string;
+  endTime: string | null;
+  durationMinutes: number | null;
   location: string;
   estimatedCost: number;
   estimatedCostKnown: boolean;
@@ -19,14 +21,6 @@ function clock(hourValue: string, minuteValue?: string, meridiem?: string) {
   if (meridiem?.toLowerCase() === "pm" && hour < 12) hour += 12;
   if (meridiem?.toLowerCase() === "am" && hour === 12) hour = 0;
   return `${String(hour).padStart(2, "0")}:${minuteValue ?? "00"}`;
-}
-
-function addMinutes(value: string, minutes: number) {
-  const [hours, mins] = value.split(":").map(Number);
-  const total = Math.min(23 * 60 + 59, hours * 60 + mins + minutes);
-  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(
-    total % 60,
-  ).padStart(2, "0")}`;
 }
 
 function aliases(name: string) {
@@ -85,7 +79,12 @@ export function parseItineraryText(
         : /lunch|午餐|早餐|咖啡/.test(lower)
           ? 60
           : (matchedPlace?.averageDuration ?? 90);
-      const endTime = addMinutes(startTime, duration);
+      let endTime: string | null;
+      try {
+        endTime = addMinutesWithinDay(startTime, duration);
+      } catch {
+        return null;
+      }
       return {
         id: crypto.randomUUID(),
         name:
@@ -93,6 +92,7 @@ export function parseItineraryText(
           raw.replace(/\b(booked|reservation|reserved)\b/gi, "").trim(),
         startTime,
         endTime,
+        durationMinutes: duration,
         location: matchedPlace?.district ?? fallbackLocation,
         estimatedCost: matchedPlace?.estimatedCost ?? 0,
         estimatedCostKnown: Boolean(matchedPlace),

@@ -105,6 +105,7 @@ export const ReplanningRequestSchema = z.object({
   adjustments: z.array(z.enum(planAdjustments)).max(4).optional(),
   stateSources: StateSourcesSchema.optional(),
   worldOptions: WorldOptionsSchema.optional(),
+  confirmedDraftChanges: z.object({ removedLockedIds: z.array(z.string()).max(30) }).optional(),
 });
 const DecisionFactSchema = z.object({
   field: z.string(),
@@ -243,7 +244,8 @@ export const ParsedPlanItemSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   startTime: TimeSchema,
-  endTime: TimeSchema,
+  endTime: TimeSchema.nullable(),
+  durationMinutes: z.number().int().positive().max(1440).nullable().default(null),
   location: z.string(),
   estimatedCost: z.number().min(0),
   estimatedCostKnown: z.boolean().optional(),
@@ -284,6 +286,25 @@ export const ParsedUserInputSchema = z.object({
   question: z.string().max(500).nullable().optional(),
   resolutionEvidence: ResolutionEvidenceSchema.array().optional(),
   worldOptions: WorldOptionsSchema.optional(),
+});
+export const ConfirmedPlanItemSchema = ParsedPlanItemSchema.omit({ source: true });
+export const ConfirmedPlanItemWithPlaceSchema = ConfirmedPlanItemSchema.extend({
+  placeId: z.string().min(1).optional(),
+});
+export const ConfirmedDraftSchema = z.object({
+  rawText: z.string().max(4000),
+  intent: UnifiedIntentSchema,
+  existingPlans: z.array(ConfirmedPlanItemWithPlaceSchema).max(30),
+  activityMentions: z.array(ActivityMentionSchema).max(30).default([]),
+  disruptions: z.array(ParsedDisruptionSchema).max(10),
+  constraints: z.array(ParsedConstraintSchema).max(30),
+  context: ParsedContextSchema,
+  contextSources: StateSourcesSchema,
+  closedPlaceIds: z.array(z.string()).max(30).default([]),
+  question: z.string().max(500).nullable().optional(),
+  worldOptions: WorldOptionsSchema.optional(),
+  removedLockedIds: z.array(z.string()).max(30).default([]),
+  baseRevision: z.number().int().min(0),
 });
 export const MissingFactSchema = z.object({
   field: z.string().min(1),
@@ -339,6 +360,7 @@ export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type ExperienceMode = z.infer<typeof ExperienceModeSchema>;
 export type FlowStage = z.infer<typeof FlowStageSchema>;
 export type ParsedUserInput = z.infer<typeof ParsedUserInputSchema>;
+export type ConfirmedDraft = z.infer<typeof ConfirmedDraftSchema>;
 export type SemanticExtraction = z.infer<typeof SemanticExtractionSchema>;
 export type MissingFact = z.infer<typeof MissingFactSchema>;
 export type ImpactAnalysis = z.infer<typeof ImpactAnalysisSchema>;
@@ -356,6 +378,7 @@ export type AgentContext = {
   travelMinutes: Record<string, number>;
   impactAnalysis?: ImpactAnalysis;
   unresolvedMentions?: ParsedUserInput["activityMentions"];
+  removedLockedIds?: string[];
 };
 export type Violation = {
   code:

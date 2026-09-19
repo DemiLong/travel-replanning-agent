@@ -124,9 +124,9 @@ export async function runWorldTests() {
     assert(!result.missingFacts.includes("existingPlans"));
     assert(result.missingFacts.some(x=>x.endsWith(":location")));
     const repeated=normalizeSemanticExtraction(createStarterSnapshot(),regressionText,{...regressionExtraction,activities:[...regressionExtraction.activities,{...regressionExtraction.activities[0],role:"considering",name:"下午去故宫",startTime:null,sourceText:"我下午还要去故宫吗"}]},"fixture");
-    assert.equal(repeated.activityMentions.length,3);
+    assert.equal(repeated.activityMentions.length,2);
     assert(result.parseWarnings.some(x => x.includes("酒店")));
-    assert.deepEqual(result.activityMentions.map(x => x.startTime), ["10:00", "15:00", "17:00"]);
+    assert.deepEqual(result.activityMentions.map(x => x.startTime), ["15:00", "17:00"]);
     const validFetch=globalThis.fetch;let repairs=0;
     globalThis.fetch=async (...args)=>{
       repairs++;

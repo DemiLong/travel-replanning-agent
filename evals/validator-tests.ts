@@ -22,6 +22,9 @@ import {
   saveSession,
 } from "../services/trip-service";
 import type { ProposedPlan, Violation } from "../types";
+import { ParsedUserInputSchema } from "../types";
+import { addMinutesWithinDay } from "../lib/time";
+import { confirmedDraftFromParsed, hydrateParsedPlans } from "../services/itinerary-domain";
 async function main() {
   await runWorldTests();
   const legacyDemo = createLegacyDemoSnapshot();
@@ -366,6 +369,28 @@ async function main() {
   console.log(
     "PASS natural-language itinerary parsing and locked reservation detection",
   );
+  assert.equal(addMinutesWithinDay("10:00", 90), "11:30");
+  assert.throws(() => addMinutesWithinDay("23:30", 30), /跨日/);
+  assert.throws(() => addMinutesWithinDay("23:30", 120), /跨日/);
+  const identitySnapshot = createStarterSnapshot();
+  identitySnapshot.itinerary = [event("museum", "stable-museum", "10:00", "11:30")];
+  const identityParsed = ParsedUserInputSchema.parse({
+    rawText: "10点去城市博物馆",
+    intent: "create",
+    existingPlans: [{ id: "parser-copy", name: "城市博物馆", startTime: "10:00", endTime: "11:30", durationMinutes: 90, location: "历史街区", estimatedCost: 500, estimatedCostKnown: true, locked: false, source: "user" }],
+    disruptions: [], constraints: [], context: identitySnapshot.state, contextSources: identitySnapshot.stateSources,
+    closedPlaceIds: [], missingFacts: [], status: "confirmed",
+  });
+  const hydrated = hydrateParsedPlans(identitySnapshot, identityParsed);
+  assert.equal(hydrated.existingPlans[0].id, "stable-museum");
+  const unknownParsed = ParsedUserInputSchema.parse({
+    ...identityParsed,
+    existingPlans: [{ ...identityParsed.existingPlans[0], id: "unknown-museum", endTime: null, durationMinutes: null }],
+  });
+  const unknownDraft = confirmedDraftFromParsed({ ...identitySnapshot, itinerary: [] }, unknownParsed);
+  assert.equal(unknownDraft.existingPlans[0].endTime, null);
+  assert.equal(unknownDraft.existingPlans[0].durationMinutes, null);
+  console.log("PASS shared time boundaries, unknown duration encoding, and activity ID stability");
   const mixedSnapshot = createStarterSnapshot();
   mixedSnapshot.state.currentTime = "11:00";
   mixedSnapshot.stateSources.currentTime = "system";

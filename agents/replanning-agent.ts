@@ -71,9 +71,20 @@ export function decisionTrace(
       value: `${event.startTime} ${event.name}`,
       source: "user" as const,
     })),
+    ...(context.removedLockedIds??[]).map((id) => ({
+      field: "用户明确删除的固定安排",
+      value: id,
+      source: "user" as const,
+    })),
   ];
   const decisions: NonNullable<AgentResult["decisionTrace"]>["decisions"] = plan
     ? [
+        ...(context.removedLockedIds??[]).map((id) => ({
+          eventId: id,
+          decision: "按用户明确指令移除固定安排",
+          reason: "该删除动作由确认草稿中的 removedLockedIds 明确表达，并非列表合并时静默丢失。",
+          evidence: ["用户在确认界面明确确认删除。"],
+        })),
         ...context.lockedEvents.map((event) => ({
           eventId: event.id,
           decision: `保留 ${event.name}`,
@@ -176,7 +187,7 @@ export function decisionTrace(
   );
   if(context.world){
     for(const evidence of context.world.resolutionEvidence??[])inputFacts.push({field:`地点解析 ${evidence.field}`,value:`${evidence.query} / ${evidence.reason} / ${evidence.poiId??"尚未确定"}`,source:"system"});
-    for(const event of plan?.events??[])if(event.durationSource==="unknown"||event.durationSource==="suggested")validationEvidence.push({check:`${event.name}停留时长`,status:"not_checked",detail:event.durationSource==="unknown"?"只核验固定到达时刻，结束时间未知；不安排后续活动。":"本方案停留时长为建议，非用户提供事实。",source:"unset"});
+    for(const event of plan?.events??[])if(event.durationSource==="unknown"||event.durationSource==="suggested")validationEvidence.push({check:`${event.name}停留时长`,status:"not_checked",detail:event.durationSource==="unknown"?"只核验固定到达时刻，结束时间未知；系统没有强制用户补充时长。":"本方案使用了建议停留时长，非用户提供事实。",source:"unset"});
     inputFacts.push(...context.world.resolvedPlaces.map(p=>({field:"高德地点",value:`${p.poi.name} / ${p.poi.poiId} / GCJ02 / ${p.poi.fetchedAt}`,source:"system" as const})));
     for(const route of context.world.routes.filter(r=>plan?.events.some(e=>e.placeId===r.destination.id)))inputFacts.push({field:"高德路线",value:`${route.origin.id} → ${route.destination.id} / ${route.travelMode} / ${route.durationSeconds??"不可用"} 秒 / ${route.fetchedAt}`,source:"system"});
     if(context.world.currentLocation)inputFacts.push({field:"位置来源",value:`${context.world.currentLocation.source} / GCJ02 / ${context.world.currentLocation.capturedAt}`,source:"system"});

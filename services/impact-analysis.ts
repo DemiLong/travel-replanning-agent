@@ -58,7 +58,15 @@ export function analyzeImpact(
       });
     }
     const fixed = locked.find((event) => minutes(event.startTime) === start);
-    cursor = fixed?.durationSource==="unknown" ? 1440 : Math.max(cursor, fixed ? minutes(fixed.endTime) : start);
+    // Unknown duration is not a question for the traveler. If another fixed
+    // appointment follows, keep the gap open so the planner can suggest a
+    // stay length and validate whether that appointment remains reachable. If
+    // this is the last fixed appointment, do not invent a post-appointment
+    // window that would imply its unknown end time.
+    const hasLaterFixed = fixedStarts.some((value) => value > start);
+    cursor = fixed?.durationSource === "unknown"
+      ? hasLaterFixed ? start : 1440
+      : Math.max(cursor, fixed ? minutes(fixed.endTime) : start);
   }
   if (cursor < 24 * 60) {
     windows.push({

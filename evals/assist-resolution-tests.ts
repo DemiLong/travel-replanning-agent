@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createStarterSnapshot } from "../data/session-defaults";
-import { EventSchema, type SemanticExtraction, type Snapshot } from "../types";
+import { ConfirmedDraftSchema, EventSchema, type SemanticExtraction, type Snapshot } from "../types";
 import { runAgentAssist } from "../agents/agent-orchestrator";
 import { clearWorldCache } from "../services/world/amap-client";
 import { WorldContextService } from "../services/world/world-context-service";
 import { validatePlan } from "../validators";
-import { uniquePlace, allowedModes, freshBrowserLocation } from "../services/world/context-resolution";
+import { allowedModes, freshBrowserLocation } from "../services/world/context-resolution";
+import { confirmedDraftFromParsed } from "../services/itinerary-domain";
 
 const text="我原本 10:00 去美术馆，现在航班晚点了 2 小时，刚到虹桥。下午 6 点的预约晚餐必须保留。";
 const extraction:SemanticExtraction={intent:"rescue",activities:[
@@ -20,21 +21,21 @@ export async function runAssistResolutionTests(){
  const oldFetch=globalThis.fetch, key=process.env.DEEPSEEK_API_KEY, amap=process.env.AMAP_API_KEY;
  process.env.DEEPSEEK_API_KEY="test-resolution";process.env.AMAP_API_KEY="test-resolution";
  let active=structuredClone(extraction), plannerCalls=0, queries:URL[]=[], failRoutes=false, ambiguousMuseum=false;
- const pois=[poi("airport","上海虹桥国际机场"),poi("art","龙美术馆"),poi("dinner","和平饭店"),poi("hotel","虹桥酒店")];
+ const pois=[poi("airport","上海虹桥国际机场"),poi("art","龙美术馆"),poi("dinner","和平饭店"),poi("hotel","虹桥酒店"),poi("yongding","永定坊"),poi("xiaoman","小蛮腰")];
  globalThis.fetch=async(url,options)=>{
   const u=new URL(String(url));
   if(u.hostname==="api.deepseek.com"){
-   const body=JSON.parse(String(options?.body));let output:unknown=active;
+   const body=JSON.parse(String(options?.body)) as {input:Array<{content:string}>};let output:unknown=active;
    if(body.input[0].content.includes("itinerary rescue planner")){
-    plannerCalls++;const ctx=JSON.parse(body.input[1].content);
-    output={candidates:[{title:"保留晚餐，按路程调整",tradeOff:"空档不强行填满",steps:ctx.confirmedItinerary.map((e:any)=>({eventId:e.id,poiId:null,durationMinutes:e.durationSource==="unknown"&&!e.locked?60:null,travelMode:ctx.world.routes.some((r:any)=>r.travelMode==="TRANSIT"&&r.status==="available")?"TRANSIT":"WALKING",reason:"保留原计划"})),removed:[]}]};
+    plannerCalls++;const ctx=JSON.parse(body.input[1].content) as {confirmedItinerary:Array<{id:string;durationSource:string;locked:boolean}>;world:{routes:Array<{travelMode:string;status:string}>}};
+    output={candidates:[{title:"保留晚餐，按路程调整",tradeOff:"空档不强行填满",steps:ctx.confirmedItinerary.map((e,index)=>({eventId:e.id,poiId:null,durationMinutes:e.durationSource==="unknown"&&index<ctx.confirmedItinerary.length-1?60:null,travelMode:ctx.world.routes.some((r)=>r.travelMode==="TRANSIT"&&r.status==="available")?"TRANSIT":"WALKING",reason:"保留原计划"})),removed:[]}]};
    }
    return Response.json({id:"response",object:"response",status:"completed",output:[{id:"msg",type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:JSON.stringify(output),annotations:[]}]}]});
   }
   queries.push(u);
   if(u.pathname.includes("/place/")){
    const q=u.searchParams.get("keywords")??"";
-   let found=u.pathname.endsWith("detail")?pois.filter(p=>p.id===u.searchParams.get("id")):q.includes("虹桥国际机场")?[pois[0],poi("terminal","上海虹桥国际机场T2航站楼")]:q==="美术馆"?(ambiguousMuseum?[pois[1],poi("other-art","上海美术馆")]:[pois[1]]):pois.filter(p=>p.name===q);
+   const found=u.pathname.endsWith("detail")?pois.filter(p=>p.id===u.searchParams.get("id")):q.includes("虹桥国际机场")?[pois[0],poi("terminal","上海虹桥国际机场T2航站楼")]:q==="美术馆"?(ambiguousMuseum?[pois[1],poi("other-art","上海美术馆")]:[pois[1]]):pois.filter(p=>p.name===q);
    return Response.json({status:"1",pois:found});
   }
   if(u.pathname.includes("/direction/"))return Response.json({status:"1",route:failRoutes?{}:u.pathname.includes("transit")?{transits:[{duration:"1200",distance:"5000",cost:"6"}]}:{paths:[{duration:"1800",distance:"5000"}]}});
@@ -54,6 +55,14 @@ export async function runAssistResolutionTests(){
   for(const mode of ["walking","driving","transit"])assert(queries.some(q=>q.pathname.includes(mode)));
   assert(queries.filter(q=>q.pathname.includes("/direction/")).length<=40);
   assert.deepEqual(validatePlan(ready.result.context,ready.result.plan),[]);
+  const confirmedDraft=confirmedDraftFromParsed(ready.base,ready.parsedInput);
+  const forgedPoi=ConfirmedDraftSchema.parse({...confirmedDraft,worldOptions:{...confirmedDraft.worldOptions,selectedPois:{art:"not-a-candidate"}}});
+  const forgedPoiResult=await runAgentAssist({snapshot:s,rawText:text,confirmedDraft:forgedPoi,browserLocation:{latitude:39.9,longitude:116.4,coordinateSystem:"WGS84",accuracy:10,capturedAt:new Date().toISOString(),source:"browser_geolocation"}});
+  assert.equal(forgedPoiResult.status,"needs_input");
+  assert(forgedPoiResult.missingFacts[0].reason.includes("候选"));
+  const forgedLock=ConfirmedDraftSchema.parse({...confirmedDraft,existingPlans:confirmedDraft.existingPlans.map(item=>item.id==="dinner"?{...item,locked:false}:item)});
+  await assert.rejects(()=>runAgentAssist({snapshot:s,rawText:text,confirmedDraft:forgedLock}),/固定安排/);
+  console.log("PASS confirmedDraft rejects forged POI selections and locked-state tampering");
   const forged=structuredClone(ready.result.plan!);forged.events[0].travelMode="DRIVING";
   assert(validatePlan(ready.result.context,forged).some(v=>v.code==="travel_time"),"per-leg time must match selected mode");
   const refreshed=await new WorldContextService().ground({snapshot:ready.base,request:ready.request,mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()}});
@@ -73,9 +82,22 @@ export async function runAssistResolutionTests(){
   const invalid=structuredClone(follow.result.plan!);invalid.events.push({...invalid.events[0],id:"forged-after",startTime:"19:00",endTime:"20:00"});assert(validatePlan(follow.result.context,invalid).some(v=>v.code==="duration"));
   console.log("PASS missing dinner asks one question; natural-language answer keeps partial museum and final arrival-only booking");
 
-  reset();ambiguousMuseum=true;active.activities[1].location="和平饭店";
-  const ambiguous=await runAgentAssist({snapshot:base(),rawText:rawFollow});assert.equal(ambiguous.status,"needs_input");assert.equal(ambiguous.ambiguities?.[0].candidates.length,2);
-  const chosen=await runAgentAssist({snapshot:base(),rawText:rawFollow,userAnswers:{venueSelections:{[ambiguous.missingFacts[0].field]:"art"}}});assert.equal(chosen.status,"ready");assert(chosen.result.ok);
+  reset();
+  active={...structuredClone(extraction),activities:[
+    {role:"existing_plan",name:"永定坊",startTime:"15:00",endTime:null,durationMinutes:null,location:"永定坊",estimatedCost:null,locked:"yes",sourceText:"下午3点和朋友约好在永定坊"},
+    {role:"existing_plan",name:"小蛮腰",startTime:"20:00",endTime:"21:00",durationMinutes:null,location:"小蛮腰",estimatedCost:null,locked:"yes",sourceText:"晚上8点去小蛮腰"},
+  ]};
+  const unknownMeeting=base();
+  unknownMeeting.itinerary=[{...saved("yongding","永定坊","永定坊","15:00","15:00",true),durationSource:"unknown"},{...saved("xiaoman","小蛮腰","小蛮腰","20:00","21:00",true)}];
+  const unknownMeetingResult=await runAgentAssist({snapshot:unknownMeeting,rawText:"下午3点和朋友约好在永定坊，晚上8点去小蛮腰。",browserLocation:{latitude:39.9,longitude:116.4,coordinateSystem:"WGS84",accuracy:10,capturedAt:new Date().toISOString(),source:"browser_geolocation"}});
+  assert.equal(unknownMeetingResult.status,"ready");
+  assert.equal(unknownMeetingResult.result.plan!.events.find((item)=>item.id==="yongding")?.durationSource,"suggested");
+  console.log("PASS unknown locked activity never asks the traveler for an end time and receives a planner suggestion");
+
+   reset();ambiguousMuseum=true;active.activities[1].location="和平饭店";
+   const ambiguousSnapshot=base();ambiguousSnapshot.itinerary=[saved("art","龙美术馆","美术馆","10:00","11:00",false),saved("dinner","预约晚餐","和平饭店","18:00","19:00",true)];
+   const ambiguous=await runAgentAssist({snapshot:ambiguousSnapshot,rawText:rawFollow});assert.equal(ambiguous.status,"needs_input");assert.equal(ambiguous.ambiguities?.[0].candidates.length,2);
+   const chosen=await runAgentAssist({snapshot:ambiguousSnapshot,rawText:rawFollow,userAnswers:{venueSelections:{[ambiguous.missingFacts[0].field]:"art"}}});assert.equal(chosen.status,"ready");assert(chosen.result.ok);
   ambiguousMuseum=false;
   console.log("PASS ambiguous museum returns actual candidates and selection is applied without rewriting the itinerary");
 

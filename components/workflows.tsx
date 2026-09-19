@@ -18,10 +18,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { LocationService } from "@/services/world/location-service";
 import { RealWorldContextSchema, type RealWorldContext, type TravelMode } from "@/types/world";
 import { confirmParsedInput } from "@/services/input-parser";
+import { confirmedDraftFromParsed, hydrateParsedPlans, mergePlans, normalizeParsed } from "@/services/itinerary-domain";
+import { addMinutesWithinDay } from "@/lib/time";
 import {
   loadSession,
   logEvent,
-  recordResult,
   requestHeaders,
   saveFlowDraft,
   savePendingPlan,
@@ -39,7 +40,20 @@ import {
   type ReplanningRequest,
   type Snapshot,
 } from "@/types";
-import type { MissingFact } from "@/types";
+import type { ImpactAnalysis, MissingFact } from "@/types";
+
+type AssistBody = {
+  error?: string;
+  status?: string;
+  parsedInput?: ParsedUserInput;
+  missingFacts?: MissingFact[];
+  ambiguities?: RealWorldContext["ambiguities"];
+  result?: unknown;
+  base?: unknown;
+  request?: unknown;
+  impactAnalysis?: ImpactAnalysis;
+  world?: unknown;
+};
 
 const reasonLabels: Record<ReplanningRequest["reason"], string> = {
   weather: "下雨或天气变化",
@@ -86,6 +100,22 @@ async function parseWithModel(
     throw new Error("AI 解析未启用，请先配置服务端 DEEPSEEK_API_KEY。");
   }
   throw new Error(body.error ?? "AI 语义解析失败，原文已经保留，请重试。");
+}
+
+async function assistWithModel(
+  snapshot: Snapshot,
+  rawText: string,
+  options: { confirmedDraft?: ReturnType<typeof confirmedDraftFromParsed>; appendText?: string; replaceRawText?: string } = {},
+) {
+  const response = await fetch("/api/assist", {
+    method: "POST",
+    headers: await requestHeaders(),
+    body: JSON.stringify({ snapshot, rawText, ...options }),
+  });
+  const body = (await response.json()) as { error?: string; parsedInput?: unknown };
+  if (!response.ok) throw new Error(body.error ?? "AI 解析失败，请重试。");
+  if (!body.parsedInput) throw new Error("AI 没有返回可确认的行程事实。");
+  return ParsedUserInputSchema.parse(body.parsedInput);
 }
 
 function useRealSession() {
@@ -159,102 +189,6 @@ function Timeline({ events }: { events: ItineraryEvent[] }) {
       ))}
     </div>
   );
-}
-
-function parsedToEvent(
-  item: ParsedUserInput["existingPlans"][number],
-  snapshot: Snapshot,
-): ItineraryEvent {
-  const existing = snapshot.itinerary.find(
-    (event) =>
-      event.startTime === item.startTime &&
-      event.name.trim().toLowerCase() === item.name.trim().toLowerCase(),
-  );
-  if (existing)
-    return {
-      ...existing,
-      endTime: item.endTime,
-      location: item.location,
-      estimatedCost: item.estimatedCost,
-      estimatedCostKnown: item.estimatedCostKnown,
-      locked: item.locked,
-      status: item.locked ? "locked" : existing.status,
-    };
-  return {
-    id: `event-${item.id}`,
-    placeId: `custom-${item.id}`,
-    name: item.name,
-    category: "user activity",
-    startTime: item.startTime,
-    endTime: item.endTime,
-    location: item.location,
-    status: item.locked ? "locked" : "planned",
-    locked: item.locked,
-    estimatedCost: item.estimatedCost,
-    estimatedCostKnown: item.estimatedCostKnown,
-    indoorOutdoor: "mixed",
-    openingTime: null,
-    closingTime: null,
-    travelTimeFromPrevious: null,
-    reason: item.locked
-      ? "这是用户确认需要保留的固定安排。"
-      : "这是用户确认的原有安排。",
-    constraint: item.locked ? "Locked plan" : "Original itinerary",
-  };
-}
-
-function mergePlans(
-  snapshot: Snapshot,
-  parsed: ParsedUserInput,
-): ItineraryEvent[] {
-  const next = [...snapshot.itinerary];
-  for (const item of parsed.existingPlans) {
-    const converted = parsedToEvent(item, snapshot);
-    const index = next.findIndex((event) => event.id === converted.id);
-    if (index >= 0) next[index] = converted;
-    else next.push(converted);
-  }
-  return next.sort((a, b) => a.startTime.localeCompare(b.startTime));
-}
-
-function normalizeParsed(
-  parsed: ParsedUserInput,
-  baseItineraryCount: number,
-  closedPlaceIds: string[] = [],
-) {
-  const missing = parsed.missingFacts.filter(
-    (field) =>
-      !field.startsWith("activity:") && ![
-        "existingPlans",
-        "disruptionOrOptimize",
-        "currentLocation",
-        "closedPlace",
-        "activityDecision",
-        "activityDetails",
-      ].includes(field),
-  );
-  if (baseItineraryCount + parsed.existingPlans.length + parsed.activityMentions.length === 0)
-    missing.push("existingPlans");
-  if (!parsed.disruptions.length && parsed.intent!=="optimize") missing.push("disruptionOrOptimize");
-  if (!parsed.context.currentLocation?.trim()) missing.push("currentLocation");
-  if (
-    parsed.disruptions.some((item) => item.kind === "closed") &&
-    closedPlaceIds.length === 0
-  )
-    missing.push("closedPlace");
-  if (parsed.activityMentions.length) missing.push("activityDecision");
-  for(const mention of parsed.activityMentions){
-    if(!mention.location)missing.push(`activity:${mention.id}:location`);
-    if(!mention.startTime)missing.push(`activity:${mention.id}:startTime`);
-    if(!mention.endTime&&!mention.durationMinutes)missing.push(`activity:${mention.id}:duration`);
-  }
-  if (parsed.existingPlans.some((item) => !item.location.trim()))
-    missing.push("activityDetails");
-  return ParsedUserInputSchema.parse({
-    ...parsed,
-    missingFacts: [...new Set(missing)],
-    status: missing.length ? "needs_input" : "draft",
-  });
 }
 
 export function HomeFlow() {
@@ -349,15 +283,16 @@ export function HomeFlow() {
         headers: await requestHeaders(),
         body: JSON.stringify({ snapshot: activeSession.snapshot, rawText: text, userAnswers: answers, ...(browserLocation ? { browserLocation } : {}) }),
       });
-      let body = (await response.json()) as any;
+      let body = (await response.json()) as AssistBody;
       if(response.ok && body.status==="needs_input" && body.missingFacts?.[0]?.field==="currentLocation" && !body.ambiguities?.length && !browserLocation){
         try{browserLocation=await new LocationService().getCurrentPosition();}catch{/* Show the single question if location cannot be obtained. */}
         if(browserLocation){
           response=await fetch("/api/assist",{method:"POST",headers:await requestHeaders(),body:JSON.stringify({snapshot:activeSession.snapshot,rawText:text,userAnswers:answers,browserLocation})});
-          body=await response.json();
+          body=(await response.json()) as AssistBody;
         }
       }
       if (!response.ok) throw new Error(body.error ?? "暂时无法接住这次变化，请稍后重试。");
+      if (!body.parsedInput) throw new Error("AI 没有返回可确认的行程事实。");
       if (body.status === "needs_input") {
         setMissingFacts(body.missingFacts ?? []);
         setAmbiguities(body.ambiguities ?? []);
@@ -529,12 +464,8 @@ export function OnboardingFlow() {
         throw new Error("请先解析并确认至少一项今天已有的安排。");
       if (!activeSnapshot.state.currentLocation.trim())
         throw new Error("请填写当前地点。");
-      if (
-        items.some(
-          (item) => !item.name.trim() || item.endTime <= item.startTime,
-        )
-      )
-        throw new Error("请检查活动名称和起止时间。");
+      if (items.some((item) => !item.name.trim()))
+        throw new Error("请检查活动名称。");
       const parsed = ParsedUserInputSchema.parse({
         rawText: raw,
         intent: "create",
@@ -770,13 +701,12 @@ export function OnboardingFlow() {
                       <input
                         id={`end-${item.id}`}
                         type="time"
-                        required
-                        value={item.endTime}
+                        value={item.endTime ?? ""}
                         onChange={(event) =>
                           setItems((current) =>
                             current.map((candidate) =>
                               candidate.id === item.id
-                                ? { ...candidate, endTime: event.target.value }
+                                ? { ...candidate, endTime: event.target.value || null }
                                 : candidate,
                             ),
                           )
@@ -971,7 +901,7 @@ export function RescueFlow() {
   const [locationTried, setLocationTried] = useState(false);
   useEffect(() => {
     if (!parsed || parsed.context.currentLocation?.trim() || locationTried) return;
-    setLocationTried(true);
+    window.setTimeout(() => setLocationTried(true), 0);
     new LocationService().getCurrentPosition().then(browserLocation => {
       setParsed(current => {
         if (!current || current.context.currentLocation?.trim()) return current;
@@ -983,6 +913,7 @@ export function RescueFlow() {
   }, [parsed, locationTried, setError]);
   const [extraPlans, setExtraPlans] = useState("");
   const [closedPlaceIds, setClosedPlaceIds] = useState<string[]>([]);
+  const [removedLockedIds, setRemovedLockedIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [initialized, setInitialized] = useState(false);
   useEffect(() => {
@@ -991,7 +922,7 @@ export function RescueFlow() {
         const blank=ParsedUserInputSchema.parse({rawText:session.rawInput,intent:"rescue",existingPlans:[],disruptions:[],constraints:[],context:session.snapshot.state,contextSources:session.snapshot.stateSources,missingFacts:[],status:"draft",parser:"manual"});
         let initial=blank;
         try {
-          initial=session.parsedInput?.parser!=="deterministic_fallback" && session.parsedInput ? session.parsedInput : session.rawInput.trim()?await parseWithModel(session.snapshot,session.rawInput):blank;
+          initial=session.parsedInput?.parser!=="deterministic_fallback" && session.parsedInput ? session.parsedInput : session.rawInput.trim()?await assistWithModel(session.snapshot,session.rawInput):blank;
         }catch(cause){setError(errorText(cause));}
         const matchedClosed = mergePlans(session.snapshot, initial)
           .filter(
@@ -1009,7 +940,7 @@ export function RescueFlow() {
           ? initial.closedPlaceIds
           : matchedClosed;
         setClosedPlaceIds(restoredClosed);
-        setParsed({ ...initial, closedPlaceIds: restoredClosed });
+        setParsed(hydrateParsedPlans(session.snapshot, { ...initial, closedPlaceIds: restoredClosed }));
         setInitialized(true);
       }
     }, 0);
@@ -1067,28 +998,13 @@ export function RescueFlow() {
     setBusy(true);
     setError("");
     try {
-      const parsedAddition = await parseWithModel(
-        activeSession.snapshot,
-        extraPlans,
-      );
+      const draft = confirmedDraftFromParsed(activeSession.snapshot, activeParsed, closedPlaceIds, removedLockedIds);
+      const parsedAddition = await assistWithModel(activeSession.snapshot, `${activeParsed.rawText}\n${extraPlans}`.trim(), { confirmedDraft: draft, appendText: extraPlans });
       if (!parsedAddition.existingPlans.length && !parsedAddition.activityMentions.length) {
         throw new Error("AI 没有识别到可确认的活动，请补充活动名称和时间。");
       }
       updateParsed({
-        ...activeParsed,
-        rawText: `${activeParsed.rawText}\n${extraPlans}`.trim(),
-        existingPlans: [
-          ...activeParsed.existingPlans,
-          ...parsedAddition.existingPlans,
-        ],
-        activityMentions: [
-          ...activeParsed.activityMentions,
-          ...parsedAddition.activityMentions,
-        ],
-        parseWarnings: [
-          ...activeParsed.parseWarnings,
-          ...parsedAddition.parseWarnings,
-        ],
+        ...parsedAddition,
         intent: activeParsed.disruptions.length ? "mixed" : "create",
       });
       setExtraPlans("");
@@ -1102,26 +1018,25 @@ export function RescueFlow() {
   async function reparseSentence() {
     setBusy(true);setError("");
     try {
-      const next=await parseWithModel(activeSession.snapshot,extraPlans.trim()||activeParsed.rawText);
-      updateParsed({...next,worldOptions:activeParsed.worldOptions});setWorld(null);
+      const draft = confirmedDraftFromParsed(activeSession.snapshot, activeParsed, closedPlaceIds, removedLockedIds);
+      const next=await assistWithModel(activeSession.snapshot,extraPlans.trim()||activeParsed.rawText,{confirmedDraft:draft,replaceRawText:extraPlans.trim()||activeParsed.rawText});
+      updateParsed(hydrateParsedPlans(activeSession.snapshot,{...next,worldOptions:activeParsed.worldOptions}));
+      setRemovedLockedIds([]);setWorld(null);
     }catch(cause){setError(errorText(cause));}finally{setBusy(false);}
   }
 
   function promoteMention(
     mention: ParsedUserInput["activityMentions"][number],
   ) {
-    if (!mention.name.trim() || !mention.startTime || !mention.location?.trim() || (!mention.endTime && !mention.durationMinutes)) {
-      setError("已保留这项安排，请补充具体地点和结束时间（或时长）。");
+    if (!mention.name.trim() || !mention.startTime || !mention.location?.trim()) {
+      setError("已保留这项安排，请补充具体地点和开始时间。");
       return;
     }
-    const [hours, minutes] = mention.startTime.split(":").map(Number);
-    const total = Math.min(
-      23 * 60 + 59,
-      hours * 60 + minutes + (mention.durationMinutes ?? 0),
-    );
-    const endTime =
-      mention.endTime ??
-      `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+    let endTime = mention.endTime;
+    if (!endTime && mention.durationMinutes) {
+      try { endTime = addMinutesWithinDay(mention.startTime, mention.durationMinutes); }
+      catch (cause) { setError(errorText(cause)); return; }
+    }
     updateParsed({
       ...activeParsed,
       existingPlans: [
@@ -1131,6 +1046,7 @@ export function RescueFlow() {
           name: mention.name.trim(),
           startTime: mention.startTime,
           endTime,
+          durationMinutes: mention.durationMinutes,
           location: mention.location.trim(),
           estimatedCost: mention.estimatedCost ?? 0,
           estimatedCostKnown: mention.estimatedCost !== null,
@@ -1192,13 +1108,12 @@ export function RescueFlow() {
       if (normalized.missingFacts.length)
         throw new Error("请先补齐页面中标出的必要信息，再生成方案。");
       const confirmed = confirmParsedInput(normalized);
-      const nextSnapshot = SnapshotSchema.parse({
-        ...activeSession.snapshot,
-        state: { ...activeSession.snapshot.state, ...confirmed.context },
-        stateSources: confirmed.contextSources,
-        itinerary: mergePlans(activeSession.snapshot, confirmed),
-        revision: activeSession.snapshot.revision,
-      });
+      const confirmedDraft = confirmedDraftFromParsed(
+        activeSession.snapshot,
+        confirmed,
+        confirmed.closedPlaceIds,
+        removedLockedIds,
+      );
       const savedConfirmation = saveSession({
         ...loadSession(),
         rawInput: confirmed.rawText,
@@ -1206,60 +1121,29 @@ export function RescueFlow() {
         flowStage: "RESCUE_CONFIRM",
       });
       setSession(savedConfirmation);
-      const reason = confirmed.disruptions[0]?.kind ?? "optimize";
-      const request = ReplanningRequestSchema.parse({
-        reason,
-        freeText: confirmed.rawText,
-        currentState: nextSnapshot.state,
-        closedPlaceIds: confirmed.closedPlaceIds,
-        variation: 0,
-        adjustments: [
-          ...(/少走|减少步行|less walking/i.test(confirmed.rawText)
-            ? (["less_walking"] as const)
-            : []),
-          ...(/省钱|降低花费|便宜|cheaper/i.test(confirmed.rawText)
-            ? (["cheaper"] as const)
-            : []),
-          ...(/早点|提早结束|earlier/i.test(confirmed.rawText)
-            ? (["earlier"] as const)
-            : []),
-          ...(/保留|别动|keep/i.test(confirmed.rawText)
-            ? (["keep_stop"] as const)
-            : []),
-        ],
-        stateSources: confirmed.contextSources,
-        worldOptions: confirmed.worldOptions,
-      });
-      const grounding = await fetch("/api/world/context", {
-        method: "POST", headers: await requestHeaders(),
-        body: JSON.stringify({snapshot:nextSnapshot,request,mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()}}),
-      });
-      const groundBody = await grounding.json();
-      if (!grounding.ok) throw new Error((groundBody as {error?:string}).error ?? "真实世界数据不可用。");
-      const grounded = RealWorldContextSchema.parse(groundBody);
-      setWorld(grounded);
-      if (grounded.status !== "ready") throw new Error("请确认下面的地点候选或补充信息。原文与安排已保留。");
-      const response = await fetch("/api/replan", {
+      const response = await fetch("/api/assist", {
         method: "POST",
         headers: await requestHeaders(),
         body: JSON.stringify({
-          snapshot: nextSnapshot,
-          request,
-          mode: "live",
-          confirmation: {
-            status: "confirmed",
-            confirmedAt: new Date().toISOString(),
-          },
+          snapshot: activeSession.snapshot,
+          rawText: confirmed.rawText,
+          confirmedDraft,
+          userAnswers: { venueSelections: confirmed.worldOptions?.selectedPois },
         }),
       });
-      const body = (await response.json()) as { error?: string };
+      const body = (await response.json()) as AssistBody;
       if (!response.ok) throw new Error(body.error ?? "暂时无法生成方案。");
-      const result = AgentResultSchema.parse(body);
-      await recordResult(result);
-      savePendingPlan(
-        { result, base: nextSnapshot, request, accepted: false },
-        request,
-      );
+      if (body.status === "needs_input") {
+        if (body.world) setWorld(RealWorldContextSchema.parse(body.world));
+        if (body.parsedInput) setParsed(ParsedUserInputSchema.parse(body.parsedInput));
+        setError(body.missingFacts?.[0]?.reason ?? "请先补充真实地点信息。");
+        setBusy(false);
+        return;
+      }
+      if (body.status !== "ready") throw new Error(body.error ?? "真实信息暂时不可用，请稍后重试。");
+      const result = AgentResultSchema.parse(body.result);
+      const request = ReplanningRequestSchema.parse(body.request);
+      savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
       window.location.assign("/result");
     } catch (cause) {
       setError(errorText(cause));
@@ -1350,12 +1234,15 @@ export function RescueFlow() {
                         className="icon-button"
                         aria-label={`删除识别结果 ${index + 1}`}
                         onClick={() =>
-                          updateParsed({
-                            ...activeParsed,
-                            existingPlans: activeParsed.existingPlans.filter(
-                              (candidate) => candidate.id !== item.id,
-                            ),
-                          })
+                          (() => {
+                            const lockedEvent = activeSession.snapshot.itinerary.find((event) => event.id === item.id);
+                            if (lockedEvent?.locked && !window.confirm("这是一项固定安排。确定要删除吗？")) return;
+                            if (lockedEvent?.locked) setRemovedLockedIds((current) => [...new Set([...current, lockedEvent.id])]);
+                            updateParsed({
+                              ...activeParsed,
+                              existingPlans: activeParsed.existingPlans.filter((candidate) => candidate.id !== item.id),
+                            });
+                          })()
                         }
                       >
                         <Trash2 size={16} />
@@ -1407,7 +1294,7 @@ export function RescueFlow() {
                         <input
                           id={`confirm-end-${item.id}`}
                           type="time"
-                          value={item.endTime}
+                          value={item.endTime ?? ""}
                           onChange={(event) =>
                             updateParsed({
                               ...activeParsed,
@@ -1537,7 +1424,7 @@ export function RescueFlow() {
                         />
                       </div>
                       <div className="field">
-                        <label htmlFor={`mention-end-${mention.id}`}>结束时间（未提供时长时必填）</label>
+                        <label htmlFor={`mention-end-${mention.id}`}>结束时间（可选，不知道可以留空）</label>
                         <input
                           id={`mention-end-${mention.id}`}
                           type="time"
@@ -1900,6 +1787,7 @@ export function ResultFlow() {
       setSession(updated);
       await logEvent("replan_accepted", { planId: result.id, mode: "real" });
       setNotice("方案已接受，今日行程已经更新。");
+      window.location.assign("/trip");
     } catch (cause) {
       setError(errorText(cause));
     } finally {

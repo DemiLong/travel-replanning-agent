@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { EventSchema, ParsedUserInputSchema, ReplanningRequestSchema, SnapshotSchema, type AgentResult, type ImpactAnalysis, type MissingFact, type ParsedUserInput, type Snapshot } from "../types";
+import { ConfirmedDraftSchema, EventSchema, ParsedUserInputSchema, ReplanningRequestSchema, SnapshotSchema, type AgentResult, type ConfirmedDraft, type ImpactAnalysis, type MissingFact, type ParsedUserInput, type Snapshot } from "../types";
 import { BrowserLocationSchema, TravelModeSchema, type RealWorldContext } from "../types/world";
+import { addMinutesWithinDay } from "../lib/time";
 import { DeepSeekSemanticParser } from "../services/semantic-parser";
 import { analyzeImpact } from "../services/impact-analysis";
 import { WorldContextService } from "../services/world/world-context-service";
@@ -11,14 +12,67 @@ import { replanReal } from "./real-replanning-agent";
 export const AssistRequestSchema = z.object({
   snapshot: SnapshotSchema, rawText:z.string().trim().min(1).max(4000), browserLocation:BrowserLocationSchema.optional(),
   userAnswers:z.object({destination:z.string().trim().max(80).optional(),currentLocation:z.string().trim().max(100).optional(),travelMode:TravelModeSchema.optional(),venueSelections:z.record(z.string().min(1)).optional(),durations:z.record(z.number().int().positive().max(1440)).optional()}).optional(),
+  confirmedDraft: ConfirmedDraftSchema.optional(), appendText:z.string().trim().max(4000).optional(), replaceRawText:z.string().trim().max(4000).optional(),
 });
 export type AssistRequest=z.infer<typeof AssistRequestSchema>;
 export type AssistResponse =
-  | {status:"needs_input";parsedInput:ParsedUserInput;impactAnalysis:ImpactAnalysis;missingFacts:MissingFact[];ambiguities?:RealWorldContext["ambiguities"]}
+  | {status:"needs_input";parsedInput:ParsedUserInput;impactAnalysis:ImpactAnalysis;missingFacts:MissingFact[];ambiguities?:RealWorldContext["ambiguities"];world?:RealWorldContext}
   | {status:"ready";parsedInput:ParsedUserInput;impactAnalysis:ImpactAnalysis;result:AgentResult;base:Snapshot;request:ReturnType<typeof ReplanningRequestSchema.parse>}
   | {status:"unavailable";parsedInput:ParsedUserInput;impactAnalysis:ImpactAnalysis;error:string};
-const addMinutes=(value:string,n:number)=>{const [h,m]=value.split(":").map(Number);const t=Math.min(1439,h*60+m+n);return `${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}`;};
 const related=(a:string,b:string)=>a.includes(b)||b.includes(a)||(/美术馆/.test(a)&&/美术馆/.test(b))||(/晚餐|餐厅/.test(a)&&/晚餐|餐厅/.test(b));
+
+function draftToParsed(draft:ConfirmedDraft):ParsedUserInput {
+  return ParsedUserInputSchema.parse({
+    rawText:draft.rawText,intent:draft.intent,
+    existingPlans:draft.existingPlans.map(item=>({...item,source:"user" as const})),
+    activityMentions:draft.activityMentions,disruptions:draft.disruptions,constraints:draft.constraints,
+    context:draft.context,contextSources:draft.contextSources,
+    closedPlaceIds:draft.closedPlaceIds,missingFacts:[],status:"confirmed",parser:"manual",parserModel:null,parseWarnings:[],question:draft.question,worldOptions:draft.worldOptions??{selectedPois:{}},
+  });
+}
+
+function materializeDraftTime(item:ConfirmedDraft["existingPlans"][number]) {
+  if(item.endTime)return {endTime:item.endTime,durationSource:"user" as const};
+  if(item.durationMinutes!==null)return {endTime:addMinutesWithinDay(item.startTime,item.durationMinutes),durationSource:"user" as const};
+  return {endTime:item.startTime,durationSource:"unknown" as const};
+}
+
+function mergeConfirmedDraft(input:AssistRequest,draft:ConfirmedDraft):Snapshot {
+  const base=input.snapshot;
+  if(draft.baseRevision!==base.revision)throw new Error("原行程版本已变化，请重新确认后再生成方案。");
+  const removedLocked=new Set(draft.removedLockedIds);
+  const incomingIds=new Set(draft.existingPlans.map(item=>item.id));
+  for(const id of removedLocked){
+    const event=base.itinerary.find(item=>item.id===id);
+    if(!event?.locked)throw new Error("removedLockedIds 只能包含当前行程中的固定安排。");
+    if(incomingIds.has(id))throw new Error("固定安排不能同时保留并标记为删除。");
+  }
+  const next=base.itinerary.filter(event=>event.status==="completed");
+  for(const old of base.itinerary.filter(event=>event.status!=="completed")){
+    if(incomingIds.has(old.id))continue;
+    if(old.locked&&!removedLocked.has(old.id))throw new Error(`固定安排“${old.name}”不能被静默删除，请先明确确认。`);
+  }
+  for(const item of draft.existingPlans){
+    const old=base.itinerary.find(event=>event.id===item.id);
+    if(old?.status==="completed")throw new Error(`已完成安排“${old.name}”不能重新编辑。`);
+    const timing=materializeDraftTime(item);
+    if(old?.locked&&(!item.locked||item.name!==old.name||item.startTime!==old.startTime||timing.endTime!==old.endTime||item.placeId!==old.placeId||item.location!==old.location||item.estimatedCost!==old.estimatedCost||item.estimatedCostKnown!==old.estimatedCostKnown))throw new Error(`固定安排“${old.name}”的时间、地点、名称、费用和锁定状态不能修改。`);
+    const changedLocation=Boolean(old&&item.location.trim()!==old.location.trim());
+    const event=EventSchema.parse({
+      ...(old??{category:"user activity",indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:item.locked?"这是用户确认需要保留的固定安排。":"这是用户确认的原有安排。",constraint:item.locked?"Locked plan":"Original plan"}),
+      id:item.id,placeId:item.placeId??(changedLocation?`draft-place-${item.id}`:old?.placeId??`custom-${item.id}`),name:item.name,startTime:item.startTime,endTime:timing.endTime,durationSource:timing.durationSource,location:item.location,estimatedCost:item.estimatedCost,estimatedCostKnown:item.estimatedCostKnown,locked:old?.locked??item.locked,status:(old?.locked??item.locked)?"locked":"planned",
+    });
+    next.push(event);
+  }
+  const answers=input.userAnswers;
+  const currentLocation=answers?.currentLocation?.trim()||draft.context.currentLocation||base.state.currentLocation;
+  const state={...base.state,...draft.context,currentLocation,...(input.browserLocation?{browserLocation:input.browserLocation}:{})};
+  return SnapshotSchema.parse({...base,state,stateSources:{...base.stateSources,...draft.contextSources,...(answers?.currentLocation?{currentLocation:"user" as const}:{}),disruption:draft.disruptions.length?"user":draft.contextSources.disruption},trip:{...base.trip,destination:answers?.destination||base.trip.destination},itinerary:next.sort((a,b)=>a.startTime.localeCompare(b.startTime))});
+}
+
+function appendToDraft(draft:ConfirmedDraft,addition:ParsedUserInput,appendText:string):ConfirmedDraft {
+  return ConfirmedDraftSchema.parse({...draft,rawText:`${draft.rawText}\n${appendText}`.trim(),existingPlans:[...draft.existingPlans,...addition.existingPlans],activityMentions:[...draft.activityMentions,...addition.activityMentions],disruptions:[...draft.disruptions,...addition.disruptions],constraints:[...draft.constraints,...addition.constraints],context:{...draft.context,...addition.context},contextSources:{...draft.contextSources,...addition.contextSources},question:addition.question??draft.question,worldOptions:{...draft.worldOptions,...addition.worldOptions,selectedPois:{...draft.worldOptions?.selectedPois,...addition.worldOptions?.selectedPois}},});
+}
 
 function mergeFacts(input:AssistRequest,parsed:ParsedUserInput):Snapshot {
   const snapshot=input.snapshot, answers=input.userAnswers;
@@ -34,7 +88,7 @@ function mergeFacts(input:AssistRequest,parsed:ParsedUserInput):Snapshot {
     const occurrence=timeOccurrences.get(p.startTime)??0;timeOccurrences.set(p.startTime,occurrence+1);
     const id=old?.id??`assist-${createHash("sha256").update(`${p.startTime}:${occurrence}`).digest("hex").slice(0,16)}`;
     const duration=answers?.durations?.[p.id]??answers?.durations?.[id];
-    const end=p.endTime??(p.durationMinutes||duration?addMinutes(p.startTime,p.durationMinutes??duration!):old?.endTime??p.startTime);
+    const end=p.endTime??(p.durationMinutes||duration?addMinutesWithinDay(p.startTime,p.durationMinutes??duration!):old?.endTime??p.startTime);
     const explicitLocation=p.location&&!genericLocation(p.location)?p.location:undefined;
     const event=EventSchema.parse({
       id,placeId:old?.placeId??id,name:old?.name??p.name,category:old?.category??"user activity",startTime:p.startTime,endTime:end,
@@ -55,13 +109,31 @@ function mergeFacts(input:AssistRequest,parsed:ParsedUserInput):Snapshot {
   parsed.worldOptions={selectedPois:{...parsed.worldOptions?.selectedPois,...answers?.venueSelections},...(modes.length?{allowedTravelModes:modes}:{}),...(answers?.travelMode?{travelMode:answers.travelMode}:{})};
   return SnapshotSchema.parse({...snapshot,state:{...snapshot.state,...parsed.context},stateSources:parsed.contextSources,trip:{...snapshot.trip,destination:answers?.destination||snapshot.trip.destination},itinerary:next.sort((a,b)=>a.startTime.localeCompare(b.startTime))});
 }
-const buildRequest=(snapshot:Snapshot,parsed:ParsedUserInput)=>ReplanningRequestSchema.parse({reason:parsed.disruptions[0]?.kind??"optimize",freeText:parsed.rawText,currentState:snapshot.state,closedPlaceIds:parsed.closedPlaceIds,variation:0,stateSources:parsed.contextSources,worldOptions:parsed.worldOptions});
+const buildRequest=(snapshot:Snapshot,parsed:ParsedUserInput,removedLockedIds:string[]=[] )=>ReplanningRequestSchema.parse({reason:parsed.disruptions[0]?.kind??"optimize",freeText:parsed.rawText,currentState:snapshot.state,closedPlaceIds:parsed.closedPlaceIds,variation:0,stateSources:parsed.contextSources,worldOptions:parsed.worldOptions,...(removedLockedIds.length?{confirmedDraftChanges:{removedLockedIds}}:{})});
 
 export async function runAgentAssist(raw:unknown):Promise<AssistResponse>{
   const input=AssistRequestSchema.parse(raw);
   if(input.snapshot.mode!=="user"||Object.values(input.snapshot.stateSources).includes("demo"))throw new Error("真实流程不接受示例状态。");
-  const parsed=await new DeepSeekSemanticParser().parse(input.snapshot,input.rawText);
-  const snapshot=mergeFacts(input,parsed),request=buildRequest(snapshot,parsed);
+  let parsed:ParsedUserInput;
+  let snapshot:Snapshot;
+  if(input.confirmedDraft){
+    if(input.replaceRawText){
+      parsed=await new DeepSeekSemanticParser().parse(input.snapshot,input.replaceRawText);
+      snapshot=mergeFacts({...input,rawText:input.replaceRawText,confirmedDraft:undefined},parsed);
+    }else if(input.appendText){
+      const addition=await new DeepSeekSemanticParser().parse(input.snapshot,input.appendText);
+      const draft=appendToDraft(input.confirmedDraft,addition,input.appendText);
+      parsed=draftToParsed(draft);
+      snapshot=mergeConfirmedDraft(input,draft);
+    }else{
+      parsed=draftToParsed(input.confirmedDraft);
+      snapshot=mergeConfirmedDraft(input,input.confirmedDraft);
+    }
+  }else{
+    parsed=await new DeepSeekSemanticParser().parse(input.snapshot,input.rawText);
+    snapshot=mergeFacts(input,parsed);
+  }
+  const request=buildRequest(snapshot,parsed,input.confirmedDraft?.removedLockedIds??[]);
   let impact=analyzeImpact(snapshot,request);
   const missingUserFacts:MissingFact[]=[];
   const add=(field:string,reason:string)=>missingUserFacts.push({field,importance:"blocking",reason});
@@ -69,7 +141,7 @@ export async function runAgentAssist(raw:unknown):Promise<AssistResponse>{
     const priority=(f:MissingFact)=>snapshot.itinerary.find(e=>e.placeId===f.field)?.locked?0:f.field==="currentLocation"?1:2;
     const first=[...new Map(missingUserFacts.map(f=>[f.field,f])).values()].sort((a,b)=>priority(a)-priority(b))[0];
     parsed.missingFacts=[first.field];parsed.status="needs_input";
-    return {status:"needs_input",parsedInput:parsed,impactAnalysis:impact,missingFacts:[first],ambiguities:world?.ambiguities.filter(a=>a.field===first.field)??[]};
+    return {status:"needs_input",parsedInput:parsed,impactAnalysis:impact,missingFacts:[first],ambiguities:world?.ambiguities.filter(a=>a.field===first.field)??[],world};
   };
   if(!snapshot.itinerary.some(e=>e.status!=="completed")){
     add("existingPlans","今天有哪些想保留的安排？直接告诉我即可。");return ask();
@@ -81,9 +153,6 @@ export async function runAgentAssist(raw:unknown):Promise<AssistResponse>{
   for(const a of world.ambiguities)add(a.field,`“${a.label}”有几个可能地点，你指的是哪一个？`);
   for(const mention of parsed.activityMentions.filter(m=>m.role==="existing_plan"&&!m.startTime)){
     if(!snapshot.itinerary.some(e=>related(e.name,mention.name)))add(`activity:${mention.id}:startTime`,`“${mention.name}”安排在几点？`);
-  }
-  for(const event of snapshot.itinerary.filter(e=>e.locked&&e.durationSource==="unknown")){
-    if(snapshot.itinerary.some(e=>e.locked&&e.startTime>event.startTime))add(`activity:${event.id}:duration`,`“${event.name}”大约几点结束？这会影响下一项预约。`);
   }
   if(parsed.disruptions.some(d=>d.kind==="closed")&&!parsed.closedPlaceIds.length){
     const matches=snapshot.itinerary.filter(e=>parsed.disruptions.filter(d=>d.kind==="closed").some(d=>d.label.includes(e.name)||d.label.includes(e.location)));
