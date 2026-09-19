@@ -117,8 +117,10 @@ export function confirmedDraftFromParsed(
   parsed: ParsedUserInput,
   closedPlaceIds = parsed.closedPlaceIds,
   removedLockedIds: string[] = [],
+  removedEventIds: string[] = [],
 ): ConfirmedDraft {
-  const merged = mergePlans(snapshot, parsed);
+  const removed = new Set(removedEventIds);
+  const merged = mergePlans(snapshot, parsed).filter(event => !removed.has(event.id));
   return ConfirmedDraftSchema.parse({
     rawText: parsed.rawText,
     intent: parsed.intent,

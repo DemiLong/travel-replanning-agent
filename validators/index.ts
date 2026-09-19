@@ -9,7 +9,7 @@ import { travelTimeValidator } from "./travel-time-validator";
 import { openingHoursValidator } from "./opening-hours-validator";
 import { budgetValidator } from "./budget-validator";
 import { pastEventValidator } from "./past-event-validator";
-import { minutes as minutesOf } from "../lib/time";
+import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes as minutesOf } from "../lib/time";
 export const validators = [
   lockedEventValidator,
   timeConflictValidator,
@@ -49,7 +49,8 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       });
     const original=c.existingItinerary.find(old=>old.id===e.id);
     const arrivalOnly=Boolean(c.world&&original?.durationSource==="unknown"&&e.durationSource==="unknown"&&e.startTime===e.endTime);
-    if(arrivalOnly&&p.events.some(other=>other.id!==e.id&&other.startTime>=e.startTime))errors.push({code:"duration",eventId:e.id,message:"预约结束时间未知，不能安排后续活动。"});
+    const nextEvent = p.events.find(other=>other.id!==e.id&&other.startTime>=e.startTime);
+    if(arrivalOnly&&nextEvent)errors.push({code:"duration",eventId:e.id,message:"这项安排的结束时间未知，无法安全安排后续活动。",conflict:{kind:"unknown_duration_window",eventId:e.id,nextAnchorEventId:nextEvent.id,message:`${e.name} 后面还有 ${nextEvent.name}，需要先确定可执行的停留时间。`}});
     if (e.endTime <= e.startTime && !arrivalOnly)
       errors.push({
         code: "duration",
@@ -87,11 +88,11 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       if(!resolved&&!alternative)errors.push({code:"place_data",eventId:e.id,message:"地点未由高德解析并确认。"});
       const unknownDuration=old?.durationSource==="unknown";
       const proposedDuration=unknownDuration&&e.durationSource==="suggested";
-      if(unknownDuration&&!arrivalOnly&&(!proposedDuration||minutesOf(e.endTime)-minutesOf(e.startTime)<10||minutesOf(e.endTime)-minutesOf(e.startTime)>180))errors.push({code:"duration",eventId:e.id,message:"未知停留时长只能使用10–180分钟的方案建议，不能伪装成用户事实。"});
+      if(unknownDuration&&!arrivalOnly&&(!proposedDuration||minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`未知停留时长只能使用${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟的方案建议，不能伪装成用户事实。`});
       if(old && (e.name!==old.name || e.location!==old.location || e.estimatedCost!==old.estimatedCost || e.estimatedCostKnown!==old.estimatedCostKnown || (!unknownDuration&&(e.durationSource!==old.durationSource||minutesOf(e.endTime)-minutesOf(e.startTime)!==minutesOf(old.endTime)-minutesOf(old.startTime)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点、费用或活动时长。"});
       if(!old && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name) || e.estimatedCostKnown!==false || e.estimatedCost!==0))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点，费用未知不能假定免费。"});
       if(e.openingTime!==null||e.closingTime!==null)errors.push({code:"place_data",eventId:e.id,message:"高德 POI 基础数据未验证营业时间，不能自行填入。"});
-      if(!old && minutesOf(e.endTime)-minutesOf(e.startTime)>180)errors.push({code:"duration",eventId:e.id,message:"新增活动时长超过本轮候选上限。"});
+      if(!old && (minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`新增活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
       continue;
     }
     if (

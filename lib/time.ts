@@ -3,6 +3,16 @@ export const minutes = (time: string) =>
 export const time = (value: number) =>
   `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 
+export const MIN_SUGGESTED_DURATION = 15;
+export const MAX_SUGGESTED_DURATION = 180;
+export const DEFAULT_UNKNOWN_DURATION = 60;
+
+export function durationBetween(startTime: string, endTime: string) {
+  const value = minutes(endTime) - minutes(startTime);
+  if (value < 0) throw new CrossDayTimeError();
+  return value;
+}
+
 export class CrossDayTimeError extends Error {
   readonly code = "CROSS_DAY_UNSUPPORTED" as const;
 

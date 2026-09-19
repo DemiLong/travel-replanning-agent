@@ -1,4 +1,5 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
+import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes } from "../lib/time";
 export function lockedEventValidator(
   c: AgentContext,
   p: ProposedPlan,
@@ -19,7 +20,7 @@ export function lockedEventValidator(
         ] as const
       ).some((k) => n[k] !== old[k]) ||
       (!suggestedUnknownDuration && n.endTime !== old.endTime) ||
-      (suggestedUnknownDuration && (n.endTime <= n.startTime || Number(n.endTime.slice(0, 2)) * 60 + Number(n.endTime.slice(3)) - (Number(n.startTime.slice(0, 2)) * 60 + Number(n.startTime.slice(3)) ) > 180))
+      (suggestedUnknownDuration && (minutes(n.endTime) - minutes(n.startTime) < MIN_SUGGESTED_DURATION || minutes(n.endTime) - minutes(n.startTime) > MAX_SUGGESTED_DURATION))
       ? [
           {
             code: "locked_event" as const,

@@ -11,6 +11,7 @@ export function travelTimeValidator(
   const errors: Violation[] = [];
   if (c.world) {
     let from="current";
+    let previousEvent: ProposedPlan["events"][number] | undefined;
     for(const e of [...p.events].sort((a,b)=>a.startTime.localeCompare(b.startTime))){
       const mode=e.travelMode??c.world.travelMode;
       const route=c.world.routes.find(r=>r.origin.id===from&&r.destination.id===e.placeId&&r.travelMode===mode&&r.status==="available");
@@ -20,10 +21,15 @@ export function travelTimeValidator(
         errors.push({code:"travel_time",eventId:e.id,message:`缺少抵达 ${e.name} 的新鲜高德路线，无法判断是否来得及。`});
       }else{
         const required=from===e.placeId?0:Math.ceil((route!.trafficDurationSeconds??route!.durationSeconds!)/60);
-        if(previousEnd+required>minutes(e.startTime))errors.push({code:"travel_time",eventId:e.id,message:`按高德路线需要 ${required} 分钟，无法在 ${e.startTime} 前到达 ${e.name}。`});
+        if(previousEnd+required>minutes(e.startTime))errors.push({
+          code:"travel_time",
+          eventId:e.id,
+          message:`按高德路线需要 ${required} 分钟，无法在 ${e.startTime} 前到达 ${e.name}。`,
+          ...(previousEvent?.locked&&e.locked?{conflict:{kind:"locked_schedule_conflict" as const,eventId:previousEvent.id,nextAnchorEventId:e.id,availableMinutes:Math.max(0,minutes(e.startTime)-previousEnd),requiredTransferMinutes:required,message:`${previousEvent.name} 与 ${e.name} 之间没有足够时间完成停留和路程。`}}:{}),
+        });
         if(e.travelTimeFromPrevious!==required)errors.push({code:"travel_time",eventId:e.id,message:"展示的路程时间与高德数据不一致。"});
       }
-      previousEnd=minutes(e.endTime);from=e.placeId;
+      previousEnd=minutes(e.endTime);from=e.placeId;previousEvent=e;
     }
     return errors;
   }

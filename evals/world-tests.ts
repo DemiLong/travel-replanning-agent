@@ -18,6 +18,7 @@ import { validatePlan } from "../validators";
 import { analyzeImpact } from "../services/impact-analysis";
 import { runAgentAssist } from "../agents/agent-orchestrator";
 import { runAssistResolutionTests } from "./assist-resolution-tests";
+import { addMinutesWithinDay } from "../lib/time";
 
 export const regressionText = "我十点要去故宫，但是我睡过头了，已经11:46了，我下午还要去故宫吗？因为我预约了下午5点的景点参观，同时下午3点需要和朋友在酒店集合去另一个景点，来得及吗？";
 export const regressionExtraction: SemanticExtraction = {
@@ -216,6 +217,63 @@ export async function runWorldTests() {
     assert.equal(materialized.events[0].startTime,"12:00");
     assert.equal(materialized.events[0].travelTimeFromPrevious,3);
     assert.throws(()=>materializeCandidate(ctx,{...candidate,steps:[{...candidate.steps[0],eventId:"invented"}]}));
+    const unknownSnapshot=createStarterSnapshot();
+    unknownSnapshot.trip.destination="北京";
+    unknownSnapshot.state.currentTime="09:00";
+    unknownSnapshot.state.currentLocation="天安门";
+    unknownSnapshot.stateSources.currentTime="user";
+    unknownSnapshot.stateSources.currentLocation="user";
+    unknownSnapshot.itinerary=[
+      {...event("museum","unknown-event","10:00","10:00"),durationSource:"unknown"},
+      {...event("dinner","fixed-event","12:00","13:00","locked",true),name:"预约晚餐"},
+    ];
+    const unknownRequest={reason:"late" as const,freeText:"我十点去博物馆，中午有固定安排",currentState:unknownSnapshot.state,closedPlaceIds:[],variation:0,stateSources:unknownSnapshot.stateSources,worldOptions:{selectedPois:{},travelMode:"WALKING" as const}};
+    const unknownInput={snapshot:unknownSnapshot,request:unknownRequest,mode:"live" as const,confirmation:{status:"confirmed" as const,confirmedAt:new Date().toISOString()}};
+    const unknownWorld=structuredClone(grounded);
+    const basePoi=unknownWorld.resolvedPlaces[0].poi;
+    unknownWorld.resolvedPlaces.push({placeId:"dinner",poi:{...basePoi,poiId:"dinner-poi",name:"预约晚餐"}});
+    const museumRoute=unknownWorld.routes.find(route=>route.destination.id==="museum");
+    assert(museumRoute);
+    unknownWorld.routes.push({...museumRoute,destination:{...museumRoute.destination,id:"dinner"}});
+    unknownWorld.routes.push({...museumRoute,origin:{...museumRoute.destination,id:"museum"},destination:{...museumRoute.destination,id:"dinner"}});
+    const unknownCtx=buildRealContext(unknownInput,unknownWorld);
+    const unknownCandidate:PlanCandidate={title:"自动估算未知停留",tradeOff:"保留后续固定安排",steps:[
+      {eventId:"unknown-event",poiId:null,durationMinutes:null,travelMode:"WALKING",reason:"保留学校参观"},
+      {eventId:"fixed-event",poiId:null,durationMinutes:null,travelMode:"WALKING",reason:"保留固定安排"},
+    ],removed:[]};
+    const estimated=materializeCandidate(unknownCtx,unknownCandidate);
+    assert.equal(estimated.events[0].durationSource,"suggested");
+    assert.equal(estimated.events[0].endTime,"11:00");
+    const capped=materializeCandidate(unknownCtx,{...unknownCandidate,steps:unknownCandidate.steps.map((step,index)=>index===0?{...step,durationMinutes:180}:step)});
+    assert.equal(capped.events[0].endTime,"11:57");
+    assert.equal(capped.events[0].durationSource,"suggested");
+    const arrivalOnlyCtx=structuredClone(unknownCtx);
+    arrivalOnlyCtx.remainingEvents=arrivalOnlyCtx.remainingEvents.slice(0,1);
+    arrivalOnlyCtx.existingItinerary=arrivalOnlyCtx.existingItinerary.slice(0,1);
+    arrivalOnlyCtx.lockedEvents=[];
+    const arrivalOnly=materializeCandidate(arrivalOnlyCtx,{...unknownCandidate,steps:[unknownCandidate.steps[0]]});
+    assert.equal(arrivalOnly.events[0].endTime,"10:00");
+    assert.equal(arrivalOnly.events[0].durationSource,"unknown");
+    const tightSnapshot=structuredClone(unknownSnapshot);
+    tightSnapshot.itinerary[1].startTime="10:10";
+    const tightInput={...unknownInput,snapshot:tightSnapshot,request:{...unknownRequest,currentState:tightSnapshot.state}};
+    const tightWorld=structuredClone(unknownWorld);
+    const tightCtx=buildRealContext(tightInput,tightWorld);
+    assert.throws(()=>materializeCandidate(tightCtx,unknownCandidate),error=>error instanceof Error&&error.name==="UnknownDurationConflict");
+    const skipped=await replanReal(tightInput,{name:"fixture-planner",generateCandidates:async()=>[unknownCandidate]},{ground:async()=>tightWorld});
+    assert("ok" in skipped&&skipped.ok);
+    assert(skipped.plan?.removedEvents.some(item=>item.eventId==="unknown-event"));
+    const lockedTightSnapshot=structuredClone(tightSnapshot);
+    lockedTightSnapshot.itinerary[0].locked=true;lockedTightSnapshot.itinerary[0].status="locked";
+    const lockedTightInput={...tightInput,snapshot:lockedTightSnapshot,request:{...unknownRequest,currentState:lockedTightSnapshot.state}};
+    const failedLocked=await replanReal(lockedTightInput,{name:"fixture-planner",generateCandidates:async()=>[unknownCandidate]},{ground:async()=>tightWorld});
+    assert("ok" in failedLocked&&!failedLocked.ok);
+    assert.equal(failedLocked.conflicts?.[0].kind,"unknown_duration_window");
+    assert(failedLocked.resolutionOptions?.some(option=>option.action==="remove_event"&&option.requiresConfirmation));
+    assert.equal(addMinutesWithinDay("10:00",90),"11:30");
+    assert.throws(()=>addMinutesWithinDay("23:30",30),/跨日/);
+    assert.throws(()=>addMinutesWithinDay("23:30",120),/跨日/);
+    console.log("PASS unknown middle activity receives conservative fallback, caps to available window, preserves final arrival-only and exposes locked conflicts");
     process.env.DEEPSEEK_API_KEY="test-planner";
     const restoreFetch=globalThis.fetch;
     globalThis.fetch=async (url,options)=>{

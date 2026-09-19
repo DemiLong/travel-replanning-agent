@@ -327,6 +327,23 @@ export const ImpactAnalysisSchema = z.object({
     constraints: z.array(z.string()),
   })),
 });
+export const PlanConflictSchema = z.object({
+  kind: z.enum(["unknown_duration_window", "locked_schedule_conflict", "time_conflict", "travel_time", "other"]),
+  eventId: z.string().min(1),
+  nextAnchorEventId: z.string().min(1).optional(),
+  availableMinutes: z.number().int().optional(),
+  requiredTransferMinutes: z.number().int().nonnegative().optional(),
+  message: z.string().min(1),
+});
+export const ResolutionOptionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  action: z.enum(["remove_event", "shorten_unknown_duration", "edit_locked_arrangement"]),
+  eventId: z.string().min(1),
+  nextAnchorEventId: z.string().min(1).optional(),
+  suggestedDuration: z.number().int().min(1).max(180).optional(),
+  requiresConfirmation: z.boolean(),
+});
 export const ReplanInputSchema = z.object({
   snapshot: SnapshotSchema,
   request: ReplanningRequestSchema,
@@ -364,6 +381,8 @@ export type ConfirmedDraft = z.infer<typeof ConfirmedDraftSchema>;
 export type SemanticExtraction = z.infer<typeof SemanticExtractionSchema>;
 export type MissingFact = z.infer<typeof MissingFactSchema>;
 export type ImpactAnalysis = z.infer<typeof ImpactAnalysisSchema>;
+export type PlanConflict = z.infer<typeof PlanConflictSchema>;
+export type ResolutionOption = z.infer<typeof ResolutionOptionSchema>;
 export type AgentContext = {
   world?: RealWorldContext;
   profile: UserProfile;
@@ -395,6 +414,7 @@ export type Violation = {
     | "change_accounting";
   message: string;
   eventId?: string;
+  conflict?: PlanConflict;
 };
 export type Attempt = {
   attempt: number;
@@ -403,6 +423,8 @@ export type Attempt = {
 };
 export type AgentResult = {
   candidateComparisons?: Array<{title:string;tradeOff:string;feasible:boolean;conflicts:string[]}>;
+  conflicts?: PlanConflict[];
+  resolutionOptions?: ResolutionOption[];
   impactAnalysis?: ImpactAnalysis;
   id: string;
   ok: boolean;
@@ -417,6 +439,8 @@ export type AgentResult = {
 };
 export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
   candidateComparisons:z.array(z.object({title:z.string(),tradeOff:z.string(),feasible:z.boolean(),conflicts:z.array(z.string())})).optional(),
+  conflicts:z.array(PlanConflictSchema).optional(),
+  resolutionOptions:z.array(ResolutionOptionSchema).optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
   id: z.string(),
   ok: z.boolean(),
@@ -446,6 +470,7 @@ export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
           ]),
           message: z.string(),
           eventId: z.string().optional(),
+          conflict: PlanConflictSchema.optional(),
         }),
       ),
     }),

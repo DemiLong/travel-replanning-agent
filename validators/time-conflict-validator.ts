@@ -14,6 +14,7 @@ export function timeConflictValidator(
           code: "time_conflict",
           eventId: sorted[j].id,
           message: `${sorted[i].name} 与 ${sorted[j].name} 时间重叠。`,
+          ...(sorted[i].locked&&sorted[j].locked?{conflict:{kind:"locked_schedule_conflict" as const,eventId:sorted[i].id,nextAnchorEventId:sorted[j].id,message:`${sorted[i].name} 与 ${sorted[j].name} 的时间发生重叠。`}}:{}),
         });
   return errors;
 }

@@ -14,7 +14,7 @@ const validationChecks: Array<[Violation["code"], string]> = [
   ["opening_hours", "营业时间"],
   ["budget", "预算"],
   ["past_event", "当前时间后的安排"],
-  ["duration", "活动时长"],
+  ["duration", "停留安排"],
   ["place_data", "地点数据"],
   ["change_accounting", "变更完整性"],
 ];

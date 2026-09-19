@@ -40,7 +40,7 @@ import {
   type ReplanningRequest,
   type Snapshot,
 } from "@/types";
-import type { ImpactAnalysis, MissingFact } from "@/types";
+import type { ImpactAnalysis, MissingFact, ResolutionOption } from "@/types";
 
 type AssistBody = {
   error?: string;
@@ -83,6 +83,15 @@ const displayPlace = (value: string) => value;
 const displayDestination = (value: string) => value;
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请再试一次。";
+
+const userFacingPlanningMessage = (message: string) =>
+  message
+    .replaceAll("目前没有找到满足全部硬约束的方案。", "当前安排之间暂时没有可执行的组合。")
+    .replaceAll("活动时长缺失或无效。", "这项安排没有足够的可执行停留时间。")
+    .replaceAll("未知停留时长只能使用10–180分钟的方案建议，不能伪装成用户事实。", "这项活动的建议停留时间需要重新安排。")
+    .replaceAll("活动时长", "停留安排")
+    .replaceAll("硬约束", "固定安排")
+    .replaceAll("Schema", "行程信息");
 
 async function parseWithModel(
   snapshot: Snapshot,
@@ -1181,7 +1190,7 @@ export function RescueFlow() {
         </b>
         <p>
           {activeParsed.parser === "llm"
-            ? "DeepSeek 已提取事实；确认后查询高德，由 AI 提出候选，代码检查时间与硬约束。"
+            ? "DeepSeek 已提取事实；确认后查询高德，由 AI 提出候选，代码检查固定安排与路线可达性。"
             : "复杂关系不会自动猜测。配置服务端模型密钥后会启用 AI 语义解析。"}
         </p>
       </div>
@@ -1707,19 +1716,117 @@ export function ResultFlow() {
       </div>
     );
   const { result, base, request } = pending;
+  const activePending = pending;
   const plan = result.plan;
-  if (!result.ok || !plan)
+  const activeSession = session;
+
+  async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
+    const confirmedDraft = confirmedDraftFromParsed(base, nextParsed, nextParsed.closedPlaceIds, removedLockedIds, removedEventIds);
+    const response = await fetch("/api/assist", {
+      method: "POST",
+      headers: await requestHeaders(),
+      body: JSON.stringify({
+        snapshot: base,
+        rawText: nextParsed.rawText,
+        confirmedDraft,
+        userAnswers: { venueSelections: nextParsed.worldOptions?.selectedPois },
+      }),
+    });
+    const body = (await response.json()) as AssistBody;
+    if (!response.ok) throw new Error(body.error ?? "暂时无法重新安排。");
+    if (body.status !== "ready" || !body.result || !body.base || !body.request || !body.parsedInput)
+      throw new Error(body.missingFacts?.[0]?.reason ?? "请先补充这次调整需要的信息。");
+    const nextResult = AgentResultSchema.parse(body.result);
+    const nextRequest = ReplanningRequestSchema.parse(body.request);
+    savePendingPlan({
+      result: nextResult,
+      base: SnapshotSchema.parse(body.base),
+      request: nextRequest,
+      accepted: false,
+      parsedInput: ParsedUserInputSchema.parse(body.parsedInput),
+      impactAnalysis: body.impactAnalysis,
+    }, nextRequest);
+    window.location.assign("/result");
+  }
+
+  async function applyResolutionOption(option: ResolutionOption) {
+    if (option.requiresConfirmation && !window.confirm(`确认${option.label}吗？`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (option.action === "edit_locked_arrangement") {
+        setSession(saveSession({
+          ...activeSession,
+          flowStage: "RESCUE_CONFIRM",
+          pendingPlan: null,
+        }));
+        window.location.assign("/rescue");
+        return;
+      }
+      const currentParsed = activePending.parsedInput ? ParsedUserInputSchema.parse(activePending.parsedInput) : null;
+      if (!currentParsed) throw new Error("当前调整草稿已过期，请返回编辑页重新确认。");
+      const nextParsed = option.action === "remove_event"
+        ? { ...currentParsed, existingPlans: currentParsed.existingPlans.filter(item => item.id !== option.eventId) }
+        : {
+            ...currentParsed,
+            existingPlans: currentParsed.existingPlans.map(item => item.id === option.eventId
+              ? { ...item, endTime: null, durationMinutes: option.suggestedDuration ?? 60 }
+              : item),
+          };
+      const removedLockedIds = option.action === "remove_event" && base.itinerary.some(event => event.id === option.eventId && event.locked)
+        ? [option.eventId]
+        : [];
+      await regenerateFromDraft(nextParsed, removedLockedIds, option.action === "remove_event" ? [option.eventId] : []);
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!result.ok || !plan) {
+    const conflicts = result.conflicts ?? [];
+    const options = result.resolutionOptions ?? [];
     return (
-      <div className="workspace narrow">
-        <h1>{result.message}</h1>
-        <p className="muted">原行程和输入都已保留，可以返回修改后重试。</p>
-        <ul>{[...new Set(result.attempts.flatMap(a=>a.violations.map(v=>v.message)))].map(message=><li key={message}>{message}</li>)}</ul>
-        <Link className="primary" href="/rescue">
-          修改理解 <ArrowRight size={17} />
-        </Link>
+      <div className="workspace">
+        <div className="page-heading">
+          <div>
+            <span className="eyebrow">需要换一种安排</span>
+            <h1>当前安排之间没有合适的衔接</h1>
+            <p>原行程和你的输入都已保留。你可以直接选择一种调整方式。</p>
+          </div>
+        </div>
+        {error && <div className="error-box" role="alert">{error}</div>}
+        <section className="card" aria-live="polite">
+          <h2>发生了什么</h2>
+          {conflicts.length ? conflicts.map(conflict => (
+            <div className="change-list" key={`${conflict.kind}-${conflict.eventId}-${conflict.nextAnchorEventId ?? ""}`}>
+              <b>{conflict.message}</b>
+              {conflict.availableMinutes !== undefined && conflict.requiredTransferMinutes !== undefined && (
+                <p>可安排约 {conflict.availableMinutes} 分钟，路程需要约 {conflict.requiredTransferMinutes} 分钟。</p>
+              )}
+            </div>
+          )) : <p>当前路线或时间安排无法同时满足，请从编辑页调整其中一项。</p>}
+        </section>
+        {options.length > 0 && (
+          <section className="card">
+            <h2>你可以这样调整</h2>
+            <div className="form-actions">
+              {options.map(option => (
+                <button key={option.id} type="button" className="secondary" disabled={busy} onClick={() => void applyResolutionOption(option)}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p className="muted">涉及固定安排的修改都会先征得你的确认。</p>
+          </section>
+        )}
+        <div className="form-actions">
+          <Link className="primary" href="/rescue">返回编辑行程 <ArrowRight size={17} /></Link>
+        </div>
       </div>
     );
-  const activeSession = session;
+  }
   const activePlan = plan;
   const baseIds = new Set(base.itinerary.map((event) => event.id));
   const retained = plan.events.filter((event) => baseIds.has(event.id));
@@ -1839,8 +1946,8 @@ export function ResultFlow() {
           <ShieldCheck size={22} />
           <div>
             <b>
-              {result.verificationLevel === "complete"
-                ? "所有硬性约束均已通过"
+                  {result.verificationLevel === "complete"
+                ? "固定安排与路线规则均已通过"
                 : "已通过当前可验证规则"}
             </b>
             <p>估算和未提供的信息单独列在下方。</p>
@@ -1860,7 +1967,7 @@ export function ResultFlow() {
         </details>
       )}
       <div className="result-sections">
-        {result.candidateComparisons && <details className="audit"><summary>查看候选方案比较</summary>{result.candidateComparisons.map((candidate,i)=><div className="card" key={i}><b>{candidate.title} · {candidate.feasible?"通过当前校验":"存在冲突"}</b><p>{candidate.tradeOff}</p>{candidate.conflicts.map((c,i)=><p key={i}>{c}</p>)}</div>)}</details>}
+        {result.candidateComparisons && <details className="audit"><summary>查看候选方案比较</summary>{result.candidateComparisons.map((candidate,i)=><div className="card" key={i}><b>{candidate.title} · {candidate.feasible?"通过当前校验":"存在冲突"}</b><p>{candidate.tradeOff}</p>{candidate.conflicts.map((c,i)=><p key={i}>{userFacingPlanningMessage(c)}</p>)}</div>)}</details>}
         <section className="card">
           <h2>1. 当前变化</h2>
           <p>{request.freeText}</p>
