@@ -5,9 +5,6 @@ const require = createRequire(import.meta.url);
 const { createStarterSnapshot } = require(
   "../work/eval-build/data/session-defaults.js",
 );
-const { createDeterministicTestSnapshot } = require(
-  "../work/eval-build/evals/test-helpers.js",
-);
 const origin =
   process.argv[2] || process.env.TEST_ORIGIN || "http://127.0.0.1:3000";
 
@@ -70,39 +67,10 @@ else
   );
 console.log("PASS semantic parser endpoint");
 
-assert.equal((await post("/api/replan", {})).status, 400);
-console.log("PASS missing replan context");
-
-const localWithoutConfirmation = {
-  snapshot: createDeterministicTestSnapshot(),
-  mode: "local",
-  request: {
-    reason: "tired",
-    freeText: "我有点累",
-    currentState: createDeterministicTestSnapshot().state,
-    closedPlaceIds: [],
-    variation: 0,
-  },
-};
-assert.equal(
-  (await post("/api/replan", localWithoutConfirmation)).status,
-  400,
-);
-console.log("PASS local planning requires confirmed input");
-
-const localWithoutItinerary = {
-  ...localWithoutConfirmation,
-  snapshot: createStarterSnapshot(),
-  confirmation: {
-    status: "confirmed",
-    confirmedAt: new Date().toISOString(),
-  },
-};
-localWithoutItinerary.snapshot.state.currentLocation = "测试区域";
-localWithoutItinerary.request.currentState = localWithoutItinerary.snapshot.state;
-assert.equal(
-  (await post("/api/replan", localWithoutItinerary)).status,
-  400,
-);
-console.log("PASS local planning requires an itinerary");
+for (const removedPath of ["/api/replan", "/api/world/context", "/api/world/places"]) {
+  assert.equal((await post(removedPath, {})).status, 404);
+  console.log("PASS removed legacy endpoint", removedPath);
+}
+assert.equal((await post("/api/assist", {})).status, 400);
+console.log("PASS assist rejects an invalid request");
 console.log("HTTP smoke checks passed.");

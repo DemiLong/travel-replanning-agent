@@ -12,7 +12,7 @@ export function requireAmapKey() {
 const cache = new Map<string, { expires: number; value: Promise<Record<string, unknown>> }>();
 let nextRequestAt=0;
 export function clearWorldCache() { cache.clear(); }
-export type AmapRequestOptions = { paced?: boolean };
+export type AmapRequestOptions = { paced?: boolean; signal?: AbortSignal };
 export async function amapGet(path: string, params: Record<string, string>, ttl = 300000, options: AmapRequestOptions = {}): Promise<Record<string, unknown>> {
   const key = requireAmapKey();
   const query = new URLSearchParams(params); query.sort();
@@ -27,7 +27,9 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
         if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
       }
       query.set("key", key); query.set("output", "JSON");
-      const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal: AbortSignal.timeout(12000) });
+      const timeoutSignal = AbortSignal.timeout(8000);
+      const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+      const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal });
       if (!response.ok) throw new Error("http");
       const body = await response.json() as Record<string, unknown>;
       if (body.status !== "1") throw new Error("provider");

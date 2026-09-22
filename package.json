@@ -10,7 +10,7 @@
     "dev": "next dev --port 3000",
     "build": "next build --webpack",
     "start": "next start --port 3000",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .next-playwright --ignore-pattern playwright-report --ignore-pattern test-results",
     "db:generate": "drizzle-kit generate",
     "dev:next": "next dev --port 3000",
     "build:vercel": "next build --webpack",
@@ -20,7 +20,9 @@
     "start:sites": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "typecheck": "tsc --noEmit",
     "evals": "node --env-file-if-exists=.env.local scripts/run-evals.mjs",
-    "test": "node scripts/run-evals.mjs --test",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node scripts/run-evals.mjs --test",
+    "test:e2e": "npm run build && node scripts/run-playwright.mjs",
     "test:semantic-live": "node --env-file-if-exists=.env.local scripts/test-live.mjs --semantic-only",
     "test:world-live": "node --env-file-if-exists=.env.local scripts/test-live.mjs"
   },
@@ -56,6 +58,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
     "@cloudflare/workers-types": "4.20260515.1",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

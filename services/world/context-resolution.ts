@@ -50,7 +50,7 @@ export function selectCityEvidence(entries: Array<{field:string;query:string;poi
   }
   const ranked=[...grouped.entries()].sort((a,b)=>b[1].length-a[1].length);
   if(!ranked.length)return {city:null,evidence:[],competingCities:[] as string[]};
-  const [winner,winnerEntries]=ranked[0];
+  const [,winnerEntries]=ranked[0];
   const tied=ranked.slice(1).some(([,items])=>items.length===winnerEntries.length);
   if(tied || (ranked.length>1 && winnerEntries.length<2))return {city:null,evidence:[] as typeof winnerEntries,competingCities:ranked.map(([city])=>city)};
   return {city:winnerEntries[0].poi.city,evidence:winnerEntries,competingCities:ranked.slice(1).map(([city])=>city)};

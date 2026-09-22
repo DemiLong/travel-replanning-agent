@@ -15,13 +15,6 @@
     "validators/**/*.ts",
     "data/session-defaults.ts",
     "lib/time.ts",
-    "services/openai.ts",
-    "services/place-service.ts",
-    "evals/test-helpers.ts",
-    "evals/deterministic-planner.ts",
-    "services/itinerary-parser.ts",
-    "services/rescue-intent.ts",
-    "services/input-parser.ts",
     "services/trip-service.ts",
     "evals/**/*.ts"
   ],

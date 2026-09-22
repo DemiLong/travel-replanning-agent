@@ -12,9 +12,14 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
+/.npm-cache/
+/.playwright-browsers/
 
 # next.js
 /.next/
+/.next-playwright/
 /.vinext/
 /out/
 

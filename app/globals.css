@@ -717,17 +717,6 @@ a svg {
   font-size: 12px;
   color: var(--muted);
 }
-.budget-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  margin: 24px 0;
-}
-.budget-line b {
-  margin-left: auto;
-  font-size: 17px;
-}
 .full {
   width: 100%;
 }
@@ -1413,9 +1402,6 @@ a svg {
   }
   .state-tiles b {
     margin: 0;
-  }
-  .state-card .budget-line {
-    margin: 17px 0;
   }
   .reservation-note,
   .info-note {

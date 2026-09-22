@@ -16,20 +16,20 @@ const rawText="我原本 10:00 去美术馆，现在航班晚点了 2 小时，�
 const snapshot=()=>{const s=createStarterSnapshot();s.trip.destination="待确认城市";s.state.currentTime="12:00";s.stateSources.currentTime="user";return s;};
 try{
   const partial=await runAgentAssist({snapshot:snapshot(),rawText});
-  assert.equal(partial.status,"needs_input");assert.equal(partial.missingFacts.length,1);
-  assert(/晚餐/.test(partial.missingFacts[0].reason));
-  assert(!["destination","travelMode"].includes(partial.missingFacts[0].field));
+  assert.equal(partial.status,"NEEDS_INPUT");assert(partial.missingFact);
+  assert(/晚餐/.test(partial.missingFact.reason));
+  assert(!["destination","travelMode"].includes(partial.missingFact.field));
   console.log("PASS actual DeepSeek + Amap: only the unknown dinner venue is asked");
   const s=snapshot();
-  s.itinerary=[{id:"art",name:"美术馆",location:"上海美术馆(中华艺术宫)",startTime:"10:00",endTime:"11:30",locked:false},{id:"dinner",name:"预约晚餐",location:"上海和平饭店龙凤厅",startTime:"18:00",endTime:"19:00",locked:true}].map(e=>EventSchema.parse({...e,placeId:e.id,category:"user activity",status:e.locked?"locked":"planned",estimatedCost:0,estimatedCostKnown:false,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"Explicit TEST saved venue",constraint:e.locked?"固定预约":"原安排"}));
+  s.itinerary=[{id:"art",name:"美术馆",location:"上海美术馆(中华艺术宫)",startTime:"10:00",endTime:"11:30",locked:false},{id:"dinner",name:"预约晚餐",location:"上海和平饭店龙凤厅",startTime:"18:00",endTime:"19:00",locked:true}].map(e=>EventSchema.parse({...e,placeId:e.id,category:"user activity",status:e.locked?"locked":"planned",indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"Explicit TEST saved venue",constraint:e.locked?"固定预约":"原安排"}));
   const ready=await runAgentAssist({snapshot:s,rawText});
-  assert.equal(ready.status,"ready");assert(ready.result.ok,"live provider returned no feasible plan");
+  assert.equal(ready.status,"READY");assert(ready.result.ok,"live provider returned no feasible plan");
   assert.equal(ready.base.trip.destination,"上海市");assert.equal(ready.parsedInput.parser,"llm");
   assert.deepEqual(validatePlan(ready.result.context,ready.result.plan),[]);
   assert(ready.result.attempts.length<=2);
   const world=ready.result.context.world;
   assert(world.routes.length<=40&&world.routes.every(r=>r.source==="amap"));
-  const report={testedAt:new Date().toISOString(),fixture:"Explicit test time 12:00 and saved Shanghai venues; live routes fetched at testedAt",status:ready.status,parser:ready.parsedInput.parser,question:partial.missingFacts,evidence:world.resolutionEvidence,routes:world.routes,ok:ready.result.ok,attempts:ready.result.attempts,events:ready.result.plan.events};
+  const report={testedAt:new Date().toISOString(),fixture:"Explicit test time 12:00 and saved Shanghai venues; live routes fetched at testedAt",status:ready.status,parser:ready.parsedInput.parser,question:partial.missingFact,evidence:world.resolutionEvidence,routes:world.routes,ok:ready.result.ok,attempts:ready.result.attempts,events:ready.result.plan.events};
   writeFileSync("work/assist-resolution-live-retest.json",JSON.stringify(report,null,2));
   console.log("PASS actual grounded Planner + Validator; report: work/assist-resolution-live-retest.json");
 }catch(error){

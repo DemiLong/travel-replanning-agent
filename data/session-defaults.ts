@@ -18,10 +18,7 @@ export function createStarterSnapshot() {
     profile: {
       id: "local-traveler",
       travelPace: "balanced",
-      interests: [],
-      dislikes: [],
       walkingTolerance: "medium",
-      preferences: [],
     },
     trip: {
       id: "test-trip",
@@ -32,6 +29,7 @@ export function createStarterSnapshot() {
     state: {
       currentDate: date,
       currentTime,
+      stateCapturedAt: now.toISOString(),
       currentLocation: "",
     },
     stateSources: {

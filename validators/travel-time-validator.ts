@@ -1,13 +1,10 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
 import { minutes } from "../lib/time";
-import { travelMinutes } from "../services/place-service";
 export function travelTimeValidator(
   c: AgentContext,
   p: ProposedPlan,
 ): Violation[] {
-  let previousEnd = minutes(c.state.currentTime),
-    previousLocation = c.state.currentLocation,
-    previousPlace = "";
+  let previousEnd = minutes(c.state.currentTime);
   const errors: Violation[] = [];
   if (c.world) {
     let from="current";
@@ -33,24 +30,5 @@ export function travelTimeValidator(
     }
     return errors;
   }
-  for (const e of [...p.events].sort((a, b) =>
-    a.startTime.localeCompare(b.startTime),
-  )) {
-    const place = c.places.find((p) => p.id === e.placeId);
-    if (!place) continue;
-    const required =
-      previousPlace === e.placeId
-        ? 0
-        : travelMinutes(previousLocation, place.district);
-    if (previousEnd + required > minutes(e.startTime))
-      errors.push({
-        code: "travel_time",
-        eventId: e.id,
-        message: `在 ${e.name} 之前，请为从 ${previousLocation} 到 ${place.district} 预留 ${required} 分钟路程。`,
-      });
-    previousEnd = minutes(e.endTime);
-    previousLocation = place.district;
-    previousPlace = e.placeId;
-  }
-  return errors;
+  return [{ code: "context", message: "缺少实时路线数据，不能校验方案。" }];
 }

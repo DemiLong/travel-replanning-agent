@@ -35,7 +35,6 @@ const violationLabels: Record<string, string> = {
   travel: "路程不足",
   opening_hours: "营业时间",
   closure: "地点关闭",
-  budget: "超出预算",
   past: "时间已过",
   duration: "时长无效",
   identity: "地点身份",

@@ -7,7 +7,6 @@ import { lockedEventValidator } from "./locked-event-validator";
 import { timeConflictValidator } from "./time-conflict-validator";
 import { travelTimeValidator } from "./travel-time-validator";
 import { openingHoursValidator } from "./opening-hours-validator";
-import { budgetValidator } from "./budget-validator";
 import { pastEventValidator } from "./past-event-validator";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes as minutesOf } from "../lib/time";
 export const validators = [
@@ -15,7 +14,6 @@ export const validators = [
   timeConflictValidator,
   travelTimeValidator,
   openingHoursValidator,
-  budgetValidator,
   pastEventValidator,
 ];
 export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
@@ -89,8 +87,8 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       const unknownDuration=old?.durationSource==="unknown";
       const proposedDuration=unknownDuration&&e.durationSource==="suggested";
       if(unknownDuration&&!arrivalOnly&&(!proposedDuration||minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`未知停留时长只能使用${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟的方案建议，不能伪装成用户事实。`});
-      if(old && (e.name!==old.name || e.location!==old.location || e.estimatedCost!==old.estimatedCost || e.estimatedCostKnown!==old.estimatedCostKnown || (!unknownDuration&&(e.durationSource!==old.durationSource||minutesOf(e.endTime)-minutesOf(e.startTime)!==minutesOf(old.endTime)-minutesOf(old.startTime)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点、费用或活动时长。"});
-      if(!old && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name) || e.estimatedCostKnown!==false || e.estimatedCost!==0))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点，费用未知不能假定免费。"});
+      if(old && (e.name!==old.name || e.location!==old.location || (!unknownDuration&&(e.durationSource!==old.durationSource||minutesOf(e.endTime)-minutesOf(e.startTime)!==minutesOf(old.endTime)-minutesOf(old.startTime)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点或活动时长。"});
+      if(!old && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name)))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点。"});
       if(e.openingTime!==null||e.closingTime!==null)errors.push({code:"place_data",eventId:e.id,message:"高德 POI 基础数据未验证营业时间，不能自行填入。"});
       if(!old && (minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`新增活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
       continue;
@@ -100,7 +98,6 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       e.name !== place.name ||
       e.location !== place.district ||
       e.category !== place.category ||
-      e.estimatedCost !== place.estimatedCost ||
       e.indoorOutdoor !== place.indoorOutdoor ||
       e.openingTime !== place.openingTime ||
       e.closingTime !== place.closingTime
@@ -108,7 +105,7 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       errors.push({
         code: "place_data",
         eventId: e.id,
-        message: "必须使用标准的地点身份、区域、费用、营业时间和室内外信息。",
+        message: "必须使用标准的地点身份、区域、营业时间和室内外信息。",
       });
   }
   const changes = [...p.movedEvents, ...p.removedEvents];

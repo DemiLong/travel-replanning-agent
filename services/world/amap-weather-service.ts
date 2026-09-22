@@ -5,10 +5,10 @@ export function emptyWeather(status: "unavailable" | "not_requested"): WorldWeat
 }
 const number = (x: unknown) => (typeof x==="number" || typeof x==="string" && x.trim()!=="") && Number.isFinite(Number(x)) ? Number(x) : null;
 export class AmapWeatherService {
-  async weather(adcode: string): Promise<WorldWeather> {
+  async weather(adcode: string, signal?: AbortSignal): Promise<WorldWeather> {
     requireAmapKey();
     if (!/^\d{6}$/.test(adcode)) return emptyWeather("unavailable");
-    const responses = await Promise.allSettled([amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"base"},600000),amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"all"},600000)]);
+    const responses = await Promise.allSettled([amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"base"},600000,{ signal }),amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"all"},600000,{ signal })]);
     const liveBody = responses[0].status==="fulfilled" ? responses[0].value : null;
     const forecastBody = responses[1].status==="fulfilled" ? responses[1].value : null;
     const live = objects(liveBody?.lives)[0];

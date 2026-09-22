@@ -14,11 +14,7 @@ export const DateSchema = z
 export const UserProfileSchema = z.object({
   id: z.string().min(1),
   travelPace: z.enum(["relaxed", "balanced", "packed"]),
-  interests: z.array(z.string().max(60)).max(12),
-  dislikes: z.array(z.string().max(200)).max(12),
   walkingTolerance: z.enum(["low", "medium", "high"]),
-  dailyBudget: z.number().min(0).max(100000).optional(),
-  preferences: z.array(z.string().max(300)).max(30),
 });
 export const TripSchema = z
   .object({
@@ -27,15 +23,15 @@ export const TripSchema = z
     startDate: DateSchema,
     endDate: DateSchema,
   })
-  .refine((t) => t.endDate >= t.startDate, "End date must follow start date");
+  .refine((t) => t.endDate === t.startDate, "Only same-day trips are supported");
 export const TripStateSchema = z.object({
   currentDate: DateSchema,
   currentTime: TimeSchema,
+  stateCapturedAt: z.string().datetime(),
   currentLocation: z.string().max(100),
   browserLocation: BrowserLocationSchema.optional(),
   energyLevel: z.enum(["low", "medium", "high"]).optional(),
   weather: z.enum(["sunny", "rain", "hot"]).optional(),
-  remainingBudget: z.number().min(0).max(100000).optional(),
 });
 export const FactSourceSchema = z.enum(["user", "system", "demo", "unset"]);
 export const StateSourcesSchema = z.object({
@@ -57,8 +53,6 @@ export const EventSchema = z.object({
   location: z.string(),
   status: z.enum(["completed", "missed", "planned", "locked"]),
   locked: z.boolean(),
-  estimatedCost: z.number().min(0),
-  estimatedCostKnown: z.boolean().optional(),
   indoorOutdoor: z.enum(["indoor", "outdoor", "mixed"]),
   openingTime: TimeSchema.nullable(),
   closingTime: TimeSchema.nullable(),
@@ -75,7 +69,6 @@ export const PlaceSchema = z.object({
   longitude: z.number(),
   openingTime: TimeSchema,
   closingTime: TimeSchema,
-  estimatedCost: z.number().min(0),
   indoorOutdoor: z.enum(["indoor", "outdoor", "mixed"]),
   averageDuration: z.number().positive(),
   tags: z.array(z.string()),
@@ -90,21 +83,12 @@ export const reasons = [
   "optimize",
   "other",
 ] as const;
-export const planAdjustments = [
-  "less_walking",
-  "cheaper",
-  "keep_stop",
-  "earlier",
-  "less_plan",
-  "more_plan",
-] as const;
 export const ReplanningRequestSchema = z.object({
   reason: z.enum(reasons),
   freeText: z.string().max(2000),
   currentState: TripStateSchema,
   closedPlaceIds: z.array(z.string()).max(30),
   variation: z.number().int().min(0).max(100),
-  adjustments: z.array(z.enum(planAdjustments)).max(4).optional(),
   stateSources: StateSourcesSchema.optional(),
   worldOptions: WorldOptionsSchema.optional(),
   confirmedDraftChanges: z.object({ removedLockedIds: z.array(z.string()).max(30) }).optional(),
@@ -172,9 +156,11 @@ export const ExperienceModeSchema = z.enum(["real", "demo"]);
 export const FlowStageSchema = z.enum([
   "NO_ITINERARY",
   "HAS_ITINERARY",
-  "RESCUE_INPUT",
-  "RESCUE_CONFIRM",
+  "NEEDS_INPUT",
   "PLAN_READY",
+  "OUT_OF_SCOPE",
+  "UNAVAILABLE",
+  "NO_SAFE_PLAN",
 ]);
 export const UnifiedIntentSchema = z.enum([
   "create",
@@ -189,7 +175,6 @@ export const SemanticActivitySchema = z.object({
   endTime: TimeSchema.nullable(),
   durationMinutes: z.number().int().positive().max(1440).nullable(),
   location: z.string().max(100).nullable(),
-  estimatedCost: z.number().min(0).max(100000).nullable(),
   locked: z.enum(["yes", "no", "uncertain"]),
   sourceText: z.string().max(500),
 });
@@ -211,7 +196,7 @@ export const SemanticExtractionSchema = z.object({
   constraints: z
     .array(
       z.object({
-        kind: z.enum(["keep", "budget", "time", "region"]),
+        kind: z.enum(["keep", "time", "region"]),
         value: z.string().min(1).max(300),
         sourceText: z.string().min(1).max(500),
       }),
@@ -234,10 +219,6 @@ export const SemanticExtractionSchema = z.object({
       value: z.enum(["low", "medium", "high"]).nullable(),
       sourceText: z.string().max(500).nullable(),
     }),
-    remainingBudget: z.object({
-      value: z.number().min(0).max(100000).nullable(),
-      sourceText: z.string().max(500).nullable(),
-    }),
   }),
   question: z.string().max(500).nullable(),
   ambiguities: z.array(z.string().min(1).max(300)).max(12),
@@ -249,8 +230,6 @@ export const ParsedPlanItemSchema = z.object({
   endTime: TimeSchema.nullable(),
   durationMinutes: z.number().int().positive().max(1440).nullable().default(null),
   location: z.string(),
-  estimatedCost: z.number().min(0),
-  estimatedCostKnown: z.boolean().optional(),
   locked: z.boolean(),
   source: FactSourceSchema,
 });
@@ -260,7 +239,7 @@ export const ParsedDisruptionSchema = z.object({
   source: FactSourceSchema,
 });
 export const ParsedConstraintSchema = z.object({
-  kind: z.enum(["keep", "budget", "time", "region"]),
+  kind: z.enum(["keep", "time", "region"]),
   value: z.string().min(1),
   source: FactSourceSchema,
 });
@@ -305,13 +284,18 @@ export const ConfirmedDraftSchema = z.object({
   closedPlaceIds: z.array(z.string()).max(30).default([]),
   question: z.string().max(500).nullable().optional(),
   worldOptions: WorldOptionsSchema.optional(),
+  destination: z.string().min(1).max(80).optional(),
   removedLockedIds: z.array(z.string()).max(30).default([]),
   baseRevision: z.number().int().min(0),
 });
 export const MissingFactSchema = z.object({
+  key: z.string().min(1),
   field: z.string().min(1),
   importance: z.enum(["blocking", "optional"]),
   reason: z.string().min(1),
+  question: z.string().min(1),
+  answerType: z.enum(["text", "time", "poi", "browser_location", "event_selection"]),
+  candidates: z.array(z.object({ value: z.string().min(1), label: z.string().min(1), description: z.string().optional() })).max(10).optional(),
 });
 export const ImpactAnalysisSchema = z.object({
   completedActivities: z.array(z.string()),
@@ -407,7 +391,6 @@ export type Violation = {
     | "time_conflict"
     | "travel_time"
     | "opening_hours"
-    | "budget"
     | "past_event"
     | "duration"
     | "place_data"
@@ -464,7 +447,6 @@ export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
             "time_conflict",
             "travel_time",
             "opening_hours",
-            "budget",
             "past_event",
             "duration",
             "place_data",
@@ -509,8 +491,15 @@ export const PendingPlanSchema = z.object({
   parsedInput: ParsedUserInputSchema.optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
 });
+export const ResolutionStateSchema = z.object({
+  currentBlockerKey: z.string().nullable(),
+  sameBlockerCount: z.number().int().min(0).max(3),
+  roundCount: z.number().int().min(0).max(3),
+  answeredFields: z.array(z.string().min(1)).max(30),
+  questionHistory: z.array(z.string().min(1)).max(12),
+});
 export const RealSessionSchema = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(3),
   experienceMode: z.literal("real"),
   flowStage: FlowStageSchema,
   snapshot: SnapshotSchema.extend({ mode: z.literal("user") }),
@@ -518,7 +507,9 @@ export const RealSessionSchema = z.object({
   parsedInput: ParsedUserInputSchema.nullable(),
   lastDisruption: ReplanningRequestSchema.nullable(),
   pendingPlan: PendingPlanSchema.nullable(),
+  resolutionState: ResolutionStateSchema,
   updatedAt: z.string().datetime(),
 });
 export type PendingPlan = z.infer<typeof PendingPlanSchema>;
+export type ResolutionState = z.infer<typeof ResolutionStateSchema>;
 export type RealSession = z.infer<typeof RealSessionSchema>;

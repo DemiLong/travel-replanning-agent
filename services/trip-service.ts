@@ -12,7 +12,9 @@ import {
 } from "../types";
 import { createStarterSnapshot } from "../data/session-defaults";
 export type TripMode = Snapshot["mode"];
-export const realSessionKey = "travel-session-real-v2";
+export const realSessionKey = "travel-session-real-v3";
+const legacyRealSessionKey = "travel-session-real-v2";
+const legacyRealSessionBackupKey = "travel-session-real-v2-backup";
 const legacySnapshotKey = "travel-snapshot-user";
 export const resultKey = (mode: TripMode) => `travel-result-${mode}`;
 
@@ -24,7 +26,7 @@ function starterSession(): RealSession {
   const snapshot = createStarterSnapshot();
   snapshot.trip.destination = "待确认城市";
   return RealSessionSchema.parse({
-    schemaVersion: 2,
+    schemaVersion: 3,
     experienceMode: "real",
     flowStage: "NO_ITINERARY",
     snapshot,
@@ -32,7 +34,74 @@ function starterSession(): RealSession {
     parsedInput: null,
     lastDisruption: null,
     pendingPlan: null,
+    resolutionState: {
+      currentBlockerKey: null,
+      sameBlockerCount: 0,
+      roundCount: 0,
+      answeredFields: [],
+      questionHistory: [],
+    },
     updatedAt: new Date().toISOString(),
+  });
+}
+
+function migrateSnapshot(value: unknown): Snapshot {
+  const fallback = createStarterSnapshot();
+  const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const state = candidate.state && typeof candidate.state === "object" ? candidate.state as Record<string, unknown> : {};
+  const trip = candidate.trip && typeof candidate.trip === "object" ? candidate.trip as Record<string, unknown> : {};
+  const currentDate = typeof state.currentDate === "string" ? state.currentDate : fallback.state.currentDate;
+  return SnapshotSchema.parse({
+    ...candidate,
+    mode: "user",
+    profile: { ...fallback.profile, ...(candidate.profile && typeof candidate.profile === "object" ? candidate.profile : {}) },
+    trip: { ...fallback.trip, ...trip, startDate: currentDate, endDate: currentDate },
+    state: {
+      ...fallback.state,
+      ...state,
+      currentDate,
+      stateCapturedAt: typeof state.stateCapturedAt === "string" ? state.stateCapturedAt : new Date().toISOString(),
+    },
+  });
+}
+
+export function migrateV2SessionValue(value: unknown): RealSession | null {
+  try {
+    if (!value || typeof value !== "object") return null;
+    const legacy = value as Record<string, unknown>;
+    const snapshot = migrateSnapshot(legacy.snapshot);
+    return RealSessionSchema.parse({
+      ...starterSession(),
+      rawInput: typeof legacy.rawInput === "string" ? legacy.rawInput : "",
+      snapshot,
+      flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function migrateV2Session(raw: string): RealSession | null {
+  try {
+    return migrateV2SessionValue(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function refreshSessionClock(session: RealSession): RealSession {
+  const captured = Date.parse(session.snapshot.state.stateCapturedAt);
+  const stale = !Number.isFinite(captured) || Date.now() - captured > 10 * 60 * 1000;
+  if (session.snapshot.stateSources.currentTime === "user" && !stale) return session;
+  const now = new Date();
+  const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return RealSessionSchema.parse({
+    ...session,
+    snapshot: {
+      ...session.snapshot,
+      state: { ...session.snapshot.state, currentTime, stateCapturedAt: now.toISOString() },
+      stateSources: { ...session.snapshot.stateSources, currentTime: "system" },
+    },
   });
 }
 
@@ -42,8 +111,9 @@ function migrateLegacySession(): RealSession {
   const candidate = rawUser ?? legacy;
   if (candidate) {
     try {
-      const parsed = SnapshotSchema.parse(JSON.parse(candidate));
-      const isDemo = parsed.mode === "demo";
+      const legacyValue = JSON.parse(candidate) as { mode?: unknown };
+      const isDemo = legacyValue.mode === "demo";
+      const parsed = migrateSnapshot(legacyValue);
       if (!isDemo) {
         const session = RealSessionSchema.parse({
           ...starterSession(),
@@ -70,9 +140,20 @@ export interface SessionRepository {
 export const browserSessionRepository: SessionRepository = {
   load() {
     const raw = localStorage.getItem(realSessionKey);
-    if (!raw) return migrateLegacySession();
+    if (!raw) {
+      const legacySession = localStorage.getItem(legacyRealSessionKey);
+      if (legacySession) {
+        localStorage.setItem(legacyRealSessionBackupKey, legacySession);
+        const migrated = migrateV2Session(legacySession);
+        if (migrated) {
+          localStorage.setItem(realSessionKey, JSON.stringify(migrated));
+          return refreshSessionClock(migrated);
+        }
+      }
+      return migrateLegacySession();
+    }
     try {
-      return RealSessionSchema.parse(JSON.parse(raw));
+      return refreshSessionClock(RealSessionSchema.parse(JSON.parse(raw)));
     } catch {
       return migrateLegacySession();
     }

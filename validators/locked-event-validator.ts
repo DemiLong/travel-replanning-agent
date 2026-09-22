@@ -15,7 +15,6 @@ export function lockedEventValidator(
           "placeId",
           "name",
           "startTime",
-          "estimatedCost",
           "location",
         ] as const
       ).some((k) => n[k] !== old[k]) ||
@@ -25,7 +24,7 @@ export function lockedEventValidator(
           {
             code: "locked_event" as const,
             eventId: old.id,
-            message: `请保留锁定安排 ${old.name} 的 ${old.startTime}–${old.endTime} 时间、地点身份和费用。`,
+            message: `请保留锁定安排 ${old.name} 的 ${old.startTime}–${old.endTime} 时间和地点身份。`,
           },
         ]
       : [];

@@ -3,11 +3,11 @@ import { buildRealContext } from "./real-context-builder";
 import { DeepSeekPlanner, materializeCandidate, type CandidatePlanner } from "../services/deepseek-planner";
 import { UnknownDurationConflict } from "../services/deepseek-planner";
 import { validatePlan } from "../validators";
-import { decisionTrace } from "./replanning-agent";
+import { decisionTrace } from "../services/decision-trace";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION } from "../lib/time";
 import type { AgentResult, ImpactAnalysis, PlanConflict, ResolutionOption, Violation } from "../types";
 import type { RealWorldContext } from "../types/world";
-export const MAX_REPLAN_ATTEMPTS=3;
+export const MAX_REPLAN_ATTEMPTS=2;
 
 function collectConflicts(violations: Violation[]) {
   const unique = new Map<string, PlanConflict>();
@@ -72,8 +72,8 @@ function removeConflictingActivity(candidate: import("../services/deepseek-plann
   };
 }
 
-export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSeekPlanner(),worldService:Pick<WorldContextService,"ground">=new WorldContextService(),impactAnalysis?:ImpactAnalysis):Promise<AgentResult|{world:RealWorldContext;error:string}>{
-  const world=await worldService.ground(raw);
+export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSeekPlanner(),worldService:Pick<WorldContextService,"ground">=new WorldContextService(),impactAnalysis?:ImpactAnalysis,signal?:AbortSignal):Promise<AgentResult|{world:RealWorldContext;error:string}>{
+  const world=await worldService.ground(raw, signal);
   if(world.status!=="ready")return {world,error:"真实世界数据尚未完整，请确认地点或补充必要信息。"};
   const context=buildRealContext(raw,world,impactAnalysis),attempts:AgentResult["attempts"]=[];
   let feedback:Violation[]=[],comparisons:NonNullable<AgentResult["candidateComparisons"]>=[],candidatePlans:NonNullable<AgentResult["candidatePlans"]>=[];
@@ -81,7 +81,7 @@ export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSe
     const started=Date.now();feedback=attempt?feedback:[];
     let selected:AgentResult["plan"]=null;
     try{
-      const candidates=await planner.generateCandidates(context,feedback,attempt);
+      const candidates=await planner.generateCandidates(context,feedback,attempt,signal);
       feedback=[];comparisons=[];candidatePlans=[];
       for(const candidate of candidates){
         try{

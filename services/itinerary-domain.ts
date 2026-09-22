@@ -8,6 +8,11 @@ import {
   type ItineraryEvent,
 } from "../types";
 
+export function confirmParsedInput(input: ParsedUserInput): ParsedUserInput {
+  if (input.missingFacts.length) return { ...input, status: "needs_input" };
+  return ParsedUserInputSchema.parse({ ...input, status: "confirmed" });
+}
+
 function materializeParsedTime(item: ParsedUserInput["existingPlans"][number]) {
   if (item.endTime) return { endTime: item.endTime, durationSource: "user" as const };
   if (item.durationMinutes !== null)
@@ -43,8 +48,6 @@ export function parsedToEvent(item: ParsedUserInput["existingPlans"][number], sn
     endTime: timing.endTime,
     durationSource: timing.durationSource,
     location: item.location,
-    estimatedCost: item.estimatedCost,
-    estimatedCostKnown: item.estimatedCostKnown,
     locked,
     status: locked ? "locked" : existing?.status === "completed" ? "completed" : "planned",
   };
@@ -103,8 +106,6 @@ export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput):
       endTime: event.durationSource === "unknown" ? null : event.endTime,
       durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
       location: event.location,
-      estimatedCost: event.estimatedCost,
-      estimatedCostKnown: event.estimatedCostKnown,
       locked: event.locked,
       source: "user",
     });
@@ -134,8 +135,6 @@ export function confirmedDraftFromParsed(
         endTime: event.durationSource === "unknown" ? null : event.endTime,
         durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
         location: event.location,
-        estimatedCost: event.estimatedCost,
-        estimatedCostKnown: event.estimatedCostKnown,
         locked: event.locked,
       })),
     activityMentions: parsed.activityMentions,

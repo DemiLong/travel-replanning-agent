@@ -2,7 +2,7 @@ import { z } from "zod";
 import { OpenAISemanticParser } from "@/services/semantic-parser";
 import { SnapshotSchema, reasons } from "@/types";
 
-export const maxDuration = 70;
+export const maxDuration = 12;
 
 const ParseRequestSchema = z.object({
   snapshot: SnapshotSchema,
@@ -23,7 +23,7 @@ export async function POST(request: Request) {
     if (!input.success) return Response.json({ error: "请提供有效的行程文字和当前行程。" }, { status: 400 });
     if(input.data.snapshot.mode!=="user")return Response.json({error:"示例数据不能进入真实解析。"},{status:400});
     const parser = new OpenAISemanticParser();
-    const parsed = await parser.parse(input.data.snapshot, input.data.rawText, input.data.hint);
+    const parsed = await parser.parse(input.data.snapshot, input.data.rawText, input.data.hint, request.signal);
     return Response.json(parsed, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     // Only log an allowlist of diagnostic metadata, never SDK error objects or request headers.
