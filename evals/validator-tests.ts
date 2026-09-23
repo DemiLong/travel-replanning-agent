@@ -411,6 +411,107 @@ async function main() {
     [["mention-hotel", "上海和平饭店"]],
   );
 
+  const hotelMeetingText = "原定15点在酒店集合，现在下雨了";
+  let hotelMeetingGroundCalls = 0;
+  const missingExistingPlanLocation = await runAgentAssist(
+    { snapshot: emptyBase, rawText: hotelMeetingText },
+    undefined,
+    {
+      parse: async () => ParsedUserInputSchema.parse({
+        ...parsed(hotelMeetingText),
+        existingPlans: [{ id: "hotel-meeting", name: "酒店集合", startTime: "15:00", endTime: "16:00", durationMinutes: 60, location: "", locked: true, source: "user" }],
+      }),
+      ground: async () => { hotelMeetingGroundCalls += 1; return world(); },
+    },
+  );
+  assert.equal(missingExistingPlanLocation.status, "NEEDS_INPUT");
+  assert.equal(hotelMeetingGroundCalls, 0, "existingPlans 地点为空时应先补问，不应提前调用地图服务");
+  if (missingExistingPlanLocation.status !== "NEEDS_INPUT") throw new Error("expected existing plan location follow-up");
+  assert.equal(missingExistingPlanLocation.missingFact.key, "activity:event-hotel-meeting:location");
+  let capturedHotelMeeting: unknown;
+  const answeredExistingPlanLocation = await runAgentAssist(
+    {
+      snapshot: emptyBase,
+      confirmedDraft: missingExistingPlanLocation.confirmedDraft,
+      answer: { kind: "text", field: missingExistingPlanLocation.missingFact.key, value: "上海和平饭店" },
+      resolutionState: missingExistingPlanLocation.resolutionState,
+    },
+    undefined,
+    { ground: async (raw) => { capturedHotelMeeting = raw; return world("unavailable"); } },
+  );
+  assert.equal(answeredExistingPlanLocation.status, "UPSTREAM_UNAVAILABLE");
+  const hotelMeetingSnapshot = (capturedHotelMeeting as ReturnType<typeof input>).snapshot;
+  assert.deepEqual(
+    hotelMeetingSnapshot.itinerary.map((item) => [item.id, item.location, item.startTime, item.endTime, item.locked]),
+    [["event-hotel-meeting", "上海和平饭店", "15:00", "16:00", true]],
+  );
+
+  const vagueHotelBase = SnapshotSchema.parse({
+    ...snapshot(),
+    itinerary: [
+      EventSchema.parse({ ...snapshot().itinerary[0], id: "hotel-stop", placeId: "hotel-place", name: "酒店集合", startTime: "15:00", endTime: "16:00", location: "酒店", locked: false, status: "planned" }),
+      EventSchema.parse({ ...snapshot().itinerary[0], id: "dinner-stop", placeId: "dinner-place", name: "晚餐", startTime: "18:00", endTime: "19:00", location: "上海餐厅", locked: true, status: "locked" }),
+    ],
+  });
+  const hotelWorldQuestion = RealWorldContextSchema.parse({
+    ...world("needs_input"),
+    missingWorldFacts: [{ kind: "user", field: "hotel-place", message: "“酒店”具体在哪里？告诉我名称或定位即可。" }],
+    ambiguities: [],
+  });
+  const mappedWorldQuestion = await runAgentAssist(
+    { snapshot: vagueHotelBase, rawText: "现在下雨了，请调整原定安排" },
+    undefined,
+    { parse: async () => parsed("现在下雨了，请调整原定安排"), ground: async () => hotelWorldQuestion },
+  );
+  assert.equal(mappedWorldQuestion.status, "NEEDS_INPUT");
+  if (mappedWorldQuestion.status !== "NEEDS_INPUT") throw new Error("expected mapped world location follow-up");
+  assert.equal(mappedWorldQuestion.missingFact.key, "activity:hotel-stop:location");
+  let capturedMappedHotel: unknown;
+  const answeredMappedWorldQuestion = await runAgentAssist(
+    {
+      snapshot: vagueHotelBase,
+      confirmedDraft: mappedWorldQuestion.confirmedDraft,
+      answer: { kind: "text", field: mappedWorldQuestion.missingFact.key, value: "上海和平饭店" },
+      resolutionState: mappedWorldQuestion.resolutionState,
+    },
+    undefined,
+    { ground: async (raw) => { capturedMappedHotel = raw; return world("unavailable"); } },
+  );
+  assert.equal(answeredMappedWorldQuestion.status, "UPSTREAM_UNAVAILABLE");
+  const mappedHotelSnapshot = (capturedMappedHotel as ReturnType<typeof input>).snapshot;
+  assert.deepEqual(
+    mappedHotelSnapshot.itinerary.map((item) => [item.id, item.location, item.startTime, item.locked]),
+    [
+      ["hotel-stop", "上海和平饭店", "15:00", false],
+      ["dinner-stop", "上海餐厅", "18:00", true],
+    ],
+  );
+
+  for (const unsafeMapping of [
+    { name: "无匹配", base: vagueHotelBase, field: "unknown-place" },
+    {
+      name: "多个匹配",
+      base: SnapshotSchema.parse({
+        ...vagueHotelBase,
+        itinerary: vagueHotelBase.itinerary.map((event) => EventSchema.parse({ ...event, placeId: "shared-place", location: "酒店" })),
+      }),
+      field: "shared-place",
+    },
+  ]) {
+    const unsafeWorldQuestion = RealWorldContextSchema.parse({
+      ...world("needs_input"),
+      missingWorldFacts: [{ kind: "user", field: unsafeMapping.field, message: "请补充具体活动地点。" }],
+      ambiguities: [],
+    });
+    const unsafeResult = await runAgentAssist(
+      { snapshot: unsafeMapping.base, rawText: "现在下雨了，请调整原定安排" },
+      undefined,
+      { parse: async () => parsed("现在下雨了，请调整原定安排"), ground: async () => unsafeWorldQuestion },
+    );
+    assert.equal(unsafeResult.status, "UPSTREAM_UNAVAILABLE", `${unsafeMapping.name}时必须受控失败`);
+    assert.match(unsafeResult.error, /无法安全对应到唯一活动/);
+  }
+
   const missingTime = await runAgentAssist(
     { snapshot: emptyBase, rawText: "现在下雨了，我原定去外滩，请帮我调整" },
     undefined,

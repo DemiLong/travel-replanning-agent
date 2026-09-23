@@ -364,6 +364,11 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
       add(missingFact(`activity:${mention.id}:location`, `“${mention.name}”具体是哪个地点？`));
     }
   }
+  for (const event of draft.existingPlans) {
+    if (!event.location.trim()) {
+      add(missingFact(`activity:${event.id}:location`, `“${event.name}”具体是哪个地点？`));
+    }
+  }
   if (blockers.length) return respondWithBlocker();
 
   let world: RealWorldContext;
@@ -376,7 +381,16 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
   impact = analyzeImpact(snapshot, request, world);
   parsed.resolutionEvidence = world.resolutionEvidence;
   for (const fact of world.missingWorldFacts.filter((item) => item.kind === "user")) {
-    add(missingFact(fact.field, fact.message, fact.field === "currentTime" ? "time" : "text"));
+    if (["currentLocation", "currentTime", "destination", "travelMode"].includes(fact.field)) {
+      add(missingFact(fact.field, fact.message, fact.field === "currentTime" ? "time" : "text"));
+      continue;
+    }
+    const matchingEvents = draft.existingPlans.filter((event) => event.placeId === fact.field);
+    if (matchingEvents.length !== 1) {
+      return { status: "UPSTREAM_UNAVAILABLE", error: "地点补充问题无法安全对应到唯一活动，原行程没有改变。请核对正式行程后重试。", retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    }
+    const event = matchingEvents[0];
+    add(missingFact(`activity:${event.id}:location`, fact.message));
   }
   for (const ambiguity of world.ambiguities) {
     add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.name, description: candidate.address }))));
