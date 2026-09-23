@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { z, ZodError } from "zod";
 import {
   ArrowLeft,
   ArrowRight,
@@ -40,8 +41,12 @@ import {
 } from "@/services/trip-service";
 import {
   AgentResultSchema,
+  ConfirmedDraftSchema,
+  ImpactAnalysisSchema,
+  MissingFactSchema,
   ParsedUserInputSchema,
   ReplanningRequestSchema,
+  ResolutionStateSchema,
   SnapshotSchema,
   type ItineraryEvent,
   type ParsedUserInput,
@@ -87,8 +92,92 @@ const eventDurationLabel = (event: ItineraryEvent) => {
   const duration = Math.max(0, endHour * 60 + endMinute - (startHour * 60 + startMinute));
   return event.durationSource === "suggested" ? `预计停留 ${duration} 分钟` : `停留至 ${event.endTime}`;
 };
-const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : "操作失败，请再试一次。";
+const errorText = (error: unknown) => {
+  if (error instanceof ZodError) return "服务暂时返回异常，你的输入已保留，请稍后重试。";
+  if (!(error instanceof Error)) return "操作失败，请再试一次。";
+  if (/unexpected token|json|invalid_type|invalid input|syntaxerror/i.test(error.message)) {
+    return "服务暂时返回异常，你的输入已保留，请稍后重试。";
+  }
+  if (/failed to fetch|networkerror|load failed|connection/i.test(error.message)) {
+    return "服务暂时无法连接，你的输入已保留，请稍后重试。";
+  }
+  return error.message;
+};
+
+async function readApiJson(response: Response): Promise<unknown> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    if ((error as Error)?.name === "AbortError") throw error;
+    throw new Error("服务响应暂时无法读取，你的输入已保留，请稍后重试。");
+  }
+  if (!text.trim()) {
+    throw new Error("服务暂时返回异常，你的输入已保留，请稍后重试。");
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("服务暂时返回异常，你的输入已保留，请稍后重试。");
+  }
+}
+
+const ApiErrorBodySchema = z.object({
+  error: z.string().min(1),
+  code: z.string().min(1).optional(),
+}).passthrough();
+
+const AssistNeedsInputSchema = z.object({
+  status: z.literal("NEEDS_INPUT"),
+  parsedInput: ParsedUserInputSchema,
+  confirmedDraft: ConfirmedDraftSchema,
+  missingFact: MissingFactSchema,
+  resolutionState: ResolutionStateSchema,
+  impactAnalysis: ImpactAnalysisSchema,
+  ambiguities: RealWorldContextSchema.shape.ambiguities.optional(),
+  world: RealWorldContextSchema.optional(),
+}).passthrough();
+
+const AssistReadySchema = z.object({
+  status: z.literal("READY"),
+  parsedInput: ParsedUserInputSchema,
+  result: AgentResultSchema,
+  base: SnapshotSchema,
+  request: ReplanningRequestSchema,
+  impactAnalysis: ImpactAnalysisSchema.optional(),
+  resolutionState: ResolutionStateSchema.optional(),
+}).passthrough();
+
+const AssistTerminalSchema = z.object({
+  status: z.enum(["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN"]),
+  error: z.string().min(1),
+  retryable: z.boolean().optional(),
+  failedStage: z.enum(["PARSER", "GROUNDING", "PLANNER", "VALIDATOR"]).optional(),
+  parsedInput: ParsedUserInputSchema.optional(),
+  impactAnalysis: ImpactAnalysisSchema.optional(),
+  resolutionState: ResolutionStateSchema.optional(),
+}).passthrough();
+
+const ValidateResponseSchema = z.object({
+  ok: z.boolean(),
+  error: z.string().min(1).optional(),
+  violations: z.array(z.unknown()).optional(),
+}).passthrough();
+
+function parseAssistBody(value: unknown, responseOk: boolean): AssistBody {
+  const objectValue = z.object({}).passthrough().parse(value);
+  if (objectValue.status === "NEEDS_INPUT") return AssistNeedsInputSchema.parse(objectValue);
+  if (objectValue.status === "READY") return AssistReadySchema.parse(objectValue);
+  if (["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN"].includes(String(objectValue.status))) {
+    return AssistTerminalSchema.parse(objectValue);
+  }
+  if (!responseOk && objectValue.status === undefined) return ApiErrorBodySchema.parse(objectValue);
+  throw new ZodError([{ code: "custom", path: ["status"], message: "Unknown assist response status" }]);
+}
+
+async function readAssistResponse(response: Response) {
+  return parseAssistBody(await readApiJson(response), response.ok);
+}
 
 const userFacingPlanningMessage = (message: string) =>
   message
@@ -109,8 +198,9 @@ async function parseWithModel(
     headers: await requestHeaders(),
     body: JSON.stringify({ snapshot, rawText, hint }),
   });
-  const body = (await response.json()) as { error?: string; code?: string };
-  if (response.ok) return ParsedUserInputSchema.parse(body);
+  const rawBody = await readApiJson(response);
+  if (response.ok) return ParsedUserInputSchema.parse(rawBody);
+  const body = ApiErrorBodySchema.parse(rawBody);
   if (response.status === 503 && body.code === "MODEL_NOT_CONFIGURED") {
     throw new Error("AI 解析未启用，请先配置服务端 DEEPSEEK_API_KEY。");
   }
@@ -245,7 +335,7 @@ export function HomeFlow() {
         ? { snapshot: activeSession.snapshot, confirmedDraft, answer, resolutionState }
         : { snapshot: activeSession.snapshot, rawText: raw, resolutionState: activeSession.resolutionState };
       const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify(payload), signal: controller.signal });
-      const body = (await response.json()) as AssistBody;
+      const body = await readAssistResponse(response);
       if (body.status === "NEEDS_INPUT" && body.parsedInput && body.confirmedDraft && body.missingFact && body.resolutionState) {
         setMissingFact(body.missingFact);
         setConfirmedDraft(body.confirmedDraft);
@@ -287,7 +377,7 @@ export function HomeFlow() {
 
   return (
     <div className="mobile-workspace home-screen">
-      <div className="home-brand"><Sparkles size={18} /><span>接住你</span></div>
+      <div className="home-brand"><Sparkles size={18} /><span>coveredYou · 接住你</span></div>
       <div className="home-copy">
         <span className="eyebrow">今天也可以慢慢来</span>
         <h1>发生了森么？</h1>
@@ -1000,7 +1090,7 @@ export function RescueFlow() {
           resolutionState: activeSession.resolutionState,
         }),
       });
-      const body = (await response.json()) as AssistBody;
+      const body = await readAssistResponse(response);
       if (!response.ok) throw new Error(body.error ?? "暂时无法生成方案。");
       if (body.status === "NEEDS_INPUT") {
         if (body.world) setWorld(RealWorldContextSchema.parse(body.world));
@@ -1574,7 +1664,7 @@ export function ResultFlow() {
   async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
     const confirmedDraft = confirmedDraftFromParsed(base, nextParsed, nextParsed.closedPlaceIds, removedLockedIds, removedEventIds);
     const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, confirmedDraft, resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } }) });
-    const body = (await response.json()) as AssistBody;
+    const body = await readAssistResponse(response);
     if (!response.ok) throw new Error(body.error ?? "暂时无法重新安排。");
     if (body.status !== "READY" || !body.result || !body.base || !body.request || !body.parsedInput) throw new Error(body.missingFact?.question ?? body.error ?? "请先补充这次调整需要的信息。");
     const nextResult = AgentResultSchema.parse(body.result);
@@ -1614,7 +1704,7 @@ export function ResultFlow() {
       if (latest.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
       if (result.context.world && Date.now() - Date.parse(result.context.world.currentTime.confirmedAt) > 300000) throw new Error("距离确认时间较久，请重新生成方案。");
       const response = await fetch("/api/validate", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }) });
-      const checked = (await response.json()) as { ok?: boolean };
+      const checked = ValidateResponseSchema.parse(await readApiJson(response));
       if (!response.ok || !checked.ok) throw new Error("方案已不再满足当前安排，请重新生成。");
       const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...latest.snapshot.itinerary.filter(event => event.status === "completed"), ...plan.events], revision: latest.snapshot.revision + 1 });
       await saveTrip(next, latest.snapshot.revision);

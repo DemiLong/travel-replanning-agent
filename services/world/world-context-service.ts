@@ -90,11 +90,7 @@ export class WorldContextService {
         const selected=options?.selectedPois[field];
         if (selected) {
           const candidateIds=candidatePlaceIds[field];
-          if(candidateIds && !candidateIds.includes(selected)) {
-            missing("user",field,"所选地点不属于本次 Grounding 的合法候选，请重新选择。");
-            return null;
-          }
-          const selectedCandidate=preResolved.get(field);
+          const selectedCandidate=candidateIds?.includes(selected) ? preResolved.get(field) : undefined;
           if(selectedCandidate?.poiId===selected){
             result.resolutionEvidence!.push({field,query,reason:"用户选择命中本次 Grounding 的候选地点。",poiId:selected,lookupCity:searchCity,citySource:traceSource??citySource});
             return selectedCandidate;
@@ -117,7 +113,8 @@ export class WorldContextService {
         if(selected) {
           const selectedCandidate=response.candidates.find(p=>p.poiId===selected);
           if(!selectedCandidate) {
-            missing("user",field,"所选地点不属于本次 Grounding 的合法候选，请重新选择。");
+            if(response.candidates.length) result.ambiguities.push({field,label:query,candidates:response.candidates});
+            else missing("user",field,"所选地点不属于本次 Grounding 的合法候选，请重新选择。");
             return null;
           }
           result.resolutionEvidence!.push({field,query,reason:"用户选择命中本次 Grounding 的候选地点。",poiId:selected,lookupCity:searchCity,citySource:traceSource??citySource});
@@ -135,7 +132,9 @@ export class WorldContextService {
     // use a verified place-evidence city, but never a stale trip city.
     const currentQuery=locationQuery(state.currentLocation,request.freeText,snapshot).query;
     const currentLookupCity=citySource==="place_evidence"&&/(酒店|宾馆)/.test(currentQuery)?city:"";
-    if(currentQuery.trim() && currentQuery!=="浏览器定位" && !(genericLocation(currentQuery)&&freshBrowserLocation(state.browserLocation))) {
+    if(genericLocation(currentQuery) && !freshBrowserLocation(state.browserLocation)) {
+      missing("user","currentLocation","请填写具体的当前位置，例如完整地铁站、酒店或道路名称。");
+    } else if(currentQuery.trim() && currentQuery!=="浏览器定位" && !(genericLocation(currentQuery)&&freshBrowserLocation(state.browserLocation))) {
       const poi=await resolve("currentLocation",state.currentLocation,currentLookupCity,"current_location");
       if(poi){
         const previousCity=city;

@@ -23,6 +23,7 @@
     "test": "npm run test:unit && npm run test:e2e",
     "test:unit": "node scripts/run-evals.mjs --test",
     "test:e2e": "npm run build && node scripts/run-playwright.mjs",
+    "test:p0-live": "npm run build && node scripts/run-playwright.mjs -c playwright.live.config.ts",
     "test:semantic-live": "node --env-file-if-exists=.env.local scripts/test-live.mjs --semantic-only",
     "test:world-live": "node --env-file-if-exists=.env.local scripts/test-live.mjs"
   },

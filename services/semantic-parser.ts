@@ -22,10 +22,13 @@ Keep these concepts separate:
 - startTime/endTime belong only to the nearest named activity.
 - durationMinutes is a duration such as "需要1个小时"; it is not a clock time.
 - locked=yes only when booking/fixed/must-keep language clearly modifies that same activity. A booking word elsewhere in the sentence must not lock another activity.
-- existing_plan means the traveler says the activity is already planned or booked.
-- considering means the traveler is asking whether to do it or is only thinking about it.
+- Decide the role of every activity from the evidence in its own clause. Do not let a sequence word, a time, a place, or a feasibility question elsewhere in the sentence confirm an activity whose own clause says it is only being considered.
+- existing_plan means the traveler says the activity is already planned, decided, booked or originally scheduled. When the traveler asks whether to keep or cancel an activity that was already planned, keep exactly one existing_plan activity and extract the keep/cancel concern as a changed_mind disruption and in question. Do not silently remove it, especially when it is locked.
+- considering means the traveler is undecided whether to do that activity or is choosing between options not stated as an existing plan. Keep those options as considering; never turn alternatives into required itinerary items. “我还不确定是否去，正在考虑15点去A，然后18点去B，来得及吗” leaves A and B as considering because the uncertainty is about doing them. “我在考虑15点去A还是B，还没决定” also leaves both options considering.
+- The word 想 alone does not imply considering. “我想3点去A，然后6点去B，晚上8点去C，还来得及全部做吗” presents the three activities as the itinerary whose feasibility is being checked, so A/B/C are existing_plan. “我原定15点去A、18点去B，但现在不确定赶不赶得上” also keeps A/B as existing_plan because the uncertainty concerns feasibility, not whether they were planned.
+- Mixed intent must stay mixed: in “已确定15点去A，晚上还在考虑18点去B，全部来得及吗”, A is existing_plan and B is considering. Never promote B merely because A is confirmed or the sentence asks whether everything is feasible.
 - reference means it is mentioned only for comparison or context.
-- A planned activity remains existing_plan when the traveler asks whether to keep it; merge repeated mentions of the same activity. 睡过头 is a delay, not weather or fatigue. 下午3点=15:00 and 下午5点=17:00. For an unnamed hotel or booked attraction, keep the activity, leave location null and ask for its name in ambiguities. Preserve the traveler's actual question in question.
+- A planned activity remains existing_plan when the traveler asks whether to keep it; merge repeated mentions of the same activity. A feasibility question such as 还来得及吗 does not turn clearly sequenced plans into considering activities. Past activities, another person's recommendation, and general comparisons are not today's existing plans. 睡过头 is a delay, not weather or fatigue. 下午3点=15:00 and 下午5点=17:00. A bare 3点 may be interpreted as 15:00 only when same-day sequence evidence such as 然后、晚上 or surrounding afternoon plans makes that reading clear; otherwise preserve the ambiguity instead of guessing. For an unnamed hotel or booked attraction, keep the activity, leave location null and ask for its name in ambiguities. Preserve the traveler's actual question in question.
 - 必须/需要在某个时间与别人集合 is a fixed commitment: locked=yes for that meeting. Generic descriptions like 酒店/景点/我的酒店 are not resolved venue names: location=null and ask which hotel/attraction. Do not split '原定去X，现在还去X吗' into two activities: exactly one existing_plan for X with the original startTime; the question goes in question. An activity end time may remain null; missing duration is not a reason to omit an activity.
 
 Split multiple activities into separate objects. Never use the full user sentence as an activity name. Keep each sourceText as the shortest exact clause that supports the extracted fact. Every non-null context value also needs its exact sourceText; otherwise return both value and sourceText as null. If one phrase has several possible attachments, use locked=uncertain or add an ambiguity instead of guessing.
@@ -47,7 +50,6 @@ export function normalizeSemanticExtraction(
   const parseWarnings = [...extraction.ambiguities];
   const activityMentions: ParsedUserInput["activityMentions"] = [];
   const existingPlans: ParsedUserInput["existingPlans"] = [];
-
   const hasEvidence = (sourceText: string | null) =>
     Boolean(sourceText && rawText.includes(sourceText));
   const contextFact = <T>(
@@ -65,13 +67,17 @@ export function normalizeSemanticExtraction(
       parseWarnings.push(`活动“${activity.name}”没有可在原文中核对的证据，已忽略。`);
       continue;
     }
-    // Co-reference normalization after LLM extraction, not an alternate parser.
-    if(activity.role!=="existing_plan" && activity.startTime===null && extraction.activities.some(other=>other!==activity && other.role==="existing_plan" && other.name.trim().length>=2 && activity.name.includes(other.name) && other.location===activity.location)) {
+    // Role is a semantic judgment made from each activity's evidence by the
+    // parser. Normalization verifies evidence but must not confirm an activity
+    // that the parser explicitly classified as only being considered.
+    const role = activity.role;
+    if(role!=="existing_plan" && activity.startTime===null && extraction.activities.some(other=>other!==activity && other.role==="existing_plan" && other.name.trim().length>=2 && activity.name.includes(other.name) && other.location===activity.location)) {
       parseWarnings.push(`关于“${activity.name}”的询问已保留在本次问题中，不重复创建同一地点的活动。`);
       continue;
     }
     const mention = {
       ...activity,
+      role,
       id: `mention-${index}-${crypto.randomUUID()}`,
     };
     let endTime = activity.endTime;
@@ -83,10 +89,9 @@ export function normalizeSemanticExtraction(
       }
     }
     if (
-      activity.role !== "existing_plan" ||
+      role !== "existing_plan" ||
       !activity.name.trim() ||
-      !activity.startTime ||
-      !activity.location
+      !activity.startTime
     ) {
       activityMentions.push(mention);
       continue;
@@ -247,7 +252,7 @@ export class DeepSeekSemanticParser {
           }),
         },
       ],
-      text: { format: deepSeekFormat(SemanticExtractionSchema, "dayshift_semantic_facts") },
+      text: { format: deepSeekFormat(SemanticExtractionSchema, "coveredYou_semantic_facts") },
     }, { signal: parserSignal });
     if (response.status !== "completed" || !response.output_parsed) {
       throw new Error("MODEL_OUTPUT_INCOMPLETE");

@@ -8,15 +8,50 @@ import {
   type ItineraryEvent,
 } from "../types";
 
+function activityNameKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/^(?:原定|原本|计划|准备)?(?:要)?(?:去|到|前往|参观)/, "");
+}
+
+function sameActivityAtSameTime(
+  event: ItineraryEvent,
+  item: { name: string; startTime: string | null },
+) {
+  return Boolean(
+    item.startTime &&
+      event.startTime === item.startTime &&
+      activityNameKey(event.name) === activityNameKey(item.name),
+  );
+}
+
 export function confirmParsedInput(input: ParsedUserInput): ParsedUserInput {
   if (input.missingFacts.length) return { ...input, status: "needs_input" };
   return ParsedUserInputSchema.parse({ ...input, status: "confirmed" });
 }
 
-function materializeParsedTime(item: ParsedUserInput["existingPlans"][number]) {
-  if (item.endTime) return { endTime: item.endTime, durationSource: "user" as const };
-  if (item.durationMinutes !== null)
-    return { endTime: addMinutesWithinDay(item.startTime, item.durationMinutes), durationSource: "user" as const };
+function materializeParsedTime(
+  item: ParsedUserInput["existingPlans"][number],
+  existing?: ItineraryEvent,
+) {
+  const suppliedEndTime = item.endTime !== null
+    ? item.endTime
+    : item.durationMinutes !== null
+      ? addMinutesWithinDay(item.startTime, item.durationMinutes)
+      : null;
+  if (
+    existing &&
+    item.startTime === existing.startTime &&
+    (suppliedEndTime === null || suppliedEndTime === existing.endTime)
+  ) {
+    return {
+      endTime: existing.endTime,
+      durationSource: existing.durationSource ?? "unknown" as const,
+    };
+  }
+  if (suppliedEndTime !== null) return { endTime: suppliedEndTime, durationSource: "user" as const };
   return { endTime: item.startTime, durationSource: "unknown" as const };
 }
 
@@ -24,9 +59,9 @@ export function parsedToEvent(item: ParsedUserInput["existingPlans"][number], sn
   const existing = snapshot.itinerary.find(
     (event) =>
       event.id === item.id ||
-      (event.startTime === item.startTime && event.name.trim().toLowerCase() === item.name.trim().toLowerCase()),
+      sameActivityAtSameTime(event, item),
   );
-  const timing = materializeParsedTime(item);
+  const timing = materializeParsedTime(item, existing);
   const locked = Boolean(existing?.locked || item.locked);
   const changedLocation = Boolean(existing && item.location.trim() !== existing.location.trim());
   return {
@@ -88,11 +123,40 @@ export function normalizeParsed(parsed: ParsedUserInput, baseItineraryCount: num
 }
 
 export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput): ParsedUserInput {
+  const promotedMentionIds = new Set<string>();
+  const matchedSavedMentionIds = new Set<string>();
+  const promotedPlans: ParsedUserInput["existingPlans"] = [];
+  for (const mention of parsed.activityMentions) {
+    const savedMatches = snapshot.itinerary.filter(
+      (event) => event.status !== "completed" && sameActivityAtSameTime(event, mention),
+    );
+    if (mention.role === "existing_plan" && savedMatches.length === 1) {
+      matchedSavedMentionIds.add(mention.id);
+      continue;
+    }
+    if (
+      mention.role !== "existing_plan" ||
+      !mention.name.trim() ||
+      !mention.startTime ||
+      !mention.location?.trim()
+    ) continue;
+    promotedMentionIds.add(mention.id);
+    promotedPlans.push({
+      id: mention.id,
+      name: mention.name.trim(),
+      startTime: mention.startTime,
+      endTime: mention.endTime,
+      durationMinutes: mention.durationMinutes,
+      location: mention.location.trim(),
+      locked: mention.locked === "yes",
+      source: "user",
+    });
+  }
   const used = new Set<string>();
-  const plans = parsed.existingPlans.map((item) => {
+  const plans = [...parsed.existingPlans, ...promotedPlans].map((item) => {
     const match = snapshot.itinerary.find((event) =>
       !used.has(event.id) && event.status !== "completed" &&
-      (event.id === item.id || (event.startTime === item.startTime && event.name.trim().toLowerCase() === item.name.trim().toLowerCase())),
+      (event.id === item.id || sameActivityAtSameTime(event, item)),
     );
     if (!match) return item;
     used.add(match.id);
@@ -110,7 +174,15 @@ export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput):
       source: "user",
     });
   }
-  return ParsedUserInputSchema.parse({ ...parsed, existingPlans: plans });
+  return ParsedUserInputSchema.parse({
+    ...parsed,
+    existingPlans: plans,
+    activityMentions: parsed.activityMentions.filter(
+      (mention) =>
+        !promotedMentionIds.has(mention.id) &&
+        !matchedSavedMentionIds.has(mention.id),
+    ),
+  });
 }
 
 export function confirmedDraftFromParsed(
@@ -120,11 +192,12 @@ export function confirmedDraftFromParsed(
   removedLockedIds: string[] = [],
   removedEventIds: string[] = [],
 ): ConfirmedDraft {
+  const hydrated = hydrateParsedPlans(snapshot, parsed);
   const removed = new Set(removedEventIds);
-  const merged = mergePlans(snapshot, parsed).filter(event => !removed.has(event.id));
+  const merged = mergePlans(snapshot, hydrated).filter(event => !removed.has(event.id));
   return ConfirmedDraftSchema.parse({
-    rawText: parsed.rawText,
-    intent: parsed.intent,
+    rawText: hydrated.rawText,
+    intent: hydrated.intent,
     existingPlans: merged
       .filter((event) => event.status !== "completed")
       .map((event) => ({
@@ -134,17 +207,18 @@ export function confirmedDraftFromParsed(
         startTime: event.startTime,
         endTime: event.durationSource === "unknown" ? null : event.endTime,
         durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
+        durationSource: event.durationSource ?? "unknown",
         location: event.location,
         locked: event.locked,
       })),
-    activityMentions: parsed.activityMentions,
-    disruptions: parsed.disruptions,
-    constraints: parsed.constraints,
-    context: parsed.context,
-    contextSources: parsed.contextSources,
+    activityMentions: hydrated.activityMentions,
+    disruptions: hydrated.disruptions,
+    constraints: hydrated.constraints,
+    context: hydrated.context,
+    contextSources: hydrated.contextSources,
     closedPlaceIds,
-    question: parsed.question,
-    worldOptions: parsed.worldOptions,
+    question: hydrated.question,
+    worldOptions: hydrated.worldOptions,
     removedLockedIds,
     baseRevision: snapshot.revision,
   });

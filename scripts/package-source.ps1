@@ -1,4 +1,4 @@
-param([string]$FileName = 'dayshift-source-v6-assist-resolution.zip')
+param([string]$FileName = 'coveredYou-source-p0.zip')
 $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([IO.Path]::GetFileName($FileName) -ne $FileName) { throw 'Use a filename without directories.' }

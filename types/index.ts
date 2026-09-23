@@ -271,6 +271,9 @@ export const ParsedUserInputSchema = z.object({
 export const ConfirmedPlanItemSchema = ParsedPlanItemSchema.omit({ source: true });
 export const ConfirmedPlanItemWithPlaceSchema = ConfirmedPlanItemSchema.extend({
   placeId: z.string().min(1).optional(),
+  // Optional for compatibility with drafts created before duration provenance
+  // was carried through the confirmation flow.
+  durationSource: z.enum(["user", "suggested", "unknown"]).optional(),
 });
 export const ConfirmedDraftSchema = z.object({
   rawText: z.string().max(4000),

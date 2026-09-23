@@ -17,9 +17,11 @@ const snapshot=()=>{const s=createStarterSnapshot();s.trip.destination="待确�
 try{
   const partial=await runAgentAssist({snapshot:snapshot(),rawText});
   assert.equal(partial.status,"NEEDS_INPUT");assert(partial.missingFact);
-  assert(/晚餐/.test(partial.missingFact.reason));
+  console.log("LIVE first blocker",JSON.stringify({key:partial.missingFact.key,reason:partial.missingFact.reason,answerType:partial.missingFact.answerType,draftActivities:partial.confirmedDraft.existingPlans.map(item=>({id:item.id,name:item.name,time:item.startTime,locked:item.locked})),unresolved:partial.confirmedDraft.activityMentions.map(item=>({id:item.id,name:item.name,time:item.startTime,location:item.location,role:item.role}))}));
+  assert(/美术馆|晚餐/.test(partial.missingFact.reason));
+  assert.equal(partial.confirmedDraft.activityMentions.filter(item=>item.role==="existing_plan").length,2);
   assert(!["destination","travelMode"].includes(partial.missingFact.field));
-  console.log("PASS actual DeepSeek + Amap: only the unknown dinner venue is asked");
+  console.log("PASS actual DeepSeek: one unresolved activity field is asked and both activities remain in the draft");
   const s=snapshot();
   s.itinerary=[{id:"art",name:"美术馆",location:"上海美术馆(中华艺术宫)",startTime:"10:00",endTime:"11:30",locked:false},{id:"dinner",name:"预约晚餐",location:"上海和平饭店龙凤厅",startTime:"18:00",endTime:"19:00",locked:true}].map(e=>EventSchema.parse({...e,placeId:e.id,category:"user activity",status:e.locked?"locked":"planned",indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"Explicit TEST saved venue",constraint:e.locked?"固定预约":"原安排"}));
   const ready=await runAgentAssist({snapshot:s,rawText});

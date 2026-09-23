@@ -1,7 +1,7 @@
 import type { Snapshot } from "../../types";
 import type { BrowserLocation, TravelMode, WorldPoi } from "../../types/world";
 
-export const genericLocation = (text = "") => !text.trim() || /^(我|我们)?(的|住的|住在的)?(酒店|宾馆|美术馆|博物馆|景点|另一个景点|已预约景点|预约景点|晚餐|预约晚餐|餐厅|集合地点)(集合|参观)?$/.test(text.trim());
+export const genericLocation = (text = "") => !text.trim() || /^(?:(我|我们)?(的|住的|住在的)?(酒店|宾馆|美术馆|博物馆|景点|另一个景点|已预约景点|预约景点|晚餐|预约晚餐|餐厅|集合地点)(集合|参观)?|地铁站附近|附近的?地铁站)$/.test(text.trim());
 export const broadHotelQuery = (text = "") => {
   const value=text.trim();
   if(!/(酒店|宾馆)$/.test(value))return false;

@@ -9,12 +9,12 @@ export function TravelApp({ page }: { page: string }) {
   return (
     <div className="site">
       <header className="header">
-        <Link className="brand" href="/" aria-label="接住你 首页">
+        <Link className="brand" href="/" aria-label="coveredYou 首页">
           <span className="brand-icon" aria-hidden="true">
             <Route size={24} />
           </span>
-          接住你
-          <span className="brand-label">今日行程救援助手</span>
+          coveredYou
+          <span className="brand-label">接住你 · 今日行程救援助手</span>
         </Link>
         <nav aria-label="主导航">
           <Link className={page === "home" ? "active" : ""} href="/">
@@ -37,7 +37,7 @@ export function TravelApp({ page }: { page: string }) {
       </main>
       <footer className="site-footer">
         <span>
-          dayshift <span> / </span> 今日行程救援助手
+          coveredYou <span> / </span> 今日行程救援助手
         </span>
         <span>
           为旅途中的意外而生。

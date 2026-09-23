@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ConfirmedDraftSchema,
@@ -20,9 +19,10 @@ import {
 import { BrowserLocationSchema, TravelModeSchema, type RealWorldContext } from "../types/world";
 import { addMinutesWithinDay } from "../lib/time";
 import { DeepSeekSemanticParser } from "../services/semantic-parser";
+import { confirmedDraftFromParsed, hydrateParsedPlans } from "../services/itinerary-domain";
 import { analyzeImpact } from "../services/impact-analysis";
 import { WorldContextService } from "../services/world/world-context-service";
-import { allowedModes, genericLocation } from "../services/world/context-resolution";
+import { allowedModes } from "../services/world/context-resolution";
 import { replanReal } from "./real-replanning-agent";
 
 const FieldAnswerSchema = z.discriminatedUnion("kind", [
@@ -68,7 +68,6 @@ export type AssistResponse =
   | (Partial<ResponseContext> & { status: "UPSTREAM_UNAVAILABLE"; error: string; retryable: true; failedStage: FailureStage });
 
 const emptyResolutionState = (): ResolutionState => ({ currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] });
-const related = (a: string, b: string) => a.includes(b) || b.includes(a) || (/美术馆/.test(a) && /美术馆/.test(b)) || (/晚餐|餐厅/.test(a) && /晚餐|餐厅/.test(b));
 
 function systemClock() {
   const now = new Date();
@@ -102,28 +101,28 @@ function draftToParsed(draft: ConfirmedDraft): ParsedUserInput {
   });
 }
 
-function parsedToDraft(parsed: ParsedUserInput, baseRevision: number): ConfirmedDraft {
-  return ConfirmedDraftSchema.parse({
-    rawText: parsed.rawText,
-    intent: parsed.intent,
-    existingPlans: parsed.existingPlans.map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, endTime: item.endTime, durationMinutes: item.durationMinutes, location: item.location, locked: item.locked })),
-    activityMentions: parsed.activityMentions,
-    disruptions: parsed.disruptions,
-    constraints: parsed.constraints,
-    context: parsed.context,
-    contextSources: parsed.contextSources,
-    closedPlaceIds: parsed.closedPlaceIds,
-    question: parsed.question,
-    worldOptions: parsed.worldOptions ?? { selectedPois: {} },
-    destination: undefined,
-    removedLockedIds: [],
-    baseRevision,
-  });
-}
-
-function materializeDraftTime(item: ConfirmedDraft["existingPlans"][number]) {
-  if (item.endTime) return { endTime: item.endTime, durationSource: "user" as const };
-  if (item.durationMinutes !== null) return { endTime: addMinutesWithinDay(item.startTime, item.durationMinutes), durationSource: "user" as const };
+function materializeDraftTime(
+  item: ConfirmedDraft["existingPlans"][number],
+  existing?: Snapshot["itinerary"][number],
+) {
+  const suppliedEndTime = item.endTime !== null
+    ? item.endTime
+    : item.durationMinutes !== null
+      ? addMinutesWithinDay(item.startTime, item.durationMinutes)
+      : null;
+  if (
+    existing &&
+    item.startTime === existing.startTime &&
+    (suppliedEndTime === null || suppliedEndTime === existing.endTime)
+  ) {
+    return {
+      endTime: existing.endTime,
+      durationSource: existing.durationSource ?? "unknown" as const,
+    };
+  }
+  if (suppliedEndTime !== null) {
+    return { endTime: suppliedEndTime, durationSource: item.durationSource ?? "user" as const };
+  }
   return { endTime: item.startTime, durationSource: "unknown" as const };
 }
 
@@ -150,9 +149,12 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       next.contextSources.currentTime = "user";
     } else {
       const match = /^activity:(.+):startTime$/.exec(answer.field);
-      const event = match && next.existingPlans.find((item) => item.id === match[1]);
-      if (!event) throw new Error("当前时间回答没有对应到已确认活动。");
-      event.startTime = answer.value;
+      const id = match?.[1];
+      const event = id && next.existingPlans.find((item) => item.id === id);
+      const mention = id && next.activityMentions.find((item) => item.id === id);
+      if (!event && !mention) throw new Error("当前时间回答没有对应到已确认活动。");
+      if (event) event.startTime = answer.value;
+      if (mention) mention.startTime = answer.value;
     }
   } else if (answer.kind === "text") {
     if (answer.field === "currentLocation") {
@@ -162,11 +164,42 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       next.destination = answer.value;
     } else {
       const match = /^activity:(.+):location$/.exec(answer.field);
-      const event = match && next.existingPlans.find((item) => item.id === match[1]);
-      if (!event) throw new Error("当前文本回答没有对应到已确认字段。");
-      event.location = answer.value;
+      const id = match?.[1];
+      const event = id && next.existingPlans.find((item) => item.id === id);
+      const mention = id && next.activityMentions.find((item) => item.id === id);
+      if (!event && !mention) throw new Error("当前文本回答没有对应到已确认字段。");
+      if (event) event.location = answer.value;
+      if (mention) mention.location = answer.value;
     }
   }
+  const remainingMentions: typeof next.activityMentions = [];
+  for (const mention of next.activityMentions) {
+    if (
+      mention.role !== "existing_plan" ||
+      !mention.name.trim() ||
+      !mention.startTime ||
+      !mention.location?.trim()
+    ) {
+      remainingMentions.push(mention);
+      continue;
+    }
+    // Completing one field changes the activity's shape, not its identity.
+    // Keep the mention id so the next blocker and the eventual plan refer to
+    // the same activity the user has already been answering questions about.
+    const promotedId = mention.id;
+    if (!next.existingPlans.some((item) => item.id === promotedId)) {
+      next.existingPlans.push({
+        id: promotedId,
+        name: mention.name.trim(),
+        startTime: mention.startTime,
+        endTime: mention.endTime,
+        durationMinutes: mention.durationMinutes,
+        location: mention.location.trim(),
+        locked: mention.locked === "yes",
+      });
+    }
+  }
+  next.activityMentions = remainingMentions;
   return ConfirmedDraftSchema.parse(next);
 }
 
@@ -187,7 +220,7 @@ function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snapshot {
   for (const item of draft.existingPlans) {
     const old = base.itinerary.find((event) => event.id === item.id);
     if (old?.status === "completed") throw new Error(`已完成安排“${old.name}”不能重新编辑。`);
-    const timing = materializeDraftTime(item);
+    const timing = materializeDraftTime(item, old);
     if (old?.locked && (!item.locked || item.name !== old.name || item.startTime !== old.startTime || timing.endTime !== old.endTime || item.placeId !== old.placeId || item.location !== old.location)) {
       throw new Error(`固定安排“${old.name}”的时间、地点、名称和锁定状态不能修改。`);
     }
@@ -208,30 +241,10 @@ function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snapshot {
   return SnapshotSchema.parse({ ...base, state: { ...base.state, ...draft.context }, stateSources: { ...base.stateSources, ...draft.contextSources }, trip: { ...base.trip, destination: draft.destination || base.trip.destination }, itinerary: next.sort((a, b) => a.startTime.localeCompare(b.startTime)) });
 }
 
-function mergeParsedFacts(snapshot: Snapshot, parsed: ParsedUserInput): Snapshot {
-  const next = structuredClone(snapshot.itinerary);
-  const plans = [...parsed.existingPlans.map((plan) => ({ ...plan, locked: plan.locked ? "yes" as const : "no" as const })), ...parsed.activityMentions.filter((plan) => plan.role === "existing_plan")];
-  const timeOccurrences = new Map<string, number>();
-  plans.sort((a, b) => (a.startTime ?? "").localeCompare(b.startTime ?? "") || a.name.localeCompare(b.name));
-  for (const plan of plans) {
-    if (!plan.startTime) continue;
-    const matches = next.filter((event) => event.startTime === plan.startTime && related(event.name, plan.name));
-    const old = matches.length === 1 ? matches[0] : undefined;
-    if (old?.status === "completed") continue;
-    const occurrence = timeOccurrences.get(plan.startTime) ?? 0;
-    timeOccurrences.set(plan.startTime, occurrence + 1);
-    const id = old?.id ?? `assist-${createHash("sha256").update(`${plan.startTime}:${occurrence}`).digest("hex").slice(0, 16)}`;
-    const end = plan.endTime ?? (plan.durationMinutes ? addMinutesWithinDay(plan.startTime, plan.durationMinutes) : old?.endTime ?? plan.startTime);
-    const explicitLocation = plan.location && !genericLocation(plan.location) ? plan.location : undefined;
-    const locked = old?.locked || plan.locked === "yes";
-    const event = EventSchema.parse({ id, placeId: old?.placeId ?? id, name: old?.name ?? plan.name, category: old?.category ?? "user activity", startTime: plan.startTime, endTime: end, durationSource: plan.endTime || plan.durationMinutes ? "user" : old?.durationSource ?? (old ? "user" : "unknown"), location: explicitLocation ?? old?.location ?? plan.location ?? plan.name, locked, status: locked ? "locked" : "planned", indoorOutdoor: old?.indoorOutdoor ?? "mixed", openingTime: old?.openingTime ?? null, closingTime: old?.closingTime ?? null, travelTimeFromPrevious: old?.travelTimeFromPrevious ?? null, reason: "来自用户原文或已保存行程。", constraint: old?.constraint ?? (locked ? "保留固定预约" : "原计划；未知时长仅可作为建议") });
-    const index = next.findIndex((item) => item.id === id);
-    if (index >= 0) next[index] = event;
-    else next.push(event);
-  }
+function normalizePlanningFacts(snapshot: Snapshot, parsed: ParsedUserInput) {
   const modes = allowedModes(parsed.rawText, parsed.worldOptions?.travelMode, undefined, parsed.constraints.map((constraint) => constraint.value));
   parsed.worldOptions = { selectedPois: { ...parsed.worldOptions?.selectedPois }, ...(modes.length ? { allowedTravelModes: modes } : {}), ...(parsed.worldOptions?.travelMode ? { travelMode: parsed.worldOptions.travelMode } : {}) };
-  return SnapshotSchema.parse({ ...snapshot, state: { ...snapshot.state, ...parsed.context }, stateSources: { ...snapshot.stateSources, ...parsed.contextSources }, itinerary: next.sort((a, b) => a.startTime.localeCompare(b.startTime)) });
+  return hydrateParsedPlans(snapshot, parsed);
 }
 
 function hasActionableIntent(parsed: ParsedUserInput, rawText: string) {
@@ -269,6 +282,23 @@ function noImpact(snapshot: Snapshot) {
   return analyzeImpact(snapshot, ReplanningRequestSchema.parse({ reason: "other", freeText: "", currentState: snapshot.state, closedPlaceIds: [], variation: 0, stateSources: snapshot.stateSources }));
 }
 
+function upstreamMessage(stage: FailureStage, error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  const invalidOutput =
+    error instanceof SyntaxError ||
+    error instanceof z.ZodError ||
+    /invalid json|json|output_incomplete|output.*invalid|parse/i.test(message);
+  if (stage === "PARSER" && message === "MODEL_NOT_CONFIGURED") {
+    return "AI 解析尚未配置，原文已保留。请联系维护者完成服务配置后重试。";
+  }
+  if (invalidOutput) {
+    return "服务暂时未能生成有效结果，你的输入已保留，请重试。";
+  }
+  if (stage === "PARSER") return "解析服务暂时不可用，你的输入已保留，请稍后重试。";
+  if (stage === "GROUNDING") return "地点与路线服务暂时不可用，你的输入已保留，请稍后重试。";
+  return "规划服务暂时不可用，你的输入已保留，请稍后重试。";
+}
+
 export async function runAgentAssist(raw: unknown, signal?: AbortSignal, dependencies: AssistDependencies = {}): Promise<AssistResponse> {
   const input = AssistRequestSchema.parse(raw);
   if (input.snapshot.mode !== "user" || Object.values(input.snapshot.stateSources).includes("demo")) throw new Error("真实流程不接受示例状态。");
@@ -289,17 +319,27 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
         ? await dependencies.parse(base, input.rawText!, signal)
         : await new DeepSeekSemanticParser().parse(base, input.rawText!, undefined, signal);
     } catch (error) {
-      return { status: "UPSTREAM_UNAVAILABLE", error: error instanceof Error ? error.message : "AI 解析暂时不可用，请稍后重试。", retryable: true, failedStage: "PARSER" };
+      return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("PARSER", error), retryable: true, failedStage: "PARSER" };
     }
-    snapshot = mergeParsedFacts(base, parsed);
-    draft = parsedToDraft(parsed, snapshot.revision);
+    parsed = normalizePlanningFacts(base, parsed);
+    draft = confirmedDraftFromParsed(base, parsed);
+    snapshot = mergeConfirmedDraft(base, draft);
   }
 
   if (!hasActionableIntent(parsed, parsed.rawText)) {
     return { status: "OUT_OF_SCOPE", error: "我只处理已有单日行程中的明确变化或明确优化请求。请说明发生了什么变化，例如“下雨了，把下午的户外行程调一下”。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
-  if (!snapshot.itinerary.some((event) => event.status !== "completed")) {
-    return { status: "OUT_OF_SCOPE", error: "当前没有可调整的正式行程。请先到创建页建立今天的行程，再回来处理变化。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+  const unresolvedExistingPlans = draft.activityMentions.filter(
+    (mention) => mention.role === "existing_plan",
+  );
+  if (
+    !snapshot.itinerary.some((event) => event.status !== "completed") &&
+    unresolvedExistingPlans.length === 0
+  ) {
+    const message = draft.activityMentions.some((mention) => mention.role === "considering")
+      ? "你提到的是尚未决定的备选活动。请先告诉我最终想安排哪一项，以及大致时间和地点。"
+      : "请告诉我接下来想做什么，以及大致时间和地点；也可以先到创建页整理今天的行程。";
+    return { status: "OUT_OF_SCOPE", error: message, retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
 
   const request = buildRequest(snapshot, parsed, draft.removedLockedIds);
@@ -316,12 +356,22 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: impact, resolutionState: nextState, missingFact: blocker, ambiguities: world?.ambiguities.filter((item) => item.field === blocker.field) ?? [], world };
   };
 
+  for (const mention of unresolvedExistingPlans) {
+    if (!mention.startTime) {
+      add(missingFact(`activity:${mention.id}:startTime`, `“${mention.name}”安排在几点？`, "time"));
+    }
+    if (!mention.location?.trim()) {
+      add(missingFact(`activity:${mention.id}:location`, `“${mention.name}”具体是哪个地点？`));
+    }
+  }
+  if (blockers.length) return respondWithBlocker();
+
   let world: RealWorldContext;
   try {
     const ground = dependencies.ground ?? ((value: unknown, abortSignal?: AbortSignal) => new WorldContextService().ground(value, abortSignal));
     world = await ground({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, signal);
   } catch (error) {
-    return { status: "UPSTREAM_UNAVAILABLE", error: error instanceof Error ? error.message : "地点与路线服务暂时不可用，请稍后重试。", retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("GROUNDING", error), retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
   }
   impact = analyzeImpact(snapshot, request, world);
   parsed.resolutionEvidence = world.resolutionEvidence;
@@ -330,9 +380,6 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
   }
   for (const ambiguity of world.ambiguities) {
     add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.name, description: candidate.address }))));
-  }
-  for (const mention of parsed.activityMentions.filter((item) => item.role === "existing_plan" && !item.startTime)) {
-    if (!snapshot.itinerary.some((event) => related(event.name, mention.name))) add(missingFact(`activity:${mention.id}:startTime`, `“${mention.name}”安排在几点？`, "time"));
   }
   if (parsed.disruptions.some((item) => item.kind === "closed") && !parsed.closedPlaceIds.length) {
     const matches = snapshot.itinerary.filter((event) => parsed.disruptions.filter((item) => item.kind === "closed").some((item) => item.label.includes(event.name) || item.label.includes(event.location)));
@@ -361,8 +408,9 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     const replan = dependencies.replan ?? replanReal;
     const result = await replan({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, undefined, { ground: async () => world }, impact, signal);
     if ("error" in result) return { status: "NO_SAFE_PLAN", error: result.error, retryable: false, failedStage: "VALIDATOR", parsedInput: parsed, impactAnalysis: impact, resolutionState, base: snapshot, request };
+    if (!result.ok || !result.plan) return { status: "NO_SAFE_PLAN", error: result.message, retryable: false, failedStage: "VALIDATOR", parsedInput: parsed, impactAnalysis: impact, resolutionState, result, base: snapshot, request };
     return { status: "READY", parsedInput: ParsedUserInputSchema.parse(parsed), impactAnalysis: impact, resolutionState, result, base: snapshot, request };
   } catch (error) {
-    return { status: "UPSTREAM_UNAVAILABLE", error: error instanceof Error ? error.message : "规划服务暂时不可用，请稍后重试。", retryable: true, failedStage: "PLANNER", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("PLANNER", error), retryable: true, failedStage: "PLANNER", parsedInput: parsed, impactAnalysis: impact, resolutionState };
   }
 }

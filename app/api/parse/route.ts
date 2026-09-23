@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       );
     }
     return Response.json(
-      { code: "MODEL_PARSE_FAILED", error: "AI 没有返回可确认的结构化事实，请保留原文后重试。" },
+      { code: "MODEL_PARSE_FAILED", error: "服务暂时未能生成有效结果，你的输入已保留，请重试。" },
       { status: 502 },
     );
   }
