@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { CalendarDays, Route, UserRound } from "lucide-react";
+import { CalendarDays, UserRound } from "lucide-react";
 import { SessionWorkflow } from "./workflows";
 
 export function TravelApp({ page }: { page: string }) {
@@ -10,11 +10,7 @@ export function TravelApp({ page }: { page: string }) {
     <div className="site">
       <header className="header">
         <Link className="brand" href="/" aria-label="coveredYou 首页">
-          <span className="brand-icon" aria-hidden="true">
-            <Route size={24} />
-          </span>
-          coveredYou
-          <span className="brand-label">接住你 · 今日行程救援助手</span>
+          coveredYou · 接住你
         </Link>
         <nav aria-label="主导航">
           <Link className={page === "home" ? "active" : ""} href="/">

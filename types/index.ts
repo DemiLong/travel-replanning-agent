@@ -48,6 +48,7 @@ export const EventSchema = z.object({
   category: z.string(),
   startTime: TimeSchema,
   endTime: TimeSchema,
+  startTimeSource: z.enum(["user", "snapshot", "suggested"]).optional(),
   durationSource: z.enum(["user", "suggested", "unknown"]).optional(),
   travelMode: z.enum(["DRIVING", "WALKING", "TRANSIT"]).optional(),
   location: z.string(),
@@ -83,6 +84,20 @@ export const reasons = [
   "optimize",
   "other",
 ] as const;
+export const ActivityFactSchema = z.object({
+  id: z.string().min(1),
+  origin: z.enum(["snapshot", "message"]),
+  snapshotEventId: z.string().nullable(),
+  role: z.enum(["existing_plan", "considering", "reference", "uncertain"]),
+  progress: z.enum(["not_started", "missed", "ongoing", "completed"]),
+  name: z.string().trim().min(1).max(160),
+  placeQuery: z.string().trim().max(160).nullable(),
+  startTime: TimeSchema.nullable(),
+  startTimeSource: z.enum(["user", "snapshot", "not_provided"]),
+  durationMinutes: z.number().int().positive().max(1440).nullable(),
+  commitment: z.enum(["fixed", "flexible", "uncertain"]),
+  sourceText: z.string().max(500).nullable(),
+});
 export const ReplanningRequestSchema = z.object({
   reason: z.enum(reasons),
   freeText: z.string().max(2000),
@@ -91,6 +106,8 @@ export const ReplanningRequestSchema = z.object({
   variation: z.number().int().min(0).max(100),
   stateSources: StateSourcesSchema.optional(),
   worldOptions: WorldOptionsSchema.optional(),
+  unscheduledOriginals: z.array(ActivityFactSchema).max(30).optional(),
+  originalActivityIds: z.array(z.string().min(1)).max(30).optional(),
   confirmedDraftChanges: z.object({ removedLockedIds: z.array(z.string()).max(30) }).optional(),
 });
 const DecisionFactSchema = z.object({
@@ -169,14 +186,17 @@ export const UnifiedIntentSchema = z.enum([
   "optimize",
 ]);
 export const SemanticActivitySchema = z.object({
-  role: z.enum(["existing_plan", "considering", "reference"]),
+  role: z.enum(["existing_plan", "considering", "reference", "uncertain"]),
   name: z.string().max(160),
   startTime: TimeSchema.nullable(),
+  // Exact words in the user's message that support the interpreted start time.
+  startTimeEvidence: z.string().max(100).nullable().default(null),
   endTime: TimeSchema.nullable(),
   durationMinutes: z.number().int().positive().max(1440).nullable(),
   location: z.string().max(100).nullable(),
   locked: z.enum(["yes", "no", "uncertain"]),
   sourceText: z.string().max(500),
+  progress: z.enum(["not_started", "missed", "ongoing", "completed"]).default("not_started"),
 });
 export const ActivityMentionSchema = SemanticActivitySchema.extend({
   id: z.string().min(1),
@@ -251,6 +271,7 @@ export const ParsedUserInputSchema = z.object({
   rawText: z.string().max(4000),
   intent: UnifiedIntentSchema,
   existingPlans: z.array(ParsedPlanItemSchema).max(30),
+  activityFacts: z.array(ActivityFactSchema).max(30).default([]),
   disruptions: z.array(ParsedDisruptionSchema).max(10),
   constraints: z.array(ParsedConstraintSchema).max(30),
   context: ParsedContextSchema,
@@ -279,6 +300,8 @@ export const ConfirmedDraftSchema = z.object({
   rawText: z.string().max(4000),
   intent: UnifiedIntentSchema,
   existingPlans: z.array(ConfirmedPlanItemWithPlaceSchema).max(30),
+  activityFacts: z.array(ActivityFactSchema).max(30).default([]),
+  removedOriginalIds: z.array(z.string().min(1)).max(30).default([]),
   activityMentions: z.array(ActivityMentionSchema).max(30).default([]),
   disruptions: z.array(ParsedDisruptionSchema).max(10),
   constraints: z.array(ParsedConstraintSchema).max(30),
@@ -309,6 +332,10 @@ export const ImpactAnalysisSchema = z.object({
   riskActivities: z.array(z.string()),
   lockedActivities: z.array(z.string()),
   replacementCandidates: z.array(z.string()),
+  activityWeatherJudgments: z.array(z.object({
+    id: z.string(), name: z.string(), exposure: z.enum(["outdoor", "indoor", "unknown"]),
+    evidence: z.string(), affected: z.boolean(),
+  })).default([]),
   availableTimeWindows: z.array(z.object({
     startTime: TimeSchema,
     endTime: TimeSchema,
@@ -366,6 +393,7 @@ export type Snapshot = z.infer<typeof SnapshotSchema>;
 export type ExperienceMode = z.infer<typeof ExperienceModeSchema>;
 export type FlowStage = z.infer<typeof FlowStageSchema>;
 export type ParsedUserInput = z.infer<typeof ParsedUserInputSchema>;
+export type ActivityFact = z.infer<typeof ActivityFactSchema>;
 export type ConfirmedDraft = z.infer<typeof ConfirmedDraftSchema>;
 export type SemanticExtraction = z.infer<typeof SemanticExtractionSchema>;
 export type MissingFact = z.infer<typeof MissingFactSchema>;
@@ -381,6 +409,8 @@ export type AgentContext = {
   existingItinerary: ItineraryEvent[];
   lockedEvents: ItineraryEvent[];
   remainingEvents: ItineraryEvent[];
+  unscheduledOriginals?: ActivityFact[];
+  originalActivityIds?: string[];
   disruption: ReplanningRequest;
   places: Place[];
   travelMinutes: Record<string, number>;
@@ -426,7 +456,7 @@ export type AgentResult = {
   context: AgentContext;
   decisionTrace?: z.infer<typeof DecisionTraceSchema>;
 };
-export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
+export const AgentResultSchema: z.ZodType<AgentResult, z.ZodTypeDef, unknown> = z.object({
   candidateComparisons:z.array(z.object({title:z.string(),tradeOff:z.string(),feasible:z.boolean(),conflicts:z.array(z.string())})).optional(),
   candidatePlans:z.array(z.object({id:z.string(),title:z.string(),tradeOff:z.string(),feasible:z.boolean(),plan:ProposedPlanSchema.nullable(),conflicts:z.array(PlanConflictSchema)})).optional(),
   conflicts:z.array(PlanConflictSchema).optional(),
@@ -473,6 +503,8 @@ export const AgentResultSchema: z.ZodType<AgentResult> = z.object({
     existingItinerary: z.array(EventSchema),
     lockedEvents: z.array(EventSchema),
     remainingEvents: z.array(EventSchema),
+    unscheduledOriginals: z.array(ActivityFactSchema).optional(),
+    originalActivityIds: z.array(z.string()).optional(),
     disruption: ReplanningRequestSchema,
     places: z.array(PlaceSchema),
     travelMinutes: z.record(z.number()),
@@ -501,6 +533,19 @@ export const ResolutionStateSchema = z.object({
   answeredFields: z.array(z.string().min(1)).max(30),
   questionHistory: z.array(z.string().min(1)).max(12),
 });
+export const PendingInputSchema = z.object({
+  stage: z.enum(["review", "follow_up"]),
+  parsedInput: ParsedUserInputSchema,
+  confirmedDraft: ConfirmedDraftSchema,
+  missingFact: MissingFactSchema.nullable(),
+  questionRawText: z.string().max(4000),
+  baseRevision: z.number().int().min(0),
+});
+export const ConditionalAdviceSchema = z.object({
+  heading: z.string().min(1),
+  suggestions: z.array(z.string().min(1)).min(1).max(30),
+  warning: z.string().min(1),
+});
 export const RealSessionSchema = z.object({
   schemaVersion: z.literal(3),
   experienceMode: z.literal("real"),
@@ -510,9 +555,12 @@ export const RealSessionSchema = z.object({
   parsedInput: ParsedUserInputSchema.nullable(),
   lastDisruption: ReplanningRequestSchema.nullable(),
   pendingPlan: PendingPlanSchema.nullable(),
+  pendingInput: PendingInputSchema.nullable().default(null),
+  conditionalAdvice: ConditionalAdviceSchema.nullable().default(null),
   resolutionState: ResolutionStateSchema,
   updatedAt: z.string().datetime(),
 });
 export type PendingPlan = z.infer<typeof PendingPlanSchema>;
+export type ConditionalAdvice = z.infer<typeof ConditionalAdviceSchema>;
 export type ResolutionState = z.infer<typeof ResolutionStateSchema>;
 export type RealSession = z.infer<typeof RealSessionSchema>;

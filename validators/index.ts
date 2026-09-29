@@ -67,6 +67,7 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
         message: "候选方案只能包含未完成的安排，不能混入已完成的历史记录。",
       });
     const old = c.existingItinerary.find((old) => old.id === e.id);
+    const unscheduled = c.unscheduledOriginals?.find(fact => fact.id === e.id);
     if (old && old.placeId !== e.placeId)
       errors.push({
         code: "place_data",
@@ -88,9 +89,10 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       const proposedDuration=unknownDuration&&e.durationSource==="suggested";
       if(unknownDuration&&!arrivalOnly&&(!proposedDuration||minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`未知停留时长只能使用${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟的方案建议，不能伪装成用户事实。`});
       if(old && (e.name!==old.name || e.location!==old.location || (!unknownDuration&&(e.durationSource!==old.durationSource||minutesOf(e.endTime)-minutesOf(e.startTime)!==minutesOf(old.endTime)-minutesOf(old.startTime)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点或活动时长。"});
-      if(!old && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name)))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点。"});
+      if(unscheduled && (e.placeId!==`custom-${unscheduled.id}` || e.name!==unscheduled.name || e.location!==(unscheduled.placeQuery??unscheduled.name) || e.startTimeSource!=="suggested" || (unscheduled.durationMinutes!==null && minutesOf(e.endTime)-minutesOf(e.startTime)!==unscheduled.durationMinutes)))errors.push({code:"place_data",eventId:e.id,message:"无原定时间活动必须保留原身份，开始时间标为建议。"});
+      if(!old && !unscheduled && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name)))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点。"});
       if(e.openingTime!==null||e.closingTime!==null)errors.push({code:"place_data",eventId:e.id,message:"高德 POI 基础数据未验证营业时间，不能自行填入。"});
-      if(!old && (minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`新增活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
+      if(!old && (!unscheduled || unscheduled.durationMinutes===null) && (minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`建议活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
       continue;
     }
     if (
@@ -109,7 +111,14 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       });
   }
   const changes = [...p.movedEvents, ...p.removedEvents];
-  for (const old of c.remainingEvents) {
+  const originals = [...c.remainingEvents.map(event => ({ id: event.id, name: event.name })), ...(c.unscheduledOriginals ?? []).map(fact => ({ id: fact.id, name: fact.name }))];
+  for (const fact of c.unscheduledOriginals ?? []) {
+    if (fact.commitment === "fixed") errors.push({ code: "locked_event", eventId: fact.id, message: "固定预约时间未提供，无法验证为可接受方案。" });
+  }
+  if (c.originalActivityIds && (new Set(c.originalActivityIds).size !== c.originalActivityIds.length || c.originalActivityIds.some(id => !originals.some(item => item.id === id)) || originals.some(item => !c.originalActivityIds!.includes(item.id)))) {
+    errors.push({ code: "change_accounting", message: "待规划原安排与用户核对清单不一致。" });
+  }
+  for (const old of originals) {
     const count =
       Number(ids.has(old.id)) +
       changes.filter((x) => x.eventId === old.id).length;
@@ -122,7 +131,7 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
   }
   for (const change of changes)
     if (
-      !c.remainingEvents.some(
+      !originals.some(
         (e) => e.id === change.eventId && e.name === change.name,
       )
     )

@@ -153,7 +153,15 @@ export const browserSessionRepository: SessionRepository = {
       return migrateLegacySession();
     }
     try {
-      return refreshSessionClock(RealSessionSchema.parse(JSON.parse(raw)));
+      const session = RealSessionSchema.parse(JSON.parse(raw));
+      if (session.pendingInput && (session.pendingInput.stage === "review" || session.pendingInput.baseRevision !== session.snapshot.revision)) {
+        const migrated = RealSessionSchema.parse({ ...session, rawInput: session.rawInput || session.pendingInput.questionRawText,
+          pendingInput: null, parsedInput: null, pendingPlan: null, flowStage: session.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+          resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
+        localStorage.setItem(realSessionKey, JSON.stringify(migrated));
+        return refreshSessionClock(migrated);
+      }
+      return refreshSessionClock(session);
     } catch {
       return migrateLegacySession();
     }
@@ -196,6 +204,7 @@ export function savePendingPlan(
 ) {
   return updateSession({
     pendingPlan,
+    pendingInput: null,
     lastDisruption,
     flowStage: "PLAN_READY",
   });
@@ -229,6 +238,7 @@ export async function saveTrip(value: Snapshot, expectedRevision?: number) {
   saveSession({
     ...session,
     snapshot: { ...snapshot, mode: "user" },
+    pendingInput: null,
     flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
   });
   return snapshot;

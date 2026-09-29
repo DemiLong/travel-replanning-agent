@@ -5,7 +5,7 @@ import { AmapRoutesService, MAX_ROUTE_PAIRS } from "./amap-routes-service";
 import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
 import { requireAmapKey, WorldServiceError } from "./amap-client";
-import { broadHotelQuery, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes } from "./context-resolution";
+import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes } from "./context-resolution";
 
 const CITY_EVIDENCE_CONCURRENCY=3;
 async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promise<R>):Promise<R[]>{
@@ -19,7 +19,7 @@ async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promis
 export function validateRealInput(raw: unknown) {
   const input = ReplanInputSchema.parse(raw);
   if (input.snapshot.mode!=="user" || input.mode==="demo") throw new Error("真实世界服务不接受示例行程。");
-  if (!input.confirmation || !input.snapshot.itinerary.some(e=>e.status!=="completed")) throw new Error("请先确认至少一项今日安排及解析结果。");
+  if (!input.confirmation || !(input.snapshot.itinerary.some(e=>e.status!=="completed") || input.request.unscheduledOriginals?.length)) throw new Error("请先确认至少一项今日安排及解析结果。");
   const state=input.request.currentState, sources=input.request.stateSources ?? input.snapshot.stateSources;
   if (Object.values(sources).includes("demo")) throw new Error("示例状态不能进入真实规划。");
   if (state.currentDate!==input.snapshot.state.currentDate || state.currentDate<input.snapshot.trip.startDate || state.currentDate>input.snapshot.trip.endDate) throw new Error("日期不属于当前行程。");
@@ -46,8 +46,10 @@ export class WorldContextService {
     const modes=userModes.filter(m=>!options?.allowedTravelModes||options.allowedTravelModes.includes(m));
     const missing=(kind:"user"|"world",field:string,message:string)=>result.missingWorldFacts.push({kind,field,message});
     const events=snapshot.itinerary.filter(e=>e.status!=="completed");
+    const unscheduled=request.unscheduledOriginals??[];
+    const worldItems=[...events.map(event=>({placeId:event.placeId,location:event.location,name:event.name})),...unscheduled.map(fact=>({placeId:`custom-${fact.id}`,location:fact.placeQuery??"",name:fact.name}))];
     const preResolved=new Map<string,WorldPoi>();
-    const cityAnchors=[...new Map(events.map(event=>{
+    const cityAnchors=[...new Map(worldItems.map(event=>{
       const inferred=locationQuery(event.location.trim()||event.name,request.freeText,snapshot);
       return [inferred.query,{field:event.placeId,query:inferred.query}] as const;
     })).values()].filter(anchor=>anchor.query.trim()&&!genericLocation(anchor.query)&&!broadHotelQuery(anchor.query));
@@ -91,13 +93,13 @@ export class WorldContextService {
         if (selected) {
           const candidateIds=candidatePlaceIds[field];
           const selectedCandidate=candidateIds?.includes(selected) ? preResolved.get(field) : undefined;
-          if(selectedCandidate?.poiId===selected){
+          if(selectedCandidate?.poiId===selected && cityCompatible(selectedCandidate, searchCity, query)){
             result.resolutionEvidence!.push({field,query,reason:"用户选择命中本次 Grounding 的候选地点。",poiId:selected,lookupCity:searchCity,citySource:traceSource??citySource});
             return selectedCandidate;
           }
         }
         const cached=preResolved.get(field);
-        if(cached){
+        if(cached && cityCompatible(cached, searchCity, query)){
           result.resolutionEvidence!.push({field,query,reason:"复用城市证据阶段已确认的高德地点。",poiId:cached.poiId,lookupCity:searchCity,citySource:traceSource??citySource});
           return cached;
         }
@@ -109,22 +111,29 @@ export class WorldContextService {
           missing("user",field,`“${query}”可能对应多个分店，请补充所在城市、道路或具体分店。`);return null;
         }
         const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity,signal);
-        candidatePlaceIds[field]=response.candidates.map(p=>p.poiId);
+        const eligibleCandidates=response.candidates.filter(p=>cityCompatible(p,searchCity,query));
+        candidatePlaceIds[field]=eligibleCandidates.map(p=>p.poiId);
         if(selected) {
-          const selectedCandidate=response.candidates.find(p=>p.poiId===selected);
+          const selectedCandidate=eligibleCandidates.find(p=>p.poiId===selected);
           if(!selectedCandidate) {
-            if(response.candidates.length) result.ambiguities.push({field,label:query,candidates:response.candidates});
+            if(eligibleCandidates.length) result.ambiguities.push({field,label:query,candidates:eligibleCandidates});
             else missing("user",field,"所选地点不属于本次 Grounding 的合法候选，请重新选择。");
             return null;
           }
           result.resolutionEvidence!.push({field,query,reason:"用户选择命中本次 Grounding 的候选地点。",poiId:selected,lookupCity:searchCity,citySource:traceSource??citySource});
           return selectedCandidate;
         }
-        const match=uniquePlace(response.candidates,query,searchCity);
+        const match=uniquePlace(eligibleCandidates,query,searchCity);
         if(match) {result.resolutionEvidence!.push({field,query,reason:"高德查询结合名称、场景及城市得到唯一匹配。",poiId:match.poiId,lookupCity:searchCity,citySource:traceSource??citySource});return match;}
-        if(response.candidates.length) result.ambiguities.push({field,label:query,candidates:response.candidates});
+        if(eligibleCandidates.length) result.ambiguities.push({field,label:query,candidates:eligibleCandidates});
+        else if(response.candidates.length) missing("world",field,`“${query}”的候选地点均不在已确认城市“${searchCity}”，未擅自用于本次行程。`);
         else missing("world",field,`高德没有找到“${query}”的有效地点；未使用本地目录替代。`);
-      }catch(error){if(error instanceof WorldServiceError && error.code==="AMAP_NOT_CONFIGURED")throw error;missing("world",field,`“${query}”的高德地点数据暂不可用。`);}
+      }catch(error){
+        if(error instanceof WorldServiceError && error.code==="AMAP_NOT_CONFIGURED")throw error;
+        const category=error instanceof WorldServiceError?`${error.code}${error.detail?`:${error.detail}`:""}`:"UNKNOWN";
+        result.resolutionEvidence!.push({field,query,reason:`高德查询失败（${category}）。`,lookupCity:searchCity,citySource:traceSource??citySource});
+        missing("world",field,`“${query}”的高德地点数据暂不可用。`);
+      }
       return null;
     };
     // An explicit text location always wins over browser coordinates. Explicit
@@ -156,7 +165,7 @@ export class WorldContextService {
     }else missing("user","currentLocation","请允许浏览器定位，或填写当前位置。");
     if(!modes.length)missing("user","travelMode","已有交通限制互相冲突，这次有哪些出行方式可以使用？");
     if(selectedCity.competingCities.length&&!result.currentLocation)missing("user","destination",`明确地点对应多个城市（${selectedCity.competingCities.join("、")}），请确认这次行程所在城市。`);
-    for(const event of events){
+    for(const event of worldItems){
       if(result.resolvedPlaces.some(p=>p.placeId===event.placeId))continue;
       const rawQuery=event.location.trim()||event.name;
       const inferred=locationQuery(rawQuery,request.freeText,snapshot);
@@ -180,17 +189,28 @@ export class WorldContextService {
     }
     if(result.currentLocation && modes.length && !result.ambiguities.length && !result.missingWorldFacts.some(x=>x.kind==="user")){
       const endpoints:RouteEndpoint[]=result.resolvedPlaces.map(x=>({...x.poi,id:x.placeId}));
-      const originals=events.map(e=>endpoints.find(p=>p.id===e.placeId)).filter((p):p is RouteEndpoint=>Boolean(p));
+      const originals=worldItems.map(e=>endpoints.find(p=>p.id===e.placeId)).filter((p):p is RouteEndpoint=>Boolean(p));
       const required=originals.map((destination,i)=>({origin:i?originals[i-1]:result.currentLocation!,destination})).filter(p=>p.origin.id!==p.destination.id);
-      const firstFutureLocked=events.find(event=>event.locked);
-      const nextRetainedEndpoint=firstFutureLocked?originals.find(endpoint=>endpoint.id===firstFutureLocked.placeId):originals[0];
-      const alternatives=result.alternatives.map(p=>({...p,id:p.poiId}));
-      const alternativePairs=alternatives.flatMap(destination=>[
-        {origin:result.currentLocation!,destination},
-        ...(nextRetainedEndpoint&&nextRetainedEndpoint.id!==destination.id?[{origin:destination,destination:nextRetainedEndpoint}]:[]),
-      ]);
-      const ordered=[...required,...alternativePairs];
-      const pairs=[...new Map(ordered.map(p=>[`${p.origin.id}>${p.destination.id}`,p])).values()];
+      const flexiblePairs=unscheduled.flatMap(fact=>{
+        const destination=originals.find(point=>point.id===`custom-${fact.id}`);
+        if(!destination)return [];
+        return [{origin:result.currentLocation!,destination},...originals.filter(point=>point.id!==destination.id).flatMap(point=>[{origin:point,destination},{origin:destination,destination:point}])];
+      });
+      const pairMap=new Map([...required,...flexiblePairs].map(p=>[`${p.origin.id}>${p.destination.id}`,p]));
+      const pairLimit=Math.floor(MAX_ROUTE_PAIRS/modes.length);
+      const routeCoveredAlternatives:typeof result.alternatives=[];
+      for(const poi of result.alternatives){
+        const destination={...poi,id:poi.poiId};
+        const legs=[{origin:result.currentLocation!,destination},...originals.filter(point=>point.id!==destination.id).flatMap(point=>[
+          {origin:point,destination},{origin:destination,destination:point},
+        ])];
+        const extra=legs.filter(pair=>!pairMap.has(`${pair.origin.id}>${pair.destination.id}`));
+        if(pairMap.size+extra.length>pairLimit)break;
+        for(const pair of extra)pairMap.set(`${pair.origin.id}>${pair.destination.id}`,pair);
+        routeCoveredAlternatives.push(poi);
+      }
+      result.alternatives=routeCoveredAlternatives;
+      const pairs=[...pairMap.values()];
       if(new Set(required.map(p=>`${p.origin.id}>${p.destination.id}`)).size*modes.length>MAX_ROUTE_PAIRS)missing("world","routes","必要路线超过本轮 40 次查询上限，请分段调整行程。");
       else {
         const bounded=pairs.slice(0,Math.floor(MAX_ROUTE_PAIRS/modes.length));
@@ -198,7 +218,7 @@ export class WorldContextService {
       }
       if(result.routes.some(r=>r.status==="unavailable"))missing("world","routes","部分路线不可用；不会用估算时间代替，包含这些路段的方案将被拒绝。");
     }
-    const allPlaces=result.resolvedPlaces.length===new Set(events.map(e=>e.placeId)).size;
+    const allPlaces=result.resolvedPlaces.length===new Set(worldItems.map(e=>e.placeId)).size;
     result.status=result.ambiguities.length || result.missingWorldFacts.some(x=>x.kind==="user") ? "needs_input" : result.currentLocation && allPlaces && result.routes.some(r=>r.status==="available") ? "ready" : "unavailable";
     return RealWorldContextSchema.parse(result);
   }

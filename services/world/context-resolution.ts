@@ -9,6 +9,11 @@ export const broadHotelQuery = (text = "") => {
   return !brand || /^(全季|汉庭|如家|亚朵|维也纳|锦江|速8|七天)$/.test(brand);
 };
 export const normalizeCity = (city = "") => city.trim().replace(/市$/g, "");
+export function cityCompatible(poi: WorldPoi, tripCity: string, query: string) {
+  if (!tripCity || tripCity === "待确认城市" || normalizeCity(poi.city) === normalizeCity(tripCity)) return true;
+  const explicitCity = normalizeCity(poi.city);
+  return explicitCity.length >= 2 && query.trim().startsWith(explicitCity);
+}
 export function freshBrowserLocation(location?: BrowserLocation) {
   if (!location) return false;
   const age = Date.now() - Date.parse(location.capturedAt);
@@ -28,9 +33,9 @@ export function locationQuery(text: string, rawText: string, snapshot: Snapshot)
 export function uniquePlace(candidates: WorldPoi[], query: string, city: string): WorldPoi | null {
   const normalize=(s:string)=>{const value=s.replace(/[\s·（）()]/g, ""),prefix=city.replace(/市$/,"");return prefix&&value.startsWith(prefix)?value.slice(prefix.length):value;};
   const inCity = city && city !== "待确认城市" ? candidates.filter(p => p.city.replace(/市$/, "") === city.replace(/市$/, "")) : candidates;
-  // A contradictory city is not silently discarded. A unique exact parent POI
-  // excludes similarly named terminals/shops without guessing a terminal.
-  const pool = inCity.length ? inCity : candidates;
+  // Once the trip city is verified, out-of-city candidates are excluded unless
+  // the user explicitly named that other city in the queried place.
+  const pool = city && city !== "待确认城市" ? candidates.filter(p => cityCompatible(p, city, query)) : inCity;
   // A category such as “美术馆” is not a named venue, even when a city's
   // museum happens to share that category as its name.
   if (genericLocation(query)) return pool.length === 1 ? pool[0] : null;
@@ -63,6 +68,7 @@ export function allowedModes(text: string, explicit?: TravelMode, retained?: Tra
   if (/只(?:能|愿意|想)?(?:打车|驾车|开车)/.test(input)) modes=["DRIVING"];
   if (/(?:不|不能|不想|不愿意|不要)(?:坐|乘)?(?:打车|出租车|网约车|驾车|开车)/.test(input)) modes=modes.filter(m=>m!=="DRIVING");
   if (/(?:不|不能|不想|不愿意|不要)(?:坐|乘)?(?:公交|地铁|公共交通)/.test(input)) modes=modes.filter(m=>m!=="TRANSIT");
+  if (/(?:地铁|公交|公共交通|轨道交通|轻轨)(?:全线|部分线路)?(?:停运|暂停运营|中断|故障)/.test(input) && !/(?:恢复运营|恢复正常|已经恢复|已恢复)/.test(input)) modes=modes.filter(m=>m!=="TRANSIT");
   if (/(?:不|不能|不想|不愿意|不要)(?:步行|走路)/.test(input)) modes=modes.filter(m=>m!=="WALKING");
   return modes;
 }

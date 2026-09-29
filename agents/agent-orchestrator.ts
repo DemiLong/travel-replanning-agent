@@ -10,6 +10,7 @@ import {
   TimeSchema,
   type AgentResult,
   type ConfirmedDraft,
+  type ConditionalAdvice,
   type ImpactAnalysis,
   type MissingFact,
   type ParsedUserInput,
@@ -18,8 +19,9 @@ import {
 } from "../types";
 import { BrowserLocationSchema, TravelModeSchema, type RealWorldContext } from "../types/world";
 import { addMinutesWithinDay } from "../lib/time";
-import { DeepSeekSemanticParser } from "../services/semantic-parser";
+import { ActivityCoverageError, DeepSeekSemanticParser } from "../services/semantic-parser";
 import { confirmedDraftFromParsed, hydrateParsedPlans } from "../services/itinerary-domain";
+import { confirmedOriginals, legacyActivitiesFromFacts, reconcileActivityFacts } from "../services/activity-facts";
 import { analyzeImpact } from "../services/impact-analysis";
 import { WorldContextService } from "../services/world/world-context-service";
 import { allowedModes } from "../services/world/context-resolution";
@@ -61,6 +63,7 @@ type FailureStage = "PARSER" | "GROUNDING" | "PLANNER" | "VALIDATOR";
 type ResponseContext = { parsedInput: ParsedUserInput; impactAnalysis: ImpactAnalysis; resolutionState: ResolutionState };
 
 export type AssistResponse =
+  | (ResponseContext & { status: "CONDITIONAL"; error: string; retryable: false; advice: ConditionalAdvice })
   | (ResponseContext & { status: "NEEDS_INPUT"; confirmedDraft: ConfirmedDraft; missingFact: MissingFact; ambiguities?: RealWorldContext["ambiguities"]; world?: RealWorldContext })
   | (ResponseContext & { status: "READY"; result: AgentResult; base: Snapshot; request: ReturnType<typeof ReplanningRequestSchema.parse> })
   | (ResponseContext & { status: "NO_SAFE_PLAN"; result?: AgentResult; base?: Snapshot; request?: ReturnType<typeof ReplanningRequestSchema.parse>; error: string; retryable: false; failedStage: "PLANNER" | "VALIDATOR" })
@@ -81,11 +84,13 @@ function refreshSystemTime(snapshot: Snapshot): Snapshot {
 }
 
 function draftToParsed(draft: ConfirmedDraft): ParsedUserInput {
+  const projection = draft.activityFacts.length ? legacyActivitiesFromFacts(draft.activityFacts.filter(fact => !draft.removedOriginalIds.includes(fact.id))) : null;
   return ParsedUserInputSchema.parse({
     rawText: draft.rawText,
     intent: draft.intent,
-    existingPlans: draft.existingPlans.map((item) => ({ ...item, source: "user" as const })),
-    activityMentions: draft.activityMentions,
+    existingPlans: projection?.existingPlans ?? draft.existingPlans.map((item) => ({ ...item, source: "user" as const })),
+    activityMentions: projection?.activityMentions ?? draft.activityMentions,
+    activityFacts: draft.activityFacts,
     disruptions: draft.disruptions,
     constraints: draft.constraints,
     context: draft.context,
@@ -139,8 +144,9 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
     next.worldOptions = { ...(next.worldOptions ?? { selectedPois: {} }), travelMode: answer.value, allowedTravelModes: [answer.value] };
   } else if (answer.kind === "event_selection") {
     const event = next.existingPlans.find((item) => item.id === answer.eventId || item.placeId === answer.eventId);
-    if (!event) throw new Error("所选活动不属于本次已确认行程。");
-    if (answer.field === "closedPlace") next.closedPlaceIds = [event.placeId ?? event.id];
+    const unscheduled = next.activityFacts.find(fact => fact.id === answer.eventId && fact.role === "existing_plan" && fact.startTime === null);
+    if (!event && !unscheduled) throw new Error("所选活动不属于本次已确认行程。");
+    if (answer.field === "closedPlace") next.closedPlaceIds = [event?.placeId ?? (unscheduled ? `custom-${unscheduled.id}` : event!.id)];
     else throw new Error("当前问题不接受活动选择。");
   } else if (answer.kind === "time") {
     if (answer.field === "currentTime") {
@@ -152,9 +158,11 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       const id = match?.[1];
       const event = id && next.existingPlans.find((item) => item.id === id);
       const mention = id && next.activityMentions.find((item) => item.id === id);
-      if (!event && !mention) throw new Error("当前时间回答没有对应到已确认活动。");
+      const fact = id && next.activityFacts.find((item) => item.id === id);
+      if (!event && !mention && !fact) throw new Error("当前时间回答没有对应到已确认活动。");
       if (event) event.startTime = answer.value;
       if (mention) mention.startTime = answer.value;
+      if (fact) { fact.startTime = answer.value; fact.startTimeSource = "user"; }
     }
   } else if (answer.kind === "text") {
     if (answer.field === "currentLocation") {
@@ -162,15 +170,30 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       next.contextSources.currentLocation = "user";
     } else if (answer.field === "destination") {
       next.destination = answer.value;
+    } else if (/^activity:.+:role$/.test(answer.field)) {
+      const id = /^activity:(.+):role$/.exec(answer.field)?.[1];
+      const fact = next.activityFacts.find(item => item.id === id);
+      if (!fact || fact.role !== "uncertain" || !["existing_plan", "considering", "reference"].includes(answer.value)) {
+        throw new Error("当前分类回答没有对应到待确认活动。");
+      }
+      fact.role = answer.value as typeof fact.role;
     } else {
       const match = /^activity:(.+):location$/.exec(answer.field);
       const id = match?.[1];
       const event = id && next.existingPlans.find((item) => item.id === id);
       const mention = id && next.activityMentions.find((item) => item.id === id);
-      if (!event && !mention) throw new Error("当前文本回答没有对应到已确认字段。");
+      const fact = id && next.activityFacts.find((item) => item.id === id);
+      if (!event && !mention && !fact) throw new Error("当前文本回答没有对应到已确认字段。");
       if (event) event.location = answer.value;
       if (mention) mention.location = answer.value;
+      if (fact) fact.placeQuery = answer.value;
     }
+  }
+  if (next.activityFacts.length) {
+    const projected = legacyActivitiesFromFacts(next.activityFacts.filter(fact => !next.removedOriginalIds.includes(fact.id)));
+    next.existingPlans = projected.existingPlans.map(item => ({ ...item, placeId: next.existingPlans.find(old => old.id === item.id)?.placeId ?? `custom-${item.id}` }));
+    next.activityMentions = projected.activityMentions;
+    return ConfirmedDraftSchema.parse(next);
   }
   const remainingMentions: typeof next.activityMentions = [];
   for (const mention of next.activityMentions) {
@@ -203,23 +226,30 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
   return ConfirmedDraftSchema.parse(next);
 }
 
-function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snapshot {
+export function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snapshot {
   if (draft.baseRevision !== base.revision) throw new Error("原行程版本已变化，请重新确认后再生成方案。");
   const removedLocked = new Set(draft.removedLockedIds);
+  const removedOriginal = new Set(draft.removedOriginalIds);
   const incomingIds = new Set(draft.existingPlans.map((item) => item.id));
+  for (const id of removedOriginal) {
+    if (!base.itinerary.some(event => event.id === id && event.status !== "completed")) throw new Error("删除记录不属于当前未完成行程。");
+  }
   for (const id of removedLocked) {
     const event = base.itinerary.find((item) => item.id === id);
     if (!event?.locked) throw new Error("removedLockedIds 只能包含当前行程中的固定安排。");
     if (incomingIds.has(id)) throw new Error("固定安排不能同时保留并标记为删除。");
   }
-  const next = base.itinerary.filter((event) => event.status === "completed");
+  const markedCompleted = new Set(draft.activityFacts.filter(fact => fact.origin === "snapshot" && fact.progress === "completed").map(fact => fact.id));
+  const next = base.itinerary.filter((event) => event.status === "completed" || markedCompleted.has(event.id)).map(event => markedCompleted.has(event.id) ? { ...event, status: "completed" as const } : event);
   for (const old of base.itinerary.filter((event) => event.status !== "completed")) {
+    if (markedCompleted.has(old.id)) continue;
     if (incomingIds.has(old.id)) continue;
+    if (!removedOriginal.has(old.id)) throw new Error(`原安排“${old.name}”不能被静默删除，请先明确确认。`);
     if (old.locked && !removedLocked.has(old.id)) throw new Error(`固定安排“${old.name}”不能被静默删除，请先明确确认。`);
   }
   for (const item of draft.existingPlans) {
     const old = base.itinerary.find((event) => event.id === item.id);
-    if (old?.status === "completed") throw new Error(`已完成安排“${old.name}”不能重新编辑。`);
+    if (old?.status === "completed" || markedCompleted.has(item.id)) throw new Error(`已完成安排“${old?.name ?? item.name}”不能重新编辑。`);
     const timing = materializeDraftTime(item, old);
     if (old?.locked && (!item.locked || item.name !== old.name || item.startTime !== old.startTime || timing.endTime !== old.endTime || item.placeId !== old.placeId || item.location !== old.location)) {
       throw new Error(`固定安排“${old.name}”的时间、地点、名称和锁定状态不能修改。`);
@@ -242,6 +272,11 @@ function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snapshot {
 }
 
 function normalizePlanningFacts(snapshot: Snapshot, parsed: ParsedUserInput) {
+  if (parsed.parser === "llm" && !parsed.activityFacts.length) {
+    const activityFacts = reconcileActivityFacts(snapshot, []);
+    parsed = ParsedUserInputSchema.parse({ ...parsed, activityFacts,
+      ...(activityFacts.length ? legacyActivitiesFromFacts(activityFacts) : {}) });
+  }
   const modes = allowedModes(parsed.rawText, parsed.worldOptions?.travelMode, undefined, parsed.constraints.map((constraint) => constraint.value));
   parsed.worldOptions = { selectedPois: { ...parsed.worldOptions?.selectedPois }, ...(modes.length ? { allowedTravelModes: modes } : {}), ...(parsed.worldOptions?.travelMode ? { travelMode: parsed.worldOptions.travelMode } : {}) };
   return hydrateParsedPlans(snapshot, parsed);
@@ -259,8 +294,11 @@ function requestReason(parsed: ParsedUserInput) {
   return "changed_mind" as const;
 }
 
-function buildRequest(snapshot: Snapshot, parsed: ParsedUserInput, removedLockedIds: string[] = []) {
-  return ReplanningRequestSchema.parse({ reason: requestReason(parsed), freeText: parsed.rawText, currentState: snapshot.state, closedPlaceIds: parsed.closedPlaceIds, variation: 0, stateSources: parsed.contextSources, worldOptions: parsed.worldOptions, ...(removedLockedIds.length ? { confirmedDraftChanges: { removedLockedIds } } : {}) });
+function buildRequest(snapshot: Snapshot, parsed: ParsedUserInput, draft: ConfirmedDraft) {
+  const originals = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id));
+  return ReplanningRequestSchema.parse({ reason: requestReason(parsed), freeText: parsed.rawText, currentState: snapshot.state, closedPlaceIds: parsed.closedPlaceIds, variation: 0, stateSources: parsed.contextSources, worldOptions: parsed.worldOptions,
+    ...(draft.activityFacts.length ? { originalActivityIds: originals.map(fact => fact.id), unscheduledOriginals: originals.filter(fact => fact.startTime === null) } : {}),
+    ...(draft.removedLockedIds.length ? { confirmedDraftChanges: { removedLockedIds: draft.removedLockedIds } } : {}) });
 }
 
 function missingFact(key: string, question: string, answerType: MissingFact["answerType"] = "text", candidates?: MissingFact["candidates"]): MissingFact {
@@ -310,6 +348,12 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
 
   if (input.confirmedDraft) {
     draft = input.answer ? applyAnswer(input.confirmedDraft, input.answer, resolutionState) : input.confirmedDraft;
+    if (draft.activityFacts.length) {
+      const projected = legacyActivitiesFromFacts(draft.activityFacts.filter(fact => !draft.removedOriginalIds.includes(fact.id)));
+      draft = ConfirmedDraftSchema.parse({ ...draft,
+        existingPlans: projected.existingPlans.map(item => ({ ...item, placeId: base.itinerary.find(event => event.id === item.id)?.placeId ?? `custom-${item.id}`, durationSource: item.durationMinutes === null ? "unknown" : "user" })),
+        activityMentions: projected.activityMentions });
+    }
     if (input.answer) resolutionState = answeredResolutionState(resolutionState, input.answer.field);
     parsed = draftToParsed(draft);
     snapshot = mergeConfirmedDraft(base, draft);
@@ -319,6 +363,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
         ? await dependencies.parse(base, input.rawText!, signal)
         : await new DeepSeekSemanticParser().parse(base, input.rawText!, undefined, signal);
     } catch (error) {
+      if (error instanceof ActivityCoverageError) return { status: "UPSTREAM_UNAVAILABLE", error: "原文中的部分原安排仍未能可靠识别。请把每项安排分别写清楚后重新分析；本次不会生成缺项方案。", retryable: true, failedStage: "PARSER" };
       return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("PARSER", error), retryable: true, failedStage: "PARSER" };
     }
     parsed = normalizePlanningFacts(base, parsed);
@@ -326,15 +371,34 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     snapshot = mergeConfirmedDraft(base, draft);
   }
 
+  const confirmedActivities = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id));
+  if (!confirmedActivities.length && !snapshot.itinerary.some(event => event.status !== "completed") &&
+      draft.activityFacts.some(fact => fact.role === "considering")) {
+    return { status: "OUT_OF_SCOPE", error: "我只能帮助你救回已确定的行程，暂时不支持对比多个备选目的地哟", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+  }
+  const uncertainActivity = draft.activityFacts.find(fact => fact.role === "uncertain");
+  if (uncertainActivity) {
+    const blocker = missingFact(`activity:${uncertainActivity.id}:role`, `“${uncertainActivity.name}”是已经决定的原安排，还是仍在考虑？`, "text", [
+      { value: "existing_plan", label: "已经决定的原安排" },
+      { value: "considering", label: "还在考虑" },
+      { value: "reference", label: "仅作背景" },
+    ]);
+    const nextState = nextResolutionState(resolutionState, blocker);
+    if (!nextState) return { status: "OUT_OF_SCOPE", error: "这项安排仍未能确认，请修改描述后重新分析。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    parsed.missingFacts = [blocker.key];
+    parsed.status = "needs_input";
+    return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: noImpact(snapshot), resolutionState: nextState, missingFact: blocker };
+  }
+
   if (!hasActionableIntent(parsed, parsed.rawText)) {
     return { status: "OUT_OF_SCOPE", error: "我只处理已有单日行程中的明确变化或明确优化请求。请说明发生了什么变化，例如“下雨了，把下午的户外行程调一下”。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
-  const unresolvedExistingPlans = draft.activityMentions.filter(
+  const unresolvedExistingPlans = (draft.activityFacts.length ? [] : draft.activityMentions).filter(
     (mention) => mention.role === "existing_plan",
   );
   if (
     !snapshot.itinerary.some((event) => event.status !== "completed") &&
-    unresolvedExistingPlans.length === 0
+    unresolvedExistingPlans.length === 0 && !confirmedOriginals(draft.activityFacts).some(fact => fact.startTime === null)
   ) {
     const message = draft.activityMentions.some((mention) => mention.role === "considering")
       ? "你提到的是尚未决定的备选活动。请先告诉我最终想安排哪一项，以及大致时间和地点。"
@@ -342,7 +406,22 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     return { status: "OUT_OF_SCOPE", error: message, retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
 
-  const request = buildRequest(snapshot, parsed, draft.removedLockedIds);
+  const unknownFixed = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment === "fixed" && fact.startTime === null);
+  if (unknownFixed.length) {
+    const flexible = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment === "flexible");
+    const advice: ConditionalAdvice = {
+      heading: "可以先考虑的调整（尚未验证）",
+      suggestions: [
+        ...flexible.map(fact => fact.startTime
+          ? `“${fact.name}”原定 ${fact.startTime}。若不与预约冲突，可先保留这段；若时间冲突，则考虑顺延或舍弃，需补充预约时间和核对路线后决定。`
+          : `“${fact.name}”没有原定开始时间。若预约尚有余量，可先安排这项活动；若预约较近，则先赴预约、把这项活动顺延或舍弃。`),
+        ...unknownFixed.map(fact => `“${fact.name}”仍按固定安排保留，预约时间尚未提供，暂不填写或猜测到达时间。`),
+      ],
+      warning: "预约时间未提供，无法验证是否赶上；地点和路线也尚未完成校验。这些是条件性建议，不能直接接受为最终方案。",
+    };
+    return { status: "CONDITIONAL", error: advice.warning, retryable: false, advice, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+  }
+  const request = buildRequest(snapshot, parsed, draft);
   let impact = analyzeImpact(snapshot, request);
   const blockers: MissingFact[] = [];
   const add = (fact: MissingFact) => { if (!blockers.some((item) => item.key === fact.key)) blockers.push(fact); };
@@ -357,9 +436,6 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
   };
 
   for (const mention of unresolvedExistingPlans) {
-    if (!mention.startTime) {
-      add(missingFact(`activity:${mention.id}:startTime`, `“${mention.name}”安排在几点？`, "time"));
-    }
     if (!mention.location?.trim()) {
       add(missingFact(`activity:${mention.id}:location`, `“${mention.name}”具体是哪个地点？`));
     }
@@ -368,6 +444,9 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     if (!event.location.trim()) {
       add(missingFact(`activity:${event.id}:location`, `“${event.name}”具体是哪个地点？`));
     }
+  }
+  for (const fact of request.unscheduledOriginals ?? []) {
+    if (!fact.placeQuery) add(missingFact(`activity:${fact.id}:location`, `“${fact.name}”具体是哪个地点？`));
   }
   if (blockers.length) return respondWithBlocker();
 
@@ -386,6 +465,11 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
       continue;
     }
     const matchingEvents = draft.existingPlans.filter((event) => event.placeId === fact.field);
+    const matchingUnscheduled = request.unscheduledOriginals?.filter(item => `custom-${item.id}` === fact.field) ?? [];
+    if (matchingUnscheduled.length === 1) {
+      add(missingFact(`activity:${matchingUnscheduled[0].id}:location`, fact.message));
+      continue;
+    }
     if (matchingEvents.length !== 1) {
       return { status: "UPSTREAM_UNAVAILABLE", error: "地点补充问题无法安全对应到唯一活动，原行程没有改变。请核对正式行程后重试。", retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
     }
@@ -396,13 +480,21 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.name, description: candidate.address }))));
   }
   if (parsed.disruptions.some((item) => item.kind === "closed") && !parsed.closedPlaceIds.length) {
-    const matches = snapshot.itinerary.filter((event) => parsed.disruptions.filter((item) => item.kind === "closed").some((item) => item.label.includes(event.name) || item.label.includes(event.location)));
+    const closedLabels = parsed.disruptions.filter(item => item.kind === "closed").map(item => item.label);
+    const matches = [
+      ...snapshot.itinerary.filter(event => event.status !== "completed").map(event => ({ id: event.id, placeId: event.placeId, name: event.name, location: event.location })),
+      ...(request.unscheduledOriginals ?? []).map(fact => ({ id: fact.id, placeId: `custom-${fact.id}`, name: fact.name, location: fact.placeQuery ?? "" })),
+    ].filter(event => closedLabels.some(label => [event.name, event.name.replace(/^(?:去|到|吃|前往|参观|游览)/, ""), event.location]
+      .some(value => value.length >= 2 && label.includes(value))));
     if (matches.length === 1) {
       parsed.closedPlaceIds = [matches[0].placeId];
       draft.closedPlaceIds = parsed.closedPlaceIds;
       request.closedPlaceIds = parsed.closedPlaceIds;
     } else {
-      add(missingFact("closedPlace", "是哪个原计划地点关门了？", "event_selection", snapshot.itinerary.filter((event) => event.status !== "completed").map((event) => ({ value: event.id, label: event.name, description: event.location }))));
+      add(missingFact("closedPlace", "是哪个原计划地点关门了？", "event_selection", [
+        ...snapshot.itinerary.filter(event => event.status !== "completed").map(event => ({ value: event.id, label: event.name, description: event.location })),
+        ...(request.unscheduledOriginals ?? []).map(fact => ({ value: fact.id, label: fact.name, description: fact.placeQuery ?? "" })),
+      ]));
     }
   }
   if (blockers.length) return respondWithBlocker(world);

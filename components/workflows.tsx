@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { z, ZodError } from "zod";
 import {
   ArrowLeft,
@@ -30,6 +30,7 @@ import { LocationService } from "@/services/world/location-service";
 import { RealWorldContextSchema, type RealWorldContext, type TravelMode } from "@/types/world";
 import { confirmParsedInput, confirmedDraftFromParsed, hydrateParsedPlans, mergePlans, normalizeParsed } from "@/services/itinerary-domain";
 import { addMinutesWithinDay } from "@/lib/time";
+import { summarizeVerifiedPlan, validatePlanExplanation } from "@/services/plan-narrative";
 import {
   loadSession,
   logEvent,
@@ -41,6 +42,7 @@ import {
 } from "@/services/trip-service";
 import {
   AgentResultSchema,
+  ConditionalAdviceSchema,
   ConfirmedDraftSchema,
   ImpactAnalysisSchema,
   MissingFactSchema,
@@ -49,7 +51,9 @@ import {
   ResolutionStateSchema,
   SnapshotSchema,
   type ItineraryEvent,
+  type ProposedPlan,
   type ParsedUserInput,
+  type ConditionalAdvice,
   type RealSession,
   type ReplanningRequest,
   type ResolutionState,
@@ -59,7 +63,8 @@ import type { ImpactAnalysis, MissingFact, ResolutionOption } from "@/types";
 
 type AssistBody = {
   error?: string;
-  status?: "READY" | "NEEDS_INPUT" | "OUT_OF_SCOPE" | "UPSTREAM_UNAVAILABLE" | "NO_SAFE_PLAN";
+  advice?: ConditionalAdvice;
+  status?: "CONDITIONAL" | "READY" | "NEEDS_INPUT" | "OUT_OF_SCOPE" | "UPSTREAM_UNAVAILABLE" | "NO_SAFE_PLAN";
   parsedInput?: ParsedUserInput;
   confirmedDraft?: ReturnType<typeof confirmedDraftFromParsed>;
   missingFact?: MissingFact;
@@ -85,6 +90,7 @@ const reasonLabels: Record<ReplanningRequest["reason"], string> = {
 
 const displayPlace = (value: string) => value;
 const displayDestination = (value: string) => value;
+const worldConfirmationExpired = (confirmedAt: string) => Date.now() - Date.parse(confirmedAt) > 300000;
 const eventDurationLabel = (event: ItineraryEvent) => {
   if (event.durationSource === "unknown") return "停留时间待定";
   const [startHour, startMinute] = event.startTime.split(":").map(Number);
@@ -137,7 +143,6 @@ const AssistNeedsInputSchema = z.object({
   ambiguities: RealWorldContextSchema.shape.ambiguities.optional(),
   world: RealWorldContextSchema.optional(),
 }).passthrough();
-
 const AssistReadySchema = z.object({
   status: z.literal("READY"),
   parsedInput: ParsedUserInputSchema,
@@ -149,13 +154,18 @@ const AssistReadySchema = z.object({
 }).passthrough();
 
 const AssistTerminalSchema = z.object({
-  status: z.enum(["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN"]),
+  status: z.enum(["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN", "CONDITIONAL"]),
   error: z.string().min(1),
   retryable: z.boolean().optional(),
   failedStage: z.enum(["PARSER", "GROUNDING", "PLANNER", "VALIDATOR"]).optional(),
   parsedInput: ParsedUserInputSchema.optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
   resolutionState: ResolutionStateSchema.optional(),
+}).passthrough();
+const AssistConditionalSchema = z.object({
+  status: z.literal("CONDITIONAL"), error: z.string().min(1),
+  advice: ConditionalAdviceSchema, parsedInput: ParsedUserInputSchema,
+  resolutionState: ResolutionStateSchema,
 }).passthrough();
 
 const ValidateResponseSchema = z.object({
@@ -168,6 +178,7 @@ function parseAssistBody(value: unknown, responseOk: boolean): AssistBody {
   const objectValue = z.object({}).passthrough().parse(value);
   if (objectValue.status === "NEEDS_INPUT") return AssistNeedsInputSchema.parse(objectValue);
   if (objectValue.status === "READY") return AssistReadySchema.parse(objectValue);
+  if (objectValue.status === "CONDITIONAL") return AssistConditionalSchema.parse(objectValue);
   if (["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN"].includes(String(objectValue.status))) {
     return AssistTerminalSchema.parse(objectValue);
   }
@@ -181,7 +192,8 @@ async function readAssistResponse(response: Response) {
 
 const userFacingPlanningMessage = (message: string) =>
   message
-    .replaceAll("目前没有找到满足全部硬约束的方案。", "当前安排之间暂时没有可执行的组合。")
+    .replaceAll("目前没有找到满足全部硬约束的方案。", "基于当前的安排，暂时无法组合出可行方案。")
+    .replaceAll("当前安排之间暂时没有可执行的组合。", "基于当前的安排，暂时无法组合出可行方案。")
     .replaceAll("活动时长缺失或无效。", "这项安排没有足够的可执行停留时间。")
     .replaceAll("未知停留时长只能使用10–180分钟的方案建议，不能伪装成用户事实。", "这项活动的建议停留时间需要重新安排。")
     .replaceAll("活动时长", "停留安排")
@@ -286,11 +298,17 @@ export function HomeFlow() {
   const [followUp, setFollowUp] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [requestController, setRequestController] = useState<AbortController | null>(null);
+  const requestId = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
   useEffect(() => {
     if (!session || ready) return;
     const timeout = window.setTimeout(() => {
       setRaw(session.rawInput);
       setResolutionState(session.resolutionState);
+      if (session.pendingInput?.stage === "follow_up" && session.pendingInput.baseRevision === session.snapshot.revision) {
+        setConfirmedDraft(session.pendingInput.confirmedDraft);
+        setMissingFact(session.pendingInput.missingFact);
+      }
       setReady(true);
     }, 0);
     return () => window.clearTimeout(timeout);
@@ -300,54 +318,106 @@ export function HomeFlow() {
   const hasItinerary = activeSession.snapshot.itinerary.length > 0;
   const lastUpdated = new Date(activeSession.updatedAt);
   const updatedLabel = Number.isNaN(lastUpdated.getTime()) ? "刚刚更新" : lastUpdated.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  const descriptionChanged = Boolean(activeSession.pendingInput && raw !== activeSession.pendingInput.questionRawText);
 
-  function chooseQuick(text: string) {
-    setRaw(text);
-    saveFlowDraft(text, null, hasItinerary ? "HAS_ITINERARY" : "NO_ITINERARY");
+  function abandonRound() {
+    requestId.current += 1;
+    controllerRef.current?.abort();
+    const latest = loadSession();
+    const clean = saveSession({ ...latest, rawInput: raw, parsedInput: null, pendingInput: null, pendingPlan: null, conditionalAdvice: null,
+      flowStage: latest.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+      resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
+    setSession(clean);
+    setMissingFact(null); setConfirmedDraft(null); setResolutionState(clean.resolutionState); setFollowUp(""); setBusy(false); setError("");
+    return clean;
   }
 
-  async function submitAssist(event?: FormEvent, candidateValue?: string, forcedAnswer?: Record<string, unknown>) {
+  function chooseQuick(text: string) {
+    changeRaw(text);
+  }
+
+  function changeRaw(text: string) {
+    if (controllerRef.current) {
+      requestId.current += 1;
+      controllerRef.current.abort();
+      controllerRef.current = null;
+      setRequestController(null);
+      setBusy(false);
+    }
+    setRaw(text);
+    saveFlowDraft(text, null, activeSession.pendingPlan ? "PLAN_READY" : hasItinerary ? "HAS_ITINERARY" : "NO_ITINERARY");
+    if (activeSession.conditionalAdvice) {
+      const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
+      setResolutionState(cleanResolutionState);
+      setSession(saveSession({ ...loadSession(), conditionalAdvice: null, parsedInput: null, resolutionState: cleanResolutionState }));
+    }
+  }
+
+  async function submitAssist(event?: FormEvent, candidateValue?: string, forcedAnswer?: Record<string, unknown>, forceFresh = false) {
     event?.preventDefault();
-    if (!missingFact && !raw.trim()) {
+    const fresh = forceFresh || descriptionChanged || !missingFact;
+    if (fresh && !raw.trim()) {
       setError("先写下今天发生的变化吧。");
       return;
     }
-    if (missingFact && !candidateValue && !forcedAnswer && !followUp.trim()) {
+    if (!fresh && missingFact && !candidateValue && !forcedAnswer && !followUp.trim()) {
       setError("请先回答当前这一个问题。");
       return;
     }
+    const requestSession = fresh && activeSession.pendingInput ? abandonRound() : loadSession();
+    if (fresh && requestSession.pendingPlan) saveSession({ ...requestSession, pendingPlan: null,
+      flowStage: requestSession.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY" });
+    const currentRequestId = ++requestId.current;
     setBusy(true);
     setError("");
     setElapsed(0);
     const controller = new AbortController();
+    controllerRef.current = controller;
     setRequestController(controller);
     const ticker = window.setInterval(() => setElapsed(value => value + 1), 1000);
     try {
       let answer = forcedAnswer;
-      if (missingFact && !answer) {
+      if (!fresh && missingFact && !answer) {
         if (missingFact.answerType === "poi") answer = { kind: "poi", field: missingFact.key, poiId: candidateValue };
         else if (missingFact.answerType === "event_selection") answer = { kind: "event_selection", field: missingFact.key, eventId: candidateValue };
         else if (missingFact.answerType === "time") answer = { kind: "time", field: missingFact.key, value: followUp.trim() };
         else if (missingFact.key === "travelMode") answer = { kind: "travel_mode", field: "travelMode", value: candidateValue ?? followUp.trim() };
-        else answer = { kind: "text", field: missingFact.key, value: followUp.trim() };
+        else answer = { kind: "text", field: missingFact.key, value: candidateValue ?? followUp.trim() };
       }
-      const payload = missingFact
-        ? { snapshot: activeSession.snapshot, confirmedDraft, answer, resolutionState }
-        : { snapshot: activeSession.snapshot, rawText: raw, resolutionState: activeSession.resolutionState };
+      const payload = fresh
+        ? { snapshot: requestSession.snapshot, rawText: raw, resolutionState: requestSession.resolutionState }
+        : { snapshot: requestSession.snapshot, confirmedDraft, answer, resolutionState };
       const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify(payload), signal: controller.signal });
       const body = await readAssistResponse(response);
+      if (currentRequestId !== requestId.current) return;
       if (body.status === "NEEDS_INPUT" && body.parsedInput && body.confirmedDraft && body.missingFact && body.resolutionState) {
         setMissingFact(body.missingFact);
         setConfirmedDraft(body.confirmedDraft);
         setResolutionState(body.resolutionState);
         setFollowUp("");
-        const updated = saveSession({ ...activeSession, rawInput: raw, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), flowStage: "NEEDS_INPUT", resolutionState: body.resolutionState, pendingPlan: null });
+        const updated = saveSession({ ...requestSession, rawInput: raw, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), flowStage: "NEEDS_INPUT", resolutionState: body.resolutionState, pendingPlan: null,
+          pendingInput: { stage: "follow_up", parsedInput: body.parsedInput, confirmedDraft: body.confirmedDraft,
+            missingFact: body.missingFact, questionRawText: raw, baseRevision: requestSession.snapshot.revision } });
         setSession(updated);
         return;
       }
+      if (body.status === "CONDITIONAL" && body.advice && body.parsedInput) {
+        setMissingFact(null);
+        setConfirmedDraft(null);
+        setSession(saveSession({ ...requestSession, rawInput: raw, parsedInput: body.parsedInput,
+          flowStage: "NO_SAFE_PLAN", pendingPlan: null, pendingInput: null,
+          conditionalAdvice: body.advice, resolutionState: body.resolutionState ?? requestSession.resolutionState }));
+        return;
+      }
       if (!response.ok || body.status !== "READY") {
-        const flowStage = body.status === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : body.status === "NO_SAFE_PLAN" ? "NO_SAFE_PLAN" : "UNAVAILABLE";
-        setSession(saveSession({ ...activeSession, flowStage, resolutionState: body.resolutionState ?? activeSession.resolutionState, pendingPlan: null }));
+        const flowStage = body.status === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : body.status === "NO_SAFE_PLAN" || body.status === "CONDITIONAL" ? "NO_SAFE_PLAN" : "UNAVAILABLE";
+        const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
+        setMissingFact(null);
+        setConfirmedDraft(null);
+        setFollowUp("");
+        setResolutionState(cleanResolutionState);
+        setSession(saveSession({ ...requestSession, rawInput: raw, flowStage, resolutionState: cleanResolutionState,
+          pendingInput: null, pendingPlan: null, conditionalAdvice: null }));
         throw new Error(body.error ?? "真实信息暂时不可用，请稍后重试。");
       }
       if (!body.parsedInput || !body.result || !body.base || !body.request) throw new Error("服务没有返回完整方案，原行程未改变。");
@@ -355,14 +425,13 @@ export function HomeFlow() {
       const base = SnapshotSchema.parse(body.base);
       const request = ReplanningRequestSchema.parse(body.request);
       savePendingPlan({ result, base, request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
-      if (body.resolutionState) saveSession({ ...loadSession(), resolutionState: body.resolutionState });
+      saveSession({ ...loadSession(), pendingInput: null, conditionalAdvice: null, resolutionState: body.resolutionState ?? requestSession.resolutionState });
       window.location.assign("/result");
     } catch (cause) {
-      if ((cause as Error)?.name !== "AbortError") setError(errorText(cause));
+      if (currentRequestId === requestId.current && (cause as Error)?.name !== "AbortError") setError(errorText(cause));
     } finally {
       window.clearInterval(ticker);
-      setRequestController(null);
-      setBusy(false);
+      if (currentRequestId === requestId.current) { controllerRef.current = null; setRequestController(null); setBusy(false); }
     }
   }
 
@@ -377,34 +446,43 @@ export function HomeFlow() {
 
   return (
     <div className="mobile-workspace home-screen">
-      <div className="home-brand"><Sparkles size={18} /><span>coveredYou · 接住你</span></div>
       <div className="home-copy">
         <span className="eyebrow">今天也可以慢慢来</span>
         <h1>发生了森么？</h1>
         <p>把你的原计划和突发情况直接告诉俺！</p>
       </div>
       <form className="mobile-card home-card" onSubmit={submitAssist}>
-        <textarea id="home-input" value={raw} maxLength={4000} onChange={event => { setRaw(event.target.value); saveFlowDraft(event.target.value, null, hasItinerary ? "HAS_ITINERARY" : "NO_ITINERARY"); }} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" />
+        <textarea id="home-input" value={raw} maxLength={4000} onChange={event => changeRaw(event.target.value)} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" />
         <div className="example-row" aria-label="示例提示">
           {["航班晚点了", "突然下雨了", "起晚了", "景点关闭"].map(item => <button key={item} type="button" className="example-chip" onClick={() => chooseQuick(item)}>{item}</button>)}
         </div>
-        {missingFact && (
+        {missingFact && !descriptionChanged && (
           <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
             <span className="eyebrow">再确认一下</span>
             <h2>{missingFact.question}</h2>
+            <p>回答当前问题：</p>
             {missingFact.candidates?.map(candidate => <button className="poi-option" key={candidate.value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}><span><b>{candidate.label}</b><small>{candidate.description}</small></span><ChevronRight size={17} /></button>)}
             {missingFact.key === "travelMode" && [
               ["WALKING", "步行"], ["TRANSIT", "公共交通"], ["DRIVING", "驾车或打车"],
+            // eslint-disable-next-line react-hooks/refs
             ].map(([value, label]) => <button className="poi-option" key={value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, value)}><span><b>{label}</b></span><ChevronRight size={17} /></button>)}
             {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <input type={missingFact.answerType === "time" ? "time" : "text"} value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder="只补充这一项信息" />}
             {missingFact.key === "currentLocation" && <button type="button" className="secondary full" disabled={busy} onClick={() => void requestBrowserLocation()}>使用浏览器当前位置</button>}
-            {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <button type="button" className="primary full" disabled={busy} onClick={() => void submitAssist()}>{busy ? "正在确认…" : "继续安排今天"}</button>}
+            {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <button type="button" className="primary full" disabled={busy} onClick={() => void submitAssist()}>{busy ? "正在确认…" : "回答当前问题"}</button>}
+            <button type="button" className="secondary full" onClick={() => void submitAssist(undefined, undefined, undefined, true)}>放弃这个问题，按上方描述重新分析</button>
           </div>
         )}
+        {activeSession.conditionalAdvice && !missingFact && <section className="conditional-advice" role="status">
+          <strong>{activeSession.conditionalAdvice.heading}</strong>
+          {activeSession.conditionalAdvice.suggestions.map((item, index) => <p key={index}>{item}</p>)}
+          <p className="conditional-warning">{activeSession.conditionalAdvice.warning}</p>
+          <p>可在上方描述中补充固定安排的准确时间，然后重新分析。</p>
+        </section>}
         {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
-        {!missingFact && <button className="primary full home-submit" disabled={busy}>{busy ? "正在处理…" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
+        {(!missingFact || descriptionChanged) && <button className="primary full home-submit" disabled={busy}>{busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
         {busy && <div className="loading-caption" role="status">正在处理你的请求，已等待 {elapsed} 秒。<button type="button" className="text-button" onClick={() => requestController?.abort()}>取消</button></div>}
       </form>
+      {activeSession.pendingPlan && <Link className="text-action centered" href="/result">返回上一个方案</Link>}
       {hasItinerary && <Link className="continue-card" href="/trip"><span><b>继续今天的行程</b><small>已有 {activeSession.snapshot.itinerary.length} 个安排 · 上次更新 {updatedLabel}</small></span><ChevronRight size={21} /></Link>}
       {!hasItinerary && <Link className="home-create-link" href="/onboarding">还没有安排？先创建今天的行程</Link>}
     </div>
@@ -520,7 +598,6 @@ export function OnboardingFlow() {
 
   return (
     <div className="mobile-workspace onboarding-screen">
-      <div className="onboarding-brand"><Sparkles size={17} /><span>接住你</span></div>
       <div className="onboarding-heading">
         <div>
           <span className="eyebrow">第一次来，先填这几个就行</span>
@@ -1646,6 +1723,34 @@ export function RescueFlow() {
   );
 }
 
+function ResultAnalysisContent({ plan, impact, request, base }: {
+  plan: ProposedPlan; impact: ImpactAnalysis | undefined; request: ReplanningRequest; base: Snapshot;
+}) {
+  const originalIds = new Set(request.originalActivityIds ?? base.itinerary.filter(event => event.status !== "completed").map(event => event.id));
+  const originalNames = new Map([...base.itinerary.map(event => [event.id, event.name] as const),
+    ...(request.unscheduledOriginals ?? []).map(fact => [fact.id, fact.name] as const)]);
+  const judgments = new Map((impact?.activityWeatherJudgments ?? []).map(item => [item.id, item]));
+  const affected = (impact?.affectedActivities ?? []).map(id => ({ id, name: originalNames.get(id) ?? id,
+    evidence: judgments.get(id)?.affected ? judgments.get(id)!.evidence : "用户报告的本次变化可能影响这项安排。" }));
+  const unknown = request.reason === "weather" ? (impact?.activityWeatherJudgments ?? []).filter(item => item.exposure === "unknown") : [];
+  return <div className="drawer-scroll">
+    <div className="analysis-block"><span className="eyebrow">受到影响的原安排</span>
+      {affected.map(item => <p className="reason-row" key={item.id}><b>{item.name}</b><span>{item.evidence}</span></p>)}
+      {!affected.length && <p>尚无法判断哪些原安排受到影响。</p>}
+    </div>
+    {unknown.length > 0 && <div className="analysis-block"><span className="eyebrow">室内外属性尚无法判断</span>
+      {unknown.map(item => <p className="reason-row" key={`unknown-${item.id}`}><b>{item.name}</b><span>{item.evidence}</span></p>)}
+    </div>}
+    <div className="analysis-block"><span className="eyebrow">方案说明</span><p className="analysis-explanation">{plan.explanation}</p></div>
+    <div className="analysis-block"><span className="eyebrow">保留与新增的原因</span>
+      {plan.events.map(event => <p className="reason-row" key={event.id}><b>{originalIds.has(event.id) ? "保留／调整" : "新增"} · {event.name}</b><span>{event.reason}</span></p>)}
+    </div>
+    {plan.removedEvents.length > 0 && <div className="analysis-block"><span className="eyebrow">移除的原因</span>
+      {plan.removedEvents.map(item => <p className="reason-row" key={item.eventId}><b>{item.name}</b><span>{item.reason}</span></p>)}
+    </div>}
+  </div>;
+}
+
 export function ResultFlow() {
   const { session, setSession, error, setError } = useRealSession();
   const [busy, setBusy] = useState(false);
@@ -1656,7 +1761,8 @@ export function ResultFlow() {
   if (!pending || pending.result.mode !== "live") return <div className="mobile-workspace empty-screen"><span className="eyebrow">方案</span><h1>还没有待确认的方案。</h1><p className="muted">先从首页告诉我今天发生了什么。</p><Link className="primary full" href="/">返回首页 <ArrowRight size={17} /></Link></div>;
   const { result, base, request } = pending;
   const activePending = pending;
-  const plan = result.plan;
+  const plan = result.plan && !validatePlanExplanation(result.context, result.plan).length
+    ? { ...result.plan, summary: summarizeVerifiedPlan(result.context, result.plan) } : null;
   const impact = pending.impactAnalysis ?? result.impactAnalysis;
   const activeSession = session;
   const currentParsed = pending.parsedInput ? ParsedUserInputSchema.parse(pending.parsedInput) : null;
@@ -1690,10 +1796,21 @@ export function ResultFlow() {
   }
 
   function chooseCandidate(candidate: NonNullable<typeof result.candidatePlans>[number]) {
-    if (!candidate.plan || !candidate.feasible) return;
-    const nextResult = AgentResultSchema.parse({ ...result, id: result.id, ok: true, plan: candidate.plan, message: candidate.tradeOff });
+    if (!candidate.plan || !candidate.feasible || validatePlanExplanation(result.context, candidate.plan).length) return;
+    const verifiedPlan = { ...candidate.plan, summary: summarizeVerifiedPlan(result.context, candidate.plan) };
+    const nextResult = AgentResultSchema.parse({ ...result, id: result.id, ok: true, plan: verifiedPlan, message: candidate.tradeOff });
     const updated = saveSession({ ...activeSession, pendingPlan: { base: activePending.base, request: activePending.request, accepted: false, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
     setSession(updated);
+  }
+
+  function reviseDescription() {
+    const latest = loadSession();
+    const rawInput = activePending.parsedInput?.rawText ?? request.freeText;
+    const updated = saveSession({ ...latest, rawInput, parsedInput: null, pendingInput: null,
+      flowStage: "PLAN_READY",
+      resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
+    setSession(updated);
+    window.location.assign("/");
   }
 
   async function accept() {
@@ -1701,31 +1818,37 @@ export function ResultFlow() {
     setBusy(true); setError("");
     try {
       const latest = loadSession();
+      if (!latest.pendingPlan || latest.flowStage !== "PLAN_READY") throw new Error("当前方案已失效，请重新分析。");
       if (latest.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
-      if (result.context.world && Date.now() - Date.parse(result.context.world.currentTime.confirmedAt) > 300000) throw new Error("距离确认时间较久，请重新生成方案。");
+      if (result.context.world && worldConfirmationExpired(result.context.world.currentTime.confirmedAt)) throw new Error("距离确认时间较久，请重新生成方案。");
       const response = await fetch("/api/validate", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }) });
       const checked = ValidateResponseSchema.parse(await readApiJson(response));
       if (!response.ok || !checked.ok) throw new Error("方案已不再满足当前安排，请重新生成。");
-      const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...latest.snapshot.itinerary.filter(event => event.status === "completed"), ...plan.events], revision: latest.snapshot.revision + 1 });
-      await saveTrip(next, latest.snapshot.revision);
+      const current = loadSession();
+      if (!current.pendingPlan || current.flowStage !== "PLAN_READY" || current.pendingPlan.result.id !== result.id) throw new Error("当前方案已失效，请重新分析。");
+      if (current.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
+      const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...base.itinerary.filter(event => event.status === "completed"), ...plan.events], revision: current.snapshot.revision + 1 });
+      await saveTrip(next, current.snapshot.revision);
       const updated = saveSession({ ...loadSession(), snapshot: { ...next, mode: "user" }, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null });
       setSession(updated); await logEvent("replan_accepted", { planId: result.id, mode: "real" }); setNotice("方案已接受"); window.location.assign("/trip");
     } catch (cause) { setError(errorText(cause)); setBusy(false); }
   }
 
   const baseMap = new Map(base.itinerary.map(event => [event.id, event]));
+  const originalIds = new Set(request.originalActivityIds ?? base.itinerary.filter(event => event.status !== "completed").map(event => event.id));
   const statusOf = (event: ItineraryEvent) => {
     const original = baseMap.get(event.id);
-    if (!original) return { label: "新增", tone: "new" };
+    if (!original) return originalIds.has(event.id) ? { label: "调整", tone: "adjusted" } : { label: "新增", tone: "new" };
     const changed = original.startTime !== event.startTime || original.endTime !== event.endTime || original.location !== event.location || original.travelTimeFromPrevious !== event.travelTimeFromPrevious;
     return changed ? { label: "调整", tone: "adjusted" } : { label: "保留", tone: "kept" };
   };
-  const originalCount = base.itinerary.filter(event => event.status !== "completed").length;
-  const retainedCount = plan ? plan.events.filter(event => baseMap.has(event.id)).length : 0;
+  const originalCount = originalIds.size;
+  const retainedCount = plan ? plan.events.filter(event => originalIds.has(event.id)).length : 0;
   const impactLabel = !plan ? "需要再调整" : plan.removedEvents.length + plan.movedEvents.length > 2 ? "较高" : plan.removedEvents.length + plan.movedEvents.length > 0 ? "中等" : "低";
   const conflicts = result.conflicts ?? [];
   const options = result.resolutionOptions ?? [];
-  const candidatePlans = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible && candidate.plan.summary !== plan?.summary).slice(0, 1);
+  const candidatePlans = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible &&
+    !validatePlanExplanation(result.context, candidate.plan).length && summarizeVerifiedPlan(result.context, candidate.plan) !== plan?.summary).slice(0, 1);
 
   return (
     <div className="mobile-workspace plan-screen">
@@ -1734,9 +1857,10 @@ export function ResultFlow() {
       {plan && <div className="plan-summary-card"><div><b>保留 {retainedCount} / {originalCount} 个原安排</b><p>{plan.summary}</p></div><span className="impact-chip">影响程度：{impactLabel}</span></div>}
       {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
       {plan && <>
-        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><div className="drawer-scroll"><div className="analysis-quote">“{request.freeText}”</div><div className="analysis-block"><span className="eyebrow">识别到的变化</span><p>{result.context.disruption.freeText || request.freeText}</p></div><div className="analysis-block"><span className="eyebrow">受到影响的安排</span><p>{impact?.affectedActivities.length ? impact.affectedActivities.map(id => baseMap.get(id)?.name ?? id).join("、") : "暂未发现明确受影响的安排。"}</p></div><div className="analysis-block"><span className="eyebrow">为什么这样处理</span>{plan.removedEvents.length ? plan.removedEvents.map(item => <p className="reason-row" key={item.eventId}><b>{item.name}</b><span>{item.reason}</span></p>) : <p>尽量保留了原安排，把变化留在更有弹性的时间里。</p>}</div><div className="analysis-block"><span className="eyebrow">被留下的空白</span><p>{impact?.availableTimeWindows.length ? impact.availableTimeWindows.map(item => `${item.startTime}–${item.endTime}`).join("、") : "今天没有额外空档。"}</p></div></div><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
-        <div className="plan-timeline">{plan.events.map(event => { const status = statusOf(event); return <div className="plan-event" key={event.id}><div className="plan-event-time"><b>{event.startTime}</b><small>{event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className={`plan-event-line ${status.tone}`}><span /></div><div className={`plan-event-card ${status.tone}`}><div className="plan-event-top"><h2>{displayPlace(event.name)}</h2><span className={`status-pill ${status.tone}`}>{status.label}</span></div><p><MapPin size={14} /> {displayPlace(event.location)}</p><small>{event.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[event.travelMode] : "路线待查询"} · {eventDurationLabel(event)}</small></div></div>; })}</div>
-        {candidatePlans.length > 0 && <section className="candidate-section"><div className="section-title"><h2>备选方案</h2><span>1 个取舍不同的方案</span></div><div className="candidate-list">{candidatePlans.map(candidate => <button type="button" key={candidate.id} className="candidate-card" onClick={() => chooseCandidate(candidate)}><span><b>{candidate.title || "备选方案"}</b><small>{candidate.tradeOff}</small></span><ChevronRight size={18} /></button>)}</div></section>}
+        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><ResultAnalysisContent plan={plan} impact={impact} request={request} base={base} /><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
+        <div className="plan-timeline">{plan.events.map(event => { const status = statusOf(event); return <div className="plan-event" key={event.id}><div className="plan-event-time"><b>{event.startTime}</b><small>{event.startTimeSource === "suggested" ? "建议时间" : event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className={`plan-event-line ${status.tone}`}><span /></div><div className={`plan-event-card ${status.tone}`}><div className="plan-event-top"><h2 style={{ minWidth: 0, flex: "1 1 auto", overflowWrap: "anywhere" }}>{displayPlace(event.name)}</h2><span className={`status-pill ${status.tone}`} style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>{status.label}</span></div><p><MapPin size={14} /> {displayPlace(event.location)}</p><div className="event-travel-row"><span className="travel-mode-tag">{event.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[event.travelMode] : "路线待查询"}</span><small>{eventDurationLabel(event)}</small></div></div></div>; })}</div>
+        <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
+        {candidatePlans.length > 0 && <section className="candidate-section"><div className="section-title"><h2>备选方案</h2><span>1 个取舍不同的方案</span></div><div className="candidate-list">{candidatePlans.map(candidate => <button type="button" key={candidate.id} className="candidate-card" onClick={() => chooseCandidate(candidate)}><span><b>{summarizeVerifiedPlan(result.context, candidate.plan!)}</b><small>{candidate.tradeOff}</small></span><ChevronRight size={18} /></button>)}</div></section>}
       </>}
       {!notice && plan && <div className="plan-actions"><button className="primary full" disabled={busy} onClick={() => void accept()}>{busy ? "正在确认…" : "接受方案"}<Check size={17} /></button>{candidatePlans.length > 0 && <button className="text-action centered" type="button" onClick={() => document.querySelector<HTMLButtonElement>(".candidate-section .candidate-card")?.focus()}>看备选方案</button>}</div>}
       {notice && <div className="success-box" role="status">{notice}</div>}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export class WorldServiceError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
+  constructor(readonly code: string, message: string, readonly detail?: string) { super(message); }
 }
 export function requireAmapKey() {
   if (typeof window !== "undefined") throw new Error("SERVER_ONLY");
@@ -30,14 +30,21 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
       const timeoutSignal = AbortSignal.timeout(8000);
       const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
       const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal });
-      if (!response.ok) throw new Error("http");
-      const body = await response.json() as Record<string, unknown>;
-      if (body.status !== "1") throw new Error("provider");
+      if (!response.ok) throw new WorldServiceError("AMAP_HTTP", "高德请求未成功。", String(response.status));
+      let body: Record<string, unknown>;
+      try { body = await response.json() as Record<string, unknown>; }
+      catch { throw new WorldServiceError("AMAP_INVALID_JSON", "高德响应无法解析。"); }
+      if (body.status !== "1") {
+        const providerCode = String(body.infocode ?? "unknown");
+        throw new WorldServiceError("AMAP_PROVIDER", "高德服务返回错误。", /^\d{1,8}$/.test(providerCode) ? providerCode : "unknown");
+      }
       return { ...body, _fetchedAt: new Date().toISOString() };
-    } catch {
+    } catch (error) {
       cache.delete(cacheKey);
+      if (error instanceof WorldServiceError) throw error;
+      const category = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError") ? "AMAP_TIMEOUT" : "AMAP_NETWORK";
       // Never propagate provider URLs, headers, credentials or raw error bodies.
-      throw new WorldServiceError("AMAP_UNAVAILABLE", "高德暂时无法提供所需数据，请检查服务权限或稍后重试。");
+      throw new WorldServiceError(category, "高德暂时无法提供所需数据，请检查服务权限或稍后重试。");
     }
   })();
   if (cache.size >= 500) cache.delete(cache.keys().next().value!);

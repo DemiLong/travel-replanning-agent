@@ -7,6 +7,7 @@ import {
   type Snapshot,
   type ItineraryEvent,
 } from "../types";
+import { confirmedOriginals, legacyActivitiesFromFacts, reconcileActivityFacts } from "./activity-facts";
 
 function activityNameKey(value: string) {
   return value
@@ -100,6 +101,16 @@ export function mergePlans(snapshot: Snapshot, parsed: ParsedUserInput): Itinera
 }
 
 export function normalizeParsed(parsed: ParsedUserInput, baseItineraryCount: number, closedPlaceIds: string[] = []) {
+  if (parsed.activityFacts.length) {
+    const missing: string[] = [];
+    if (!confirmedOriginals(parsed.activityFacts).length) missing.push("existingPlans");
+    if (!parsed.disruptions.length && parsed.intent !== "optimize") missing.push("disruptionOrOptimize");
+    if (!parsed.context.currentLocation?.trim()) missing.push("currentLocation");
+    if (parsed.disruptions.some(item => item.kind === "closed") && !closedPlaceIds.length) missing.push("closedPlace");
+    if (parsed.activityFacts.some(fact => fact.role === "uncertain")) missing.push("activityDecision");
+    if (confirmedOriginals(parsed.activityFacts).some(fact => !fact.placeQuery)) missing.push("activityDetails");
+    return ParsedUserInputSchema.parse({ ...parsed, missingFacts: missing, status: missing.length ? "needs_input" : "draft" });
+  }
   const missing = parsed.missingFacts.filter(
     (field) =>
       !field.startsWith("activity:") &&
@@ -123,6 +134,11 @@ export function normalizeParsed(parsed: ParsedUserInput, baseItineraryCount: num
 }
 
 export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput): ParsedUserInput {
+  if (parsed.activityFacts.length) {
+    const activityFacts = reconcileActivityFacts(snapshot, parsed.activityFacts.filter(fact => fact.origin === "message"));
+    const projected = legacyActivitiesFromFacts(activityFacts);
+    return ParsedUserInputSchema.parse({ ...parsed, activityFacts, ...projected });
+  }
   const promotedMentionIds = new Set<string>();
   const matchedSavedMentionIds = new Set<string>();
   const promotedPlans: ParsedUserInput["existingPlans"] = [];
@@ -193,6 +209,21 @@ export function confirmedDraftFromParsed(
   removedEventIds: string[] = [],
 ): ConfirmedDraft {
   const hydrated = hydrateParsedPlans(snapshot, parsed);
+  if (hydrated.activityFacts.length) {
+    const removedOriginalIds = [...new Set(removedEventIds)];
+    const projected = legacyActivitiesFromFacts(hydrated.activityFacts.filter(fact => !removedOriginalIds.includes(fact.id)));
+    return ConfirmedDraftSchema.parse({
+      rawText: hydrated.rawText, intent: hydrated.intent,
+      activityFacts: hydrated.activityFacts,
+      removedOriginalIds,
+      existingPlans: projected.existingPlans.map(item => ({ ...item, placeId: snapshot.itinerary.find(event => event.id === item.id)?.placeId ?? `custom-${item.id}`, durationSource: item.durationMinutes === null ? "unknown" : "user" })),
+      activityMentions: projected.activityMentions,
+      disruptions: hydrated.disruptions, constraints: hydrated.constraints,
+      context: hydrated.context, contextSources: hydrated.contextSources,
+      closedPlaceIds, question: hydrated.question, worldOptions: hydrated.worldOptions,
+      removedLockedIds, baseRevision: snapshot.revision,
+    });
+  }
   const removed = new Set(removedEventIds);
   const merged = mergePlans(snapshot, hydrated).filter(event => !removed.has(event.id));
   return ConfirmedDraftSchema.parse({
@@ -220,6 +251,7 @@ export function confirmedDraftFromParsed(
     question: hydrated.question,
     worldOptions: hydrated.worldOptions,
     removedLockedIds,
+    removedOriginalIds: removedEventIds,
     baseRevision: snapshot.revision,
   });
 }
