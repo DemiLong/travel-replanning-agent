@@ -90,6 +90,9 @@ const reasonLabels: Record<ReplanningRequest["reason"], string> = {
 
 const displayPlace = (value: string) => value;
 const displayDestination = (value: string) => value;
+const metroExitPattern = /(?:\d+\s*号?\s*(?:出)?口|[A-Z]\s*(?:出)?口|出口)/i;
+const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
+const metroLines = (value: string) => [...new Set([...value.matchAll(/(\d{1,2})\s*号线/g)].map(match => `${match[1]}号线`))];
 const worldConfirmationExpired = (confirmedAt: string) => Date.now() - Date.parse(confirmedAt) > 300000;
 const eventDurationLabel = (event: ItineraryEvent) => {
   if (event.durationSource === "unknown") return "停留时间待定";
@@ -444,10 +447,25 @@ export function HomeFlow() {
     }
   }
 
+  const metroStationCandidates = missingFact?.answerType === "poi"
+    ? (missingFact.candidates ?? []).filter(candidate => metroStationPattern.test(candidate.label) && !metroExitPattern.test(candidate.label))
+    : [];
+  const metroExitCandidates = missingFact?.answerType === "poi"
+    ? (missingFact.candidates ?? []).filter(candidate => metroExitPattern.test(candidate.label))
+    : [];
+  const showMetroGroups = metroStationCandidates.length > 0 && metroExitCandidates.length > 0;
+  const renderPoiOption = (candidate: NonNullable<MissingFact["candidates"]>[number], metro = false) => {
+    const lines = metro ? metroLines(`${candidate.label} ${candidate.description ?? ""}`) : [];
+    const label = metro ? candidate.label.replace(/\d{1,2}\s*号线/g, "").replace(/\s+/g, " ").trim() || candidate.label : candidate.label;
+    return <button className={`poi-option${metro ? " metro-option" : ""}`} key={candidate.value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}>
+      <span className="poi-option-copy"><b>{label}</b>{candidate.description && <small>{candidate.description}</small>}</span>
+      {lines.length ? <span className="metro-line-list" aria-label={lines.join("、")}>{lines.map(line => <span className={`metro-line metro-line-${line.replace("号线", "")}`} key={line}>{line}</span>)}</span> : <ChevronRight size={17} />}
+    </button>;
+  };
+
   return (
     <div className="mobile-workspace home-screen">
       <div className="home-copy">
-        <span className="eyebrow">今天也可以慢慢来</span>
         <h1>发生了森么？</h1>
         <p>把你的原计划和突发情况直接告诉俺！</p>
       </div>
@@ -458,18 +476,21 @@ export function HomeFlow() {
         </div>
         {missingFact && !descriptionChanged && (
           <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
-            <span className="eyebrow">再确认一下</span>
+            <span className="eyebrow">{missingFact.answerType === "poi" || /location|place/i.test(missingFact.key) ? "请确认位置" : "再确认一下"}</span>
             <h2>{missingFact.question}</h2>
-            <p>回答当前问题：</p>
-            {missingFact.candidates?.map(candidate => <button className="poi-option" key={candidate.value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}><span><b>{candidate.label}</b><small>{candidate.description}</small></span><ChevronRight size={17} /></button>)}
+            {showMetroGroups ? <div className="metro-candidate-list">
+              <div className="metro-candidate-group" role="group" aria-label="地铁站"><h3>地铁站</h3>{metroStationCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
+              <div className="metro-candidate-group" role="group" aria-label="出口"><h3>出口</h3>{metroExitCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
+              {missingFact.candidates?.filter(candidate => !metroStationCandidates.includes(candidate) && !metroExitCandidates.includes(candidate)).map(candidate => renderPoiOption(candidate))}
+            </div> : missingFact.candidates?.map(candidate => renderPoiOption(candidate))}
             {missingFact.key === "travelMode" && [
               ["WALKING", "步行"], ["TRANSIT", "公共交通"], ["DRIVING", "驾车或打车"],
             // eslint-disable-next-line react-hooks/refs
             ].map(([value, label]) => <button className="poi-option" key={value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, value)}><span><b>{label}</b></span><ChevronRight size={17} /></button>)}
             {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <input type={missingFact.answerType === "time" ? "time" : "text"} value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder="只补充这一项信息" />}
-            {missingFact.key === "currentLocation" && <button type="button" className="secondary full" disabled={busy} onClick={() => void requestBrowserLocation()}>使用浏览器当前位置</button>}
+            {missingFact.key === "currentLocation" && <button type="button" className="secondary full browser-location-button" disabled={busy} onClick={() => void requestBrowserLocation()}>使用当前浏览器位置</button>}
             {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <button type="button" className="primary full" disabled={busy} onClick={() => void submitAssist()}>{busy ? "正在确认…" : "回答当前问题"}</button>}
-            <button type="button" className="secondary full" onClick={() => void submitAssist(undefined, undefined, undefined, true)}>放弃这个问题，按上方描述重新分析</button>
+            <button type="button" className="follow-up-retry" onClick={() => void submitAssist(undefined, undefined, undefined, true)}>放弃这个问题，按上方描述重新分析</button>
           </div>
         )}
         {activeSession.conditionalAdvice && !missingFact && <section className="conditional-advice" role="status">
@@ -1852,12 +1873,12 @@ export function ResultFlow() {
 
   return (
     <div className="mobile-workspace plan-screen">
-      <div className="plan-heading"><span className="eyebrow">方案等待你的确认</span><h1>今天建议这样调整</h1><p>{plan?.summary ?? result.message}</p></div>
+      <div className="plan-heading"><span className="eyebrow">方案等待你的确认</span><h1>今天建议这样调整</h1></div>
       {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
-      {plan && <div className="plan-summary-card"><div><b>保留 {retainedCount} / {originalCount} 个原安排</b><p>{plan.summary}</p></div><span className="impact-chip">影响程度：{impactLabel}</span></div>}
+      {plan && <div className="plan-summary-card"><div className="plan-summary-top"><b>保留 {retainedCount} / {originalCount} 个原安排</b><span className="impact-chip">影响程度：{impactLabel}</span></div><p>{plan.summary}</p></div>}
       {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
       {plan && <>
-        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><ResultAnalysisContent plan={plan} impact={impact} request={request} base={base} /><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
+        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader className="analysis-header"><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><ResultAnalysisContent plan={plan} impact={impact} request={request} base={base} /><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
         <div className="plan-timeline">{plan.events.map(event => { const status = statusOf(event); return <div className="plan-event" key={event.id}><div className="plan-event-time"><b>{event.startTime}</b><small>{event.startTimeSource === "suggested" ? "建议时间" : event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className={`plan-event-line ${status.tone}`}><span /></div><div className={`plan-event-card ${status.tone}`}><div className="plan-event-top"><h2 style={{ minWidth: 0, flex: "1 1 auto", overflowWrap: "anywhere" }}>{displayPlace(event.name)}</h2><span className={`status-pill ${status.tone}`} style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>{status.label}</span></div><p><MapPin size={14} /> {displayPlace(event.location)}</p><div className="event-travel-row"><span className="travel-mode-tag">{event.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[event.travelMode] : "路线待查询"}</span><small>{eventDurationLabel(event)}</small></div></div></div>; })}</div>
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
         {candidatePlans.length > 0 && <section className="candidate-section"><div className="section-title"><h2>备选方案</h2><span>1 个取舍不同的方案</span></div><div className="candidate-list">{candidatePlans.map(candidate => <button type="button" key={candidate.id} className="candidate-card" onClick={() => chooseCandidate(candidate)}><span><b>{summarizeVerifiedPlan(result.context, candidate.plan!)}</b><small>{candidate.tradeOff}</small></span><ChevronRight size={18} /></button>)}</div></section>}
