@@ -16,6 +16,7 @@ export function snapshotActivityFacts(snapshot: Snapshot): ActivityFact[] {
     startTimeSource: "snapshot",
     durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
     commitment: event.locked ? "fixed" : "flexible",
+    protectionPolicy: event.protectionPolicy,
     sourceText: null,
   }));
 }
@@ -34,6 +35,8 @@ export function reconcileActivityFacts(snapshot: Snapshot, incoming: ActivityFac
       facts[index] = ActivityFactSchema.parse({
         ...saved,
         progress: fact.progress,
+        commitment: fact.commitment === "flexible" ? saved.commitment : fact.commitment,
+        protectionPolicy: fact.protectionPolicy ?? saved.protectionPolicy,
         sourceText: fact.sourceText,
       });
     } else if (!facts.some(item => item.id === fact.id)) {
@@ -54,7 +57,8 @@ export function legacyActivitiesFromFacts(facts: ActivityFact[]): Pick<ParsedUse
       endTime: null,
       durationMinutes: fact.durationMinutes,
       location: fact.placeQuery ?? "",
-      locked: fact.commitment === "fixed",
+      locked: fact.commitment !== "flexible",
+      protectionPolicy: fact.protectionPolicy,
       source: fact.origin === "snapshot" ? "system" : "user",
     })),
     activityMentions: facts.filter(fact => fact.origin === "message" && (fact.role !== "existing_plan" || fact.startTime === null)).map(fact => ({

@@ -18,13 +18,14 @@ import {
   type Snapshot,
 } from "../types";
 import { BrowserLocationSchema, TravelModeSchema, type RealWorldContext } from "../types/world";
-import { addMinutesWithinDay } from "../lib/time";
+import { addMinutesWithinDay, minutes } from "../lib/time";
 import { ActivityCoverageError, DeepSeekSemanticParser } from "../services/semantic-parser";
 import { confirmedDraftFromParsed, hydrateParsedPlans } from "../services/itinerary-domain";
 import { confirmedOriginals, legacyActivitiesFromFacts, reconcileActivityFacts } from "../services/activity-facts";
 import { analyzeImpact } from "../services/impact-analysis";
 import { WorldContextService } from "../services/world/world-context-service";
 import { allowedModes } from "../services/world/context-resolution";
+import { effectiveProtectionPolicy, protectionPolicyForActivity, stationLevelLocation } from "../services/protection-policy";
 import { replanReal } from "./real-replanning-agent";
 
 const FieldAnswerSchema = z.discriminatedUnion("kind", [
@@ -184,9 +185,10 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       const mention = id && next.activityMentions.find((item) => item.id === id);
       const fact = id && next.activityFacts.find((item) => item.id === id);
       if (!event && !mention && !fact) throw new Error("当前文本回答没有对应到已确认字段。");
-      if (event) event.location = answer.value;
-      if (mention) mention.location = answer.value;
-      if (fact) fact.placeQuery = answer.value;
+      const stationLocation = stationLevelLocation(answer.value).location;
+      if (event) event.location = stationLocation;
+      if (mention) mention.location = stationLocation;
+      if (fact) fact.placeQuery = stationLocation;
     }
   }
   if (next.activityFacts.length) {
@@ -218,7 +220,7 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
         endTime: mention.endTime,
         durationMinutes: mention.durationMinutes,
         location: mention.location.trim(),
-        locked: mention.locked === "yes",
+        locked: mention.locked !== "no",
       });
     }
   }
@@ -251,10 +253,32 @@ export function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snap
     const old = base.itinerary.find((event) => event.id === item.id);
     if (old?.status === "completed" || markedCompleted.has(item.id)) throw new Error(`已完成安排“${old?.name ?? item.name}”不能重新编辑。`);
     const timing = materializeDraftTime(item, old);
-    if (old?.locked && (!item.locked || item.name !== old.name || item.startTime !== old.startTime || timing.endTime !== old.endTime || item.placeId !== old.placeId || item.location !== old.location)) {
-      throw new Error(`固定安排“${old.name}”的时间、地点、名称和锁定状态不能修改。`);
+    const oldPolicy = old ? effectiveProtectionPolicy(old) : undefined;
+    const policy = oldPolicy ?? (item.locked ? item.protectionPolicy ?? protectionPolicyForActivity({
+      name: item.name,
+      location: item.location,
+      sourceText: item.name,
+      startTime: item.startTime,
+      endTime: item.endTime,
+      durationMinutes: item.durationMinutes,
+      commitment: "fixed",
+    }) : undefined);
+    const protectedFields = new Set(oldPolicy?.lockedFields ?? []);
+    const allowedTimes = oldPolicy?.allowedStartTimes ?? [];
+    const changedProtectedField = Boolean(old && (
+      (old.locked && !item.locked) ||
+      (protectedFields.has("name") && item.name !== old.name) ||
+      (protectedFields.has("startTime") && item.startTime !== old.startTime && !allowedTimes.includes(item.startTime)) ||
+      (protectedFields.has("endTime") && timing.endTime !== old.endTime) ||
+      (protectedFields.has("duration") && minutes(timing.endTime) - minutes(item.startTime) !== minutes(old.endTime) - minutes(old.startTime)) ||
+      (protectedFields.has("location") && (item.placeId !== old.placeId || item.location !== old.location))
+    ));
+    if (changedProtectedField) {
+      throw new Error(`固定安排“${old!.name}”的受保护关键时间或地点不能修改或超出已确认范围。`);
     }
-    const changedLocation = Boolean(old && item.location.trim() !== old.location.trim());
+    const normalizedLocation = old ? item.location : stationLevelLocation(item.location).location;
+    const changedLocation = Boolean(old && normalizedLocation.trim() !== old.location.trim());
+    const locked = Boolean(policy?.lockedFields.length || old?.locked || item.locked);
     next.push(EventSchema.parse({
       ...(old ?? { category: "user activity", indoorOutdoor: "mixed", openingTime: null, closingTime: null, travelTimeFromPrevious: null, reason: item.locked ? "这是用户确认需要保留的固定安排。" : "这是用户确认的原有安排。", constraint: item.locked ? "Locked plan" : "Original plan" }),
       id: item.id,
@@ -263,9 +287,10 @@ export function mergeConfirmedDraft(base: Snapshot, draft: ConfirmedDraft): Snap
       startTime: item.startTime,
       endTime: timing.endTime,
       durationSource: timing.durationSource,
-      location: item.location,
-      locked: old?.locked ?? item.locked,
-      status: old?.locked ?? item.locked ? "locked" : "planned",
+      location: normalizedLocation,
+      locked,
+      protectionPolicy: policy,
+      status: locked ? "locked" : "planned",
     }));
   }
   return SnapshotSchema.parse({ ...base, state: { ...base.state, ...draft.context }, stateSources: { ...base.stateSources, ...draft.contextSources }, trip: { ...base.trip, destination: draft.destination || base.trip.destination }, itinerary: next.sort((a, b) => a.startTime.localeCompare(b.startTime)) });
@@ -406,7 +431,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     return { status: "OUT_OF_SCOPE", error: message, retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
 
-  const unknownFixed = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment === "fixed" && fact.startTime === null);
+  const unknownFixed = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment !== "flexible" && fact.startTime === null);
   if (unknownFixed.length) {
     const flexible = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment === "flexible");
     const advice: ConditionalAdvice = {
@@ -477,7 +502,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     add(missingFact(`activity:${event.id}:location`, fact.message));
   }
   for (const ambiguity of world.ambiguities) {
-    add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.name, description: candidate.address }))));
+    add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.displayName ?? candidate.name, description: candidate.address }))));
   }
   if (parsed.disruptions.some((item) => item.kind === "closed") && !parsed.closedPlaceIds.length) {
     const closedLabels = parsed.disruptions.filter(item => item.kind === "closed").map(item => item.label);

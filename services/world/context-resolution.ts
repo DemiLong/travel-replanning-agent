@@ -9,6 +9,19 @@ export const broadHotelQuery = (text = "") => {
   return !brand || /^(全季|汉庭|如家|亚朵|维也纳|锦江|速8|七天)$/.test(brand);
 };
 export const normalizeCity = (city = "") => city.trim().replace(/市$/g, "");
+const stationExitSuffix = /\s*[（(]?\s*(?:[A-Za-z]|\d+|[一二三四五六七八九十]+)\s*号?\s*(?:出入口|出口|口)\s*[）)]?\s*$/u;
+export function stationLevelCandidates(candidates: WorldPoi[], query: string): WorldPoi[] {
+  if (!/(?:地铁站|火车站|高铁站|客运站|机场|航站楼|站)/u.test(query)) return candidates;
+  const grouped = new Map<string, WorldPoi>();
+  for (const candidate of candidates) {
+    const displayName = candidate.name.replace(stationExitSuffix, "").trim() || candidate.name;
+    const current = grouped.get(displayName);
+    const candidateIsExit = stationExitSuffix.test(candidate.name);
+    const currentIsExit = current ? stationExitSuffix.test(current.name) : true;
+    if (!current || (currentIsExit && !candidateIsExit)) grouped.set(displayName, { ...candidate, displayName });
+  }
+  return [...grouped.values()];
+}
 export function cityCompatible(poi: WorldPoi, tripCity: string, query: string) {
   if (!tripCity || tripCity === "待确认城市" || normalizeCity(poi.city) === normalizeCity(tripCity)) return true;
   const explicitCity = normalizeCity(poi.city);

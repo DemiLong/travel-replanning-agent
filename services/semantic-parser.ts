@@ -11,6 +11,7 @@ import {
 } from "../types";
 import { addMinutesWithinDay } from "../lib/time";
 import { legacyActivitiesFromFacts, reconcileActivityFacts } from "./activity-facts";
+import { protectionPolicyForActivity, stationLevelLocation } from "./protection-policy";
 
 export const SEMANTIC_PARSER_PROMPT = `You extract facts from a traveler's Chinese or English message for a same-day itinerary rescue assistant.
 
@@ -22,7 +23,7 @@ Keep these concepts separate:
 - currentTime is the time described as now/currently; it is never an activity start time.
 - startTime/endTime belong only to the nearest named activity. For each non-null startTime, provide startTimeEvidence as the exact time phrase from the traveler's words (for example, "18 点" -> 18:00), never the current time. If no activity start is stated, both fields are null.
 - durationMinutes is a duration such as "需要1个小时"; it is not a clock time.
-- locked=yes only when booking/fixed/must-keep language clearly modifies that same activity. A booking word elsewhere in the sentence must not lock another activity.
+- locked=yes only when booking/fixed/must-keep language clearly modifies that same activity. A booking word elsewhere in the sentence must not lock another activity. Use locked=uncertain when the clause may describe a reservation but the fixedness attachment is ambiguous; the application will protect it conservatively without asking the traveler to classify fixedness.
 - Decide the role of every activity from the evidence in its own clause. Do not let a sequence word, a time, a place, or a feasibility question elsewhere in the sentence confirm an activity whose own clause says it is only being considered.
 - existing_plan means the traveler says the activity is already planned, decided, booked or originally scheduled. When the traveler asks whether to keep or cancel an activity that was already planned, keep exactly one existing_plan activity and extract the keep/cancel concern as a changed_mind disruption and in question. Do not silently remove it, especially when it is locked.
 - considering means the traveler is undecided whether to do that activity or is choosing between options not stated as an existing plan. Keep those options as considering; never turn alternatives into required itinerary items. “我还不确定是否去，正在考虑15点去A，然后18点去B，来得及吗” leaves A and B as considering because the uncertainty is about doing them. “我在考虑15点去A还是B，还没决定” also leaves both options considering.
@@ -31,7 +32,7 @@ Keep these concepts separate:
 - reference means it is mentioned only for comparison or context.
 - Progress is independent of role and time: an originally planned activity that was not reached is existing_plan with progress=missed; only an explicitly finished activity is completed. Missing start time never changes existing_plan into reference or considering.
 - A planned activity remains existing_plan when the traveler asks whether to keep it; merge repeated mentions of the same activity. A feasibility question such as 还来得及吗 does not turn clearly sequenced plans into considering activities. Past activities, another person's recommendation, and general comparisons are not today's existing plans. 睡过头 is a delay, not weather or fatigue. 下午3点=15:00 and 下午5点=17:00. A bare 3点 may be interpreted as 15:00 only when same-day sequence evidence such as 然后、晚上 or surrounding afternoon plans makes that reading clear; otherwise preserve the ambiguity instead of guessing. For an unnamed hotel or booked attraction, keep the activity, leave location null and ask for its name in ambiguities. Preserve the traveler's actual question in question.
-- 必须/需要在某个时间与别人集合 is a fixed commitment: locked=yes for that meeting. Generic descriptions like 酒店/景点/我的酒店 are not resolved venue names: location=null and ask which hotel/attraction. Do not split '原定去X，现在还去X吗' into two activities: exactly one existing_plan for X with the original startTime; the question goes in question. An activity end time may remain null; missing duration is not a reason to omit an activity.
+- 必须/需要在某个时间与别人集合 is a fixed commitment: locked=yes for that meeting. For stations, extract the station or transport-hub name as location; an A/B/numbered exit is optional detail, not a separate place choice. Generic descriptions like 酒店/景点/我的酒店 are not resolved venue names: location=null and ask which hotel/attraction. Do not split '原定去X，现在还去X吗' into two activities: exactly one existing_plan for X with the original startTime; the question goes in question. An activity end time may remain null; missing duration is not a reason to omit an activity.
 
 Split multiple activities into separate objects. Never use the full user sentence as an activity name. Keep each sourceText as the shortest exact clause that supports the extracted fact. Every non-null context value also needs its exact sourceText; otherwise return both value and sourceText as null. If one phrase has several possible attachments, use locked=uncertain or add an ambiguity instead of guessing.
 
@@ -71,7 +72,7 @@ export function uncoveredActivities(coverage: CoverageActivity[], facts: ParsedU
 }
 
 function canonicalLocation(value: string) {
-  return value.trim();
+  return stationLevelLocation(value).location;
 }
 
 function activityRoleFromEvidence(role: SemanticExtraction["activities"][number]["role"], sourceText: string) {
@@ -84,6 +85,19 @@ function activityProgressFromEvidence(progress: SemanticExtraction["activities"]
   if (/没来得及|未能完成|没完成|错过了/.test(sourceText)) return "missed" as const;
   if (/已完成|已经完成|做完了/.test(sourceText)) return "completed" as const;
   return progress;
+}
+
+function activityCommitment(activity: SemanticExtraction["activities"][number]) {
+  if (activity.locked === "yes") return "fixed" as const;
+  if (activity.locked === "uncertain") return "uncertain" as const;
+  const evidence = `${activity.name} ${activity.sourceText}`;
+  if (/(?:可能|好像|似乎|记不清|不确定).{0,12}(?:预约|预订|订票)|(?:预约|预订|订票).{0,12}(?:可能|好像|似乎|记不清|不确定)/u.test(evidence)) {
+    return "uncertain" as const;
+  }
+  if (/(?:已|已经|确认|固定|必须|需要).{0,12}(?:预约|预订|订票|集合|会合|见面)|(?:电影票|演出票|机票|火车票|高铁票)/u.test(evidence)) {
+    return "fixed" as const;
+  }
+  return "flexible" as const;
 }
 
 function supportedActivity(rawText: string, activity: SemanticExtraction["activities"][number]) {
@@ -170,12 +184,13 @@ export function normalizeSemanticExtraction(
       activityMentions.push(mention);
       continue;
     }
-    if (activity.locked === "uncertain") {
-      parseWarnings.push(`“${activity.name}”是否为固定预约尚不明确，请确认。`);
+    if (activityCommitment(activity) === "uncertain") {
+      parseWarnings.push(`“${activity.name}”的固定性不明确，已按可能固定安排保护。`);
     }
     if (!activity.location) {
       parseWarnings.push(`“${activity.name}”的地点未提供，请在确认页补充。`);
     }
+    const commitment = activityCommitment(activity);
     existingPlans.push({
       id: `llm-${index}-${crypto.randomUUID()}`,
       name: activity.name.trim(),
@@ -185,7 +200,16 @@ export function normalizeSemanticExtraction(
       location: activity.location
         ? canonicalLocation(activity.location)
         : "",
-      locked: activity.locked === "yes",
+      locked: commitment !== "flexible",
+      protectionPolicy: protectionPolicyForActivity({
+        name: activity.name.trim(),
+        location: activity.location,
+        sourceText: activity.sourceText,
+        startTime: activity.startTime,
+        endTime: activity.endTime,
+        durationMinutes: activity.durationMinutes,
+        commitment,
+      }),
       source: "user",
     });
   }
@@ -240,6 +264,7 @@ export function normalizeSemanticExtraction(
     const durationMinutes = activity.durationMinutes ?? (startTime && activity.endTime
       ? Math.max(1, Number(activity.endTime.slice(0, 2)) * 60 + Number(activity.endTime.slice(3)) - Number(startTime.slice(0, 2)) * 60 - Number(startTime.slice(3)))
       : null);
+    const commitment = activityCommitment(activity);
     return [{
       id: `message-${index}-${crypto.randomUUID()}`,
       origin: "message" as const,
@@ -251,7 +276,16 @@ export function normalizeSemanticExtraction(
       startTime,
       startTimeSource: startTime ? "user" as const : "not_provided" as const,
       durationMinutes,
-      commitment: activity.locked === "yes" ? "fixed" as const : "flexible" as const,
+      commitment,
+      protectionPolicy: protectionPolicyForActivity({
+        name: activity.name.trim(),
+        location: activity.location,
+        sourceText: activity.sourceText,
+        startTime,
+        endTime: activity.endTime,
+        durationMinutes,
+        commitment,
+      }),
       sourceText: activity.sourceText,
     }];
   }));

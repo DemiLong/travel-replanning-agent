@@ -1,6 +1,7 @@
 import { ImpactAnalysisSchema, type ImpactAnalysis, type Snapshot, type ReplanningRequest } from "../types";
 import type { RealWorldContext } from "../types/world";
 import { minutes, time } from "../lib/time";
+import { protectedArrivalDeadline } from "./protection-policy";
 
 function activityExposure(name: string, place: string, sourceText: string | null, rawText: string) {
   const clauses = rawText.split(/[。；;，,\n]/).filter(clause => [name, place].filter(Boolean).some(label => clause.includes(label)));
@@ -26,10 +27,12 @@ export function analyzeImpact(
     ...snapshot.itinerary.filter((event) => event.status !== "completed").map(event => ({
       id: event.id, name: event.name, placeId: event.placeId, location: event.location,
       locked: event.locked, startTime: event.startTime as string | null, sourceText: null as string | null,
+      arrivalDeadline: protectedArrivalDeadline(event),
     })),
     ...(request.unscheduledOriginals ?? []).filter(fact => fact.role === "existing_plan" && fact.progress !== "completed").map(fact => ({
       id: fact.id, name: fact.name, placeId: `custom-${fact.id}`, location: fact.placeQuery ?? "",
-      locked: fact.commitment === "fixed", startTime: fact.startTime as string | null, sourceText: fact.sourceText,
+      locked: fact.commitment !== "flexible", startTime: fact.startTime as string | null, sourceText: fact.sourceText,
+      arrivalDeadline: fact.startTime ? minutes(fact.startTime) : null,
     })),
   ];
   const completed = snapshot.itinerary.filter(
@@ -67,7 +70,7 @@ export function analyzeImpact(
   const preserved = remaining.filter((event) => !affected.has(event.id) || event.locked);
   const fixedStarts = locked
     .filter(event => event.startTime !== null)
-    .map((event) => minutes(event.startTime!))
+    .map((event) => event.arrivalDeadline ?? minutes(event.startTime!))
     .filter((value) => value > now)
     .sort((a, b) => a - b);
   const windows: ImpactAnalysis["availableTimeWindows"] = [];
@@ -78,10 +81,10 @@ export function analyzeImpact(
         startTime: time(cursor),
         endTime: time(start),
       cause: disruptionKinds.size ? "当前变化与固定安排之间的剩余时间" : "固定安排之间的剩余时间",
-        constraints: locked.filter((event) => event.startTime !== null && minutes(event.startTime) === start).map((event) => `${event.startTime} 前需抵达 ${event.name}`),
+        constraints: locked.filter((event) => event.startTime !== null && (event.arrivalDeadline ?? minutes(event.startTime)) === start).map((event) => `${time(start)} 前需抵达 ${event.name}`),
       });
     }
-    const fixed = snapshot.itinerary.find((event) => event.locked && minutes(event.startTime) === start);
+    const fixed = snapshot.itinerary.find((event) => event.locked && protectedArrivalDeadline(event) === start);
     // Unknown duration is not a question for the traveler. If another fixed
     // appointment follows, keep the gap open so the planner can suggest a
     // stay length and validate whether that appointment remains reachable. If

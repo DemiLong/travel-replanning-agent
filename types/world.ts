@@ -12,6 +12,7 @@ export const BrowserLocationSchema = CoordinateSchema.extend({
 export type BrowserLocation = z.infer<typeof BrowserLocationSchema>;
 export const PoiSchema = CoordinateSchema.extend({
   coordinateSystem: z.literal("GCJ02"), poiId: z.string().min(1), name: z.string().min(1),
+  displayName: z.string().min(1).optional(),
   address: z.string(), city: z.string(), district: z.string(), adcode: z.string(), type: z.string(),
   source: z.literal("amap"), fetchedAt: z.string().datetime(), status: z.literal("available"),
 });

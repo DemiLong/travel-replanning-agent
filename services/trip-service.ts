@@ -1,9 +1,11 @@
 "use client";
 import {
+  ItineraryDraftSchema,
   RealSessionSchema,
   SnapshotSchema,
   type AgentResult,
   type FlowStage,
+  type ItineraryDraft,
   type ParsedUserInput,
   type PendingPlan,
   type RealSession,
@@ -11,6 +13,7 @@ import {
   type Snapshot,
 } from "../types";
 import { createStarterSnapshot } from "../data/session-defaults";
+import { legacyProtectionPolicy } from "./protection-policy";
 export type TripMode = Snapshot["mode"];
 export const realSessionKey = "travel-session-real-v3";
 const legacyRealSessionKey = "travel-session-real-v2";
@@ -51,7 +54,7 @@ function migrateSnapshot(value: unknown): Snapshot {
   const state = candidate.state && typeof candidate.state === "object" ? candidate.state as Record<string, unknown> : {};
   const trip = candidate.trip && typeof candidate.trip === "object" ? candidate.trip as Record<string, unknown> : {};
   const currentDate = typeof state.currentDate === "string" ? state.currentDate : fallback.state.currentDate;
-  return SnapshotSchema.parse({
+  return withProtectionPolicies(SnapshotSchema.parse({
     ...candidate,
     mode: "user",
     profile: { ...fallback.profile, ...(candidate.profile && typeof candidate.profile === "object" ? candidate.profile : {}) },
@@ -62,6 +65,15 @@ function migrateSnapshot(value: unknown): Snapshot {
       currentDate,
       stateCapturedAt: typeof state.stateCapturedAt === "string" ? state.stateCapturedAt : new Date().toISOString(),
     },
+  }));
+}
+
+function withProtectionPolicies(snapshot: Snapshot): Snapshot {
+  return SnapshotSchema.parse({
+    ...snapshot,
+    itinerary: snapshot.itinerary.map((event) => event.locked && !event.protectionPolicy
+      ? { ...event, protectionPolicy: legacyProtectionPolicy(event) }
+      : event),
   });
 }
 
@@ -153,7 +165,12 @@ export const browserSessionRepository: SessionRepository = {
       return migrateLegacySession();
     }
     try {
-      const session = RealSessionSchema.parse(JSON.parse(raw));
+      let session = RealSessionSchema.parse(JSON.parse(raw));
+      session = RealSessionSchema.parse({ ...session, snapshot: withProtectionPolicies(session.snapshot) });
+      if (session.itineraryDraft && session.itineraryDraft.baseRevision !== session.snapshot.revision) {
+        session = RealSessionSchema.parse({ ...session, itineraryDraft: null });
+        localStorage.setItem(realSessionKey, JSON.stringify(session));
+      }
       if (session.pendingInput && (session.pendingInput.stage === "review" || session.pendingInput.baseRevision !== session.snapshot.revision)) {
         const migrated = RealSessionSchema.parse({ ...session, rawInput: session.rawInput || session.pendingInput.questionRawText,
           pendingInput: null, parsedInput: null, pendingPlan: null, flowStage: session.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
@@ -184,6 +201,60 @@ export function loadSession() {
 
 export function saveSession(value: RealSession) {
   return browserSessionRepository.save(value);
+}
+
+export function createItineraryDraft(session: RealSession): ItineraryDraft {
+  return ItineraryDraftSchema.parse({
+    baseRevision: session.snapshot.revision,
+    profile: session.snapshot.profile,
+    destination: session.snapshot.trip.destination,
+    currentDate: session.snapshot.state.currentDate,
+    currentTime: session.snapshot.state.currentTime,
+    currentLocation: session.snapshot.state.currentLocation,
+    stateCapturedAt: session.snapshot.state.stateCapturedAt,
+    currentTimeSource: session.snapshot.stateSources.currentTime,
+    currentLocationSource: session.snapshot.stateSources.currentLocation,
+    rawInput: session.rawInput,
+    items: session.parsedInput?.existingPlans ?? [],
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function saveItineraryDraft(
+  value: ItineraryDraft,
+  parsedInput: ParsedUserInput | null = null,
+) {
+  const session = loadSession();
+  const itineraryDraft = ItineraryDraftSchema.parse({
+    ...value,
+    updatedAt: new Date().toISOString(),
+  });
+  if (session.snapshot.revision !== itineraryDraft.baseRevision)
+    throw new Error("行程已在其他页面更新，请刷新后重新编辑。");
+  return saveSession({ ...session, itineraryDraft, parsedInput });
+}
+
+export function commitItineraryDraft(
+  value: Snapshot,
+  expectedRevision: number,
+) {
+  const snapshot = SnapshotSchema.parse({ ...value, mode: "user" });
+  const session = loadSession();
+  if (session.snapshot.revision !== expectedRevision)
+    throw new Error("另一个标签页修改了你的行程，请刷新后再保存。");
+  if (snapshot.revision !== expectedRevision + 1)
+    throw new Error("行程版本不连续，请刷新后再保存。");
+  return saveSession({
+    ...session,
+    snapshot: { ...snapshot, mode: "user" },
+    itineraryDraft: null,
+    rawInput: "",
+    parsedInput: null,
+    pendingInput: null,
+    pendingPlan: null,
+    conditionalAdvice: null,
+    flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+  });
 }
 
 export function updateSession(patch: Partial<RealSession>) {
@@ -238,6 +309,7 @@ export async function saveTrip(value: Snapshot, expectedRevision?: number) {
   saveSession({
     ...session,
     snapshot: { ...snapshot, mode: "user" },
+    itineraryDraft: null,
     pendingInput: null,
     flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
   });

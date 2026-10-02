@@ -1,5 +1,6 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
 import { minutes } from "../lib/time";
+import { effectiveProtectionPolicy, protectedArrivalDeadline } from "../services/protection-policy";
 export function travelTimeValidator(
   c: AgentContext,
   p: ProposedPlan,
@@ -18,11 +19,16 @@ export function travelTimeValidator(
         errors.push({code:"travel_time",eventId:e.id,message:`缺少抵达 ${e.name} 的新鲜高德路线，无法判断是否来得及。`});
       }else{
         const required=from===e.placeId?0:Math.ceil((route!.trafficDurationSeconds??route!.durationSeconds!)/60);
-        if(previousEnd+required>minutes(e.startTime))errors.push({
+        const deadline=protectedArrivalDeadline(e);
+        const policy=effectiveProtectionPolicy(e);
+        const buffer=policy?.timeAnchor==="departs_at" ? policy.arrivalBuffer?.recommendedMinutes??0 : 0;
+        if(previousEnd+required>deadline)errors.push({
           code:"travel_time",
           eventId:e.id,
-          message:`按高德路线需要 ${required} 分钟，无法在 ${e.startTime} 前到达 ${e.name}。`,
-          ...(previousEvent?.locked&&e.locked?{conflict:{kind:"locked_schedule_conflict" as const,eventId:previousEvent.id,nextAnchorEventId:e.id,availableMinutes:Math.max(0,minutes(e.startTime)-previousEnd),requiredTransferMinutes:required,message:`${previousEvent.name} 与 ${e.name} 之间没有足够时间完成停留和路程。`}}:{}),
+          message: buffer
+            ? `按高德路线需要 ${required} 分钟，且需为 ${e.startTime} 的${policy?.transportKind === "flight" ? "航班" : "车次"}预留 ${buffer} 分钟进站缓冲。`
+            : `按高德路线需要 ${required} 分钟，无法在 ${e.startTime} 前到达 ${e.name}。`,
+          ...(previousEvent?.locked&&e.locked?{conflict:{kind:"locked_schedule_conflict" as const,eventId:previousEvent.id,nextAnchorEventId:e.id,availableMinutes:Math.max(0,deadline-previousEnd),requiredTransferMinutes:required,message:`${previousEvent.name} 与 ${e.name} 之间没有足够时间完成停留、路程和到达缓冲。`}}:{}),
         });
         if(e.travelTimeFromPrevious!==required)errors.push({code:"travel_time",eventId:e.id,message:"展示的路程时间与高德数据不一致。"});
       }

@@ -32,10 +32,13 @@ import { confirmParsedInput, confirmedDraftFromParsed, hydrateParsedPlans, merge
 import { addMinutesWithinDay } from "@/lib/time";
 import { summarizeVerifiedPlan, validatePlanExplanation } from "@/services/plan-narrative";
 import {
+  commitItineraryDraft,
+  createItineraryDraft,
   loadSession,
   logEvent,
   requestHeaders,
   saveFlowDraft,
+  saveItineraryDraft,
   savePendingPlan,
   saveSession,
   saveTrip,
@@ -51,6 +54,7 @@ import {
   ResolutionStateSchema,
   SnapshotSchema,
   type ItineraryEvent,
+  type ItineraryDraft,
   type ProposedPlan,
   type ParsedUserInput,
   type ConditionalAdvice,
@@ -90,8 +94,8 @@ const reasonLabels: Record<ReplanningRequest["reason"], string> = {
 
 const displayPlace = (value: string) => value;
 const displayDestination = (value: string) => value;
-const metroExitPattern = /(?:\d+\s*号?\s*(?:出)?口|[A-Z]\s*(?:出)?口|出口)/i;
 const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
+const stationExitSuffix = /\s*[（(]?\s*(?:[A-Z]|\d+|[一二三四五六七八九十]+)\s*号?\s*(?:出入口|出口|口)\s*[）)]?\s*$/i;
 const metroLines = (value: string) => [...new Set([...value.matchAll(/(\d{1,2})\s*号线/g)].map(match => `${match[1]}号线`))];
 const worldConfirmationExpired = (confirmedAt: string) => Date.now() - Date.parse(confirmedAt) > 300000;
 const eventDurationLabel = (event: ItineraryEvent) => {
@@ -112,6 +116,38 @@ const errorText = (error: unknown) => {
   }
   return error.message;
 };
+
+function snapshotFromItineraryDraft(
+  base: Snapshot,
+  draft: ItineraryDraft,
+): Snapshot {
+  return SnapshotSchema.parse({
+    ...base,
+    profile: draft.profile,
+    trip: {
+      ...base.trip,
+      destination: draft.destination.trim(),
+      startDate: draft.currentDate,
+      endDate: draft.currentDate,
+    },
+    state: {
+      ...base.state,
+      currentDate: draft.currentDate,
+      currentTime: draft.currentTime,
+      currentLocation: draft.currentLocation.trim(),
+      stateCapturedAt: draft.stateCapturedAt,
+      browserLocation:
+        draft.currentLocationSource === "user"
+          ? undefined
+          : base.state.browserLocation,
+    },
+    stateSources: {
+      ...base.stateSources,
+      currentTime: draft.currentTimeSource,
+      currentLocation: draft.currentLocationSource,
+    },
+  });
+}
 
 async function readApiJson(response: Response): Promise<unknown> {
   let text: string;
@@ -283,6 +319,7 @@ function Timeline({ events }: { events: ItineraryEvent[] }) {
             <p><MapPin size={13} /> {displayPlace(event.location)}</p>
             {event.travelMode && <p>{({WALKING:"步行",TRANSIT:"公共交通",DRIVING:"驾车 / 打车建议"})[event.travelMode]} · 预计 {event.travelTimeFromPrevious} 分钟</p>}
             {event.durationSource === "suggested" && <small>预计停留时间</small>}
+            {event.protectionPolicy?.arrivalBuffer && <small>建议提前 {event.protectionPolicy.arrivalBuffer.recommendedMinutes} 分钟抵达；这是规划缓冲，不是票面时间</small>}
           </div>
         </div>
       ))}
@@ -448,17 +485,19 @@ export function HomeFlow() {
   }
 
   const metroStationCandidates = missingFact?.answerType === "poi"
-    ? (missingFact.candidates ?? []).filter(candidate => metroStationPattern.test(candidate.label) && !metroExitPattern.test(candidate.label))
+    ? [...new Map((missingFact.candidates ?? [])
+      .filter(candidate => metroStationPattern.test(candidate.label))
+      .map(candidate => {
+        const label = candidate.label.replace(stationExitSuffix, "").trim() || candidate.label;
+        return [label, { ...candidate, label }] as const;
+      })).values()]
     : [];
-  const metroExitCandidates = missingFact?.answerType === "poi"
-    ? (missingFact.candidates ?? []).filter(candidate => metroExitPattern.test(candidate.label))
-    : [];
-  const showMetroGroups = metroStationCandidates.length > 0 && metroExitCandidates.length > 0;
+  const showMetroStations = metroStationCandidates.length > 0;
   const renderPoiOption = (candidate: NonNullable<MissingFact["candidates"]>[number], metro = false) => {
     const lines = metro ? metroLines(`${candidate.label} ${candidate.description ?? ""}`) : [];
     const label = metro ? candidate.label.replace(/\d{1,2}\s*号线/g, "").replace(/\s+/g, " ").trim() || candidate.label : candidate.label;
     return <button className={`poi-option${metro ? " metro-option" : ""}`} key={candidate.value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}>
-      <span className="poi-option-copy"><b>{label}</b>{candidate.description && <small>{candidate.description}</small>}</span>
+      <span className="poi-option-copy"><b>{label}</b>{candidate.description && !metro && <small>{candidate.description}</small>}</span>
       {lines.length ? <span className="metro-line-list" aria-label={lines.join("、")}>{lines.map(line => <span className={`metro-line metro-line-${line.replace("号线", "")}`} key={line}>{line}</span>)}</span> : <ChevronRight size={17} />}
     </button>;
   };
@@ -478,10 +517,9 @@ export function HomeFlow() {
           <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
             <span className="eyebrow">{missingFact.answerType === "poi" || /location|place/i.test(missingFact.key) ? "请确认位置" : "再确认一下"}</span>
             <h2>{missingFact.question}</h2>
-            {showMetroGroups ? <div className="metro-candidate-list">
-              <div className="metro-candidate-group" role="group" aria-label="地铁站"><h3>地铁站</h3>{metroStationCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
-              <div className="metro-candidate-group" role="group" aria-label="出口"><h3>出口</h3>{metroExitCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
-              {missingFact.candidates?.filter(candidate => !metroStationCandidates.includes(candidate) && !metroExitCandidates.includes(candidate)).map(candidate => renderPoiOption(candidate))}
+            {showMetroStations ? <div className="metro-candidate-list">
+              <div className="metro-candidate-group" role="group" aria-label="车站"><h3>车站</h3>{metroStationCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
+              {missingFact.candidates?.filter(candidate => !metroStationPattern.test(candidate.label)).map(candidate => renderPoiOption(candidate))}
             </div> : missingFact.candidates?.map(candidate => renderPoiOption(candidate))}
             {missingFact.key === "travelMode" && [
               ["WALKING", "步行"], ["TRANSIT", "公共交通"], ["DRIVING", "驾车或打车"],
@@ -512,37 +550,47 @@ export function HomeFlow() {
 
 export function OnboardingFlow() {
   const { session, setSession, error, setError } = useRealSession();
-  const [raw, setRaw] = useState("");
-  const [items, setItems] = useState<ParsedUserInput["existingPlans"]>([]);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [draft, setDraft] = useState<ItineraryDraft | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [parsing, setParsing] = useState(false);
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       if (session && !initialized) {
         setInitialized(true);
-        setSnapshot(session.snapshot);
-        setRaw(session.rawInput);
-        setItems(session.parsedInput?.existingPlans ?? []);
+        setDraft(
+          session.itineraryDraft?.baseRevision === session.snapshot.revision
+            ? session.itineraryDraft
+            : createItineraryDraft(session),
+        );
       }
     }, 0);
     return () => window.clearTimeout(timeout);
   }, [session, initialized, setError]);
-  if (!session || !snapshot) return <Loading error={error} />;
+  if (!session || !draft) return <Loading error={error} />;
   const activeSession = session;
-  const activeSnapshot = snapshot;
+  const activeDraft = draft;
+  const raw = activeDraft.rawInput;
+  const items = activeDraft.items;
 
-  function persist(nextSnapshot: Snapshot, nextRaw = raw) {
-    setSnapshot(nextSnapshot);
-    const updated = saveSession({
-      ...activeSession,
-      snapshot: { ...nextSnapshot, mode: "user" },
-      rawInput: nextRaw,
-      flowStage: nextSnapshot.itinerary.length
-        ? "HAS_ITINERARY"
-        : "NO_ITINERARY",
-    });
+  function persistDraft(
+    nextDraft: ItineraryDraft,
+    parsedInput: ParsedUserInput | null = null,
+  ) {
+    const updated = saveItineraryDraft(nextDraft, parsedInput);
+    setDraft(updated.itineraryDraft ?? nextDraft);
     setSession(updated);
+  }
+
+  function updateItem(
+    id: string,
+    patch: Partial<ItineraryDraft["items"][number]>,
+  ) {
+    persistDraft({
+      ...activeDraft,
+      items: activeDraft.items.map((item) =>
+        item.id === id ? { ...item, ...patch } : item,
+      ),
+    });
   }
 
   async function parsePlans() {
@@ -550,17 +598,23 @@ export function OnboardingFlow() {
       setError("请先粘贴或输入今天已有的安排。");
       return;
     }
+    if (!activeDraft.destination.trim()) {
+      setError("请先填写所在城市。");
+      return;
+    }
+    if (!activeDraft.currentDate || !activeDraft.currentTime) {
+      setError("请先填写今天的日期和当前时间。");
+      return;
+    }
     setParsing(true);
     setError("");
     try {
-      const parsed = await parseWithModel(activeSnapshot, raw);
-      setItems(parsed.existingPlans);
-      const updated = saveSession({
-        ...activeSession,
-        rawInput: raw,
-        parsedInput: parsed,
-      });
-      setSession(updated);
+      const editableSnapshot = snapshotFromItineraryDraft(
+        activeSession.snapshot,
+        activeDraft,
+      );
+      const parsed = await parseWithModel(editableSnapshot, raw);
+      persistDraft({ ...activeDraft, items: parsed.existingPlans }, parsed);
       if (parsed.activityMentions.length) window.location.assign("/rescue");
     } catch (cause) {
       setError(errorText(cause));
@@ -574,10 +628,22 @@ export function OnboardingFlow() {
     try {
       if (!items.length)
         throw new Error("请先解析并确认至少一项今天已有的安排。");
-      if (!activeSnapshot.state.currentLocation.trim())
+      if (!activeDraft.destination.trim()) throw new Error("请填写所在城市。");
+      if (!activeDraft.currentDate || !activeDraft.currentTime)
+        throw new Error("请填写今天的日期和当前时间。");
+      if (!activeDraft.currentLocation.trim())
         throw new Error("请填写当前地点。");
       if (items.some((item) => !item.name.trim()))
         throw new Error("请检查活动名称。");
+      if (items.some((item) => !item.startTime))
+        throw new Error("请检查活动开始时间。");
+      const latest = loadSession();
+      if (latest.snapshot.revision !== activeDraft.baseRevision)
+        throw new Error("行程已在其他页面更新，请刷新后重新编辑。");
+      const editableSnapshot = snapshotFromItineraryDraft(
+        latest.snapshot,
+        activeDraft,
+      );
       const parsed = ParsedUserInputSchema.parse({
         rawText: raw,
         intent: "create",
@@ -590,26 +656,19 @@ export function OnboardingFlow() {
             value: `${item.startTime} ${item.name}`,
             source: "user",
           })),
-        context: activeSnapshot.state,
-        contextSources: activeSnapshot.stateSources,
+        context: editableSnapshot.state,
+        contextSources: editableSnapshot.stateSources,
         closedPlaceIds: [],
         missingFacts: [],
         status: "confirmed",
       });
       const next = SnapshotSchema.parse({
-        ...activeSnapshot,
-        itinerary: mergePlans({ ...activeSnapshot, itinerary: [] }, parsed),
-        revision: activeSnapshot.revision + 1,
+        ...editableSnapshot,
+        itinerary: mergePlans({ ...editableSnapshot, itinerary: [] }, parsed),
+        revision: activeDraft.baseRevision + 1,
       });
-      await saveTrip(next, activeSnapshot.revision);
-      saveSession({
-        ...loadSession(),
-        snapshot: { ...next, mode: "user" },
-        flowStage: "HAS_ITINERARY",
-        rawInput: "",
-        parsedInput: null,
-        pendingPlan: null,
-      });
+      const updated = commitItineraryDraft(next, activeDraft.baseRevision);
+      setSession(updated);
       await logEvent("trip_created", { tripId: next.trip.id, mode: "real" });
       window.location.assign("/trip");
     } catch (cause) {
@@ -640,11 +699,12 @@ export function OnboardingFlow() {
               <label htmlFor="destination">所在城市</label>
               <input
                 id="destination"
-                value={snapshot.trip.destination}
+                maxLength={80}
+                value={activeDraft.destination}
                 onChange={(event) =>
-                  persist({
-                    ...snapshot,
-                    trip: { ...snapshot.trip, destination: event.target.value },
+                  persistDraft({
+                    ...activeDraft,
+                    destination: event.target.value,
                   })
                 }
               />
@@ -655,17 +715,11 @@ export function OnboardingFlow() {
                 id="day-date"
                 required
                 type="date"
-                value={snapshot.state.currentDate}
+                value={activeDraft.currentDate}
                 onChange={(event) => {
-                  const currentDate = event.target.value;
-                  persist({
-                    ...snapshot,
-                    trip: {
-                      ...snapshot.trip,
-                      startDate: currentDate,
-                      endDate: currentDate,
-                    },
-                    state: { ...snapshot.state, currentDate },
+                  persistDraft({
+                    ...activeDraft,
+                    currentDate: event.target.value,
                   });
                 }}
               />
@@ -676,18 +730,13 @@ export function OnboardingFlow() {
                 id="current-time"
                 required
                 type="time"
-                value={snapshot.state.currentTime}
+                value={activeDraft.currentTime}
                 onChange={(event) =>
-                  persist({
-                    ...snapshot,
-                    state: {
-                      ...snapshot.state,
-                      currentTime: event.target.value,
-                    },
-                    stateSources: {
-                      ...snapshot.stateSources,
-                      currentTime: "user",
-                    },
+                  persistDraft({
+                    ...activeDraft,
+                    currentTime: event.target.value,
+                    currentTimeSource: "user",
+                    stateCapturedAt: new Date().toISOString(),
                   })
                 }
               />
@@ -697,19 +746,13 @@ export function OnboardingFlow() {
               <input
                 id="current-location"
                 required
-                value={snapshot.state.currentLocation}
+                maxLength={100}
+                value={activeDraft.currentLocation}
                 onChange={(event) =>
-                  persist({
-                    ...snapshot,
-                    state: {
-                      ...snapshot.state,
-                      currentLocation: event.target.value,
-                      browserLocation: undefined,
-                    },
-                    stateSources: {
-                      ...snapshot.stateSources,
-                      currentLocation: "user",
-                    },
+                  persistDraft({
+                    ...activeDraft,
+                    currentLocation: event.target.value,
+                    currentLocationSource: "user",
                   })
                 }
                 placeholder="例如：城市中心、酒店或车站"
@@ -729,11 +772,11 @@ export function OnboardingFlow() {
             <label htmlFor="itinerary-input">你今天想怎么安排？</label>
             <textarea
               id="itinerary-input"
+              maxLength={4000}
               value={raw}
-              onChange={(event) => {
-                setRaw(event.target.value);
-                persist(snapshot, event.target.value);
-              }}
+              onChange={(event) =>
+                persistDraft({ ...activeDraft, rawInput: event.target.value })
+              }
               placeholder="10 点去城市博物馆，12:30 午餐，19 点已预订晚餐"
             />
           </div>
@@ -756,11 +799,12 @@ export function OnboardingFlow() {
                       className="icon-button"
                       aria-label={`删除安排 ${index + 1}`}
                       onClick={() =>
-                        setItems((current) =>
-                          current.filter(
+                        persistDraft({
+                          ...activeDraft,
+                          items: activeDraft.items.filter(
                             (candidate) => candidate.id !== item.id,
                           ),
-                        )
+                        })
                       }
                     >
                       <Trash2 size={16} />
@@ -772,15 +816,10 @@ export function OnboardingFlow() {
                       <input
                         id={`name-${item.id}`}
                         required
+                        maxLength={160}
                         value={item.name}
                         onChange={(event) =>
-                          setItems((current) =>
-                            current.map((candidate) =>
-                              candidate.id === item.id
-                                ? { ...candidate, name: event.target.value }
-                                : candidate,
-                            ),
-                          )
+                          updateItem(item.id, { name: event.target.value })
                         }
                       />
                     </div>
@@ -792,16 +831,7 @@ export function OnboardingFlow() {
                         required
                         value={item.startTime}
                         onChange={(event) =>
-                          setItems((current) =>
-                            current.map((candidate) =>
-                              candidate.id === item.id
-                                ? {
-                                    ...candidate,
-                                    startTime: event.target.value,
-                                  }
-                                : candidate,
-                            ),
-                          )
+                          updateItem(item.id, { startTime: event.target.value })
                         }
                       />
                     </div>
@@ -812,13 +842,9 @@ export function OnboardingFlow() {
                         type="time"
                         value={item.endTime ?? ""}
                         onChange={(event) =>
-                          setItems((current) =>
-                            current.map((candidate) =>
-                              candidate.id === item.id
-                                ? { ...candidate, endTime: event.target.value || null }
-                                : candidate,
-                            ),
-                          )
+                          updateItem(item.id, {
+                            endTime: event.target.value || null,
+                          })
                         }
                       />
                     </div>
@@ -827,15 +853,10 @@ export function OnboardingFlow() {
                       <input
                         id={`location-${item.id}`}
                         required
+                        maxLength={160}
                         value={item.location}
                         onChange={(event) =>
-                          setItems((current) =>
-                            current.map((candidate) =>
-                              candidate.id === item.id
-                                ? { ...candidate, location: event.target.value }
-                                : candidate,
-                            ),
-                          )
+                          updateItem(item.id, { location: event.target.value })
                         }
                       />
                     </div>
@@ -843,16 +864,13 @@ export function OnboardingFlow() {
                       <Checkbox
                         checked={item.locked}
                         onCheckedChange={(checked) =>
-                          setItems((current) =>
-                            current.map((candidate) =>
-                              candidate.id === item.id
-                                ? { ...candidate, locked: Boolean(checked) }
-                                : candidate,
-                            ),
-                          )
+                          updateItem(item.id, {
+                            locked: Boolean(checked),
+                            ...(checked ? {} : { protectionPolicy: undefined }),
+                          })
                         }
                       />
-                      固定时间或预约
+                      固定时间或预约（按类型保护关键字段）
                     </label>
                   </div>
                 </div>
@@ -867,12 +885,12 @@ export function OnboardingFlow() {
               <label htmlFor="pace">旅行节奏（可选）</label>
               <select
                 id="pace"
-                value={snapshot.profile.travelPace}
+                value={activeDraft.profile.travelPace}
                 onChange={(event) =>
-                  persist({
-                    ...snapshot,
+                  persistDraft({
+                    ...activeDraft,
                     profile: {
-                      ...snapshot.profile,
+                      ...activeDraft.profile,
                       travelPace: event.target
                         .value as Snapshot["profile"]["travelPace"],
                     },
@@ -886,7 +904,7 @@ export function OnboardingFlow() {
             </div>
             <div className="field">
               <label htmlFor="walking-tolerance">步行承受度（可选）</label>
-              <select id="walking-tolerance" value={snapshot.profile.walkingTolerance} onChange={(event) => persist({ ...snapshot, profile: { ...snapshot.profile, walkingTolerance: event.target.value as Snapshot["profile"]["walkingTolerance"] } })}>
+              <select id="walking-tolerance" value={activeDraft.profile.walkingTolerance} onChange={(event) => persistDraft({ ...activeDraft, profile: { ...activeDraft.profile, walkingTolerance: event.target.value as Snapshot["profile"]["walkingTolerance"] } })}>
                 <option value="low">尽量少走</option>
                 <option value="medium">适量步行</option>
                 <option value="high">可以多走</option>
@@ -978,11 +996,16 @@ export function RescueFlow() {
   useEffect(() => {
     const timeout = window.setTimeout(async () => {
       if (session && !initialized) {
-        const blank=ParsedUserInputSchema.parse({rawText:session.rawInput,intent:"rescue",existingPlans:[],disruptions:[],constraints:[],context:session.snapshot.state,contextSources:session.snapshot.stateSources,missingFacts:[],status:"draft",parser:"manual"});
+        const blank=ParsedUserInputSchema.parse({rawText:session.rawInput,destinationDraft:session.snapshot.trip.destination,intent:"rescue",existingPlans:[],disruptions:[],constraints:[],context:session.snapshot.state,contextSources:session.snapshot.stateSources,missingFacts:[],status:"draft",parser:"manual"});
         let initial=blank;
         try {
           initial=session.parsedInput?.parser!=="deterministic_fallback" && session.parsedInput ? session.parsedInput : session.rawInput.trim()?await parseWithModel(session.snapshot,session.rawInput):blank;
         }catch(cause){setError(errorText(cause));}
+        initial = ParsedUserInputSchema.parse({
+          ...initial,
+          destinationDraft:
+            initial.destinationDraft ?? session.snapshot.trip.destination,
+        });
         const matchedClosed = mergePlans(session.snapshot, initial)
           .filter(
             (event) =>
@@ -1132,8 +1155,11 @@ export function RescueFlow() {
         0
       )
         throw new Error("请先确认至少一项今天已有的安排。");
+      const destination = normalized.destinationDraft?.trim();
+      if (!destination) throw new Error("请填写所在城市。");
       const next = SnapshotSchema.parse({
         ...activeSession.snapshot,
+        trip: { ...activeSession.snapshot.trip, destination },
         state: { ...activeSession.snapshot.state, ...normalized.context },
         stateSources: normalized.contextSources,
         itinerary: mergePlans(activeSession.snapshot, normalized),
@@ -1166,12 +1192,17 @@ export function RescueFlow() {
       if (normalized.missingFacts.length)
         throw new Error("请先补齐页面中标出的必要信息，再生成方案。");
       const confirmed = confirmParsedInput(normalized);
-      const confirmedDraft = confirmedDraftFromParsed(
-        activeSession.snapshot,
-        confirmed,
-        confirmed.closedPlaceIds,
-        removedLockedIds,
-      );
+      const destination = normalized.destinationDraft?.trim();
+      if (!destination) throw new Error("请填写所在城市。");
+      const confirmedDraft = ConfirmedDraftSchema.parse({
+        ...confirmedDraftFromParsed(
+          activeSession.snapshot,
+          confirmed,
+          confirmed.closedPlaceIds,
+          removedLockedIds,
+        ),
+        destination,
+      });
       const savedConfirmation = saveSession({
         ...loadSession(),
         rawInput: confirmed.rawText,
@@ -1661,9 +1692,18 @@ export function RescueFlow() {
           </div>
           <div className="field">
             <label htmlFor="rescue-city">所在城市（必填，高德服务适用于中国境内）</label>
-            <input id="rescue-city" defaultValue={activeSession.snapshot.trip.destination} onBlur={event=>{
-              if(event.target.value.trim())setSession(saveSession({...loadSession(),snapshot:{...loadSession().snapshot,trip:{...loadSession().snapshot.trip,destination:event.target.value.trim()}}}));
-            }}/>
+            <input
+              id="rescue-city"
+              required
+              maxLength={80}
+              value={activeParsed.destinationDraft ?? ""}
+              onChange={(event) =>
+                updateParsed({
+                  ...activeParsed,
+                  destinationDraft: event.target.value,
+                })
+              }
+            />
           </div>
           <div className="field">
             <label htmlFor="rescue-mode">愿意使用的交通方式（必填）</label>
@@ -1681,7 +1721,7 @@ export function RescueFlow() {
               events={availableEvents.filter((event) => event.locked)}
             />
           ) : (
-            <p className="muted">{activeParsed.activityMentions.some(x=>x.locked==="yes")?`已识别待确认预约：${activeParsed.activityMentions.filter(x=>x.locked==="yes").map(x=>`${x.startTime??"时间待补充"} ${x.name}`).join("；")}。补齐信息后会保留。`:"暂未识别到固定安排。"}</p>
+            <p className="muted">{activeParsed.activityMentions.some(x=>x.locked!=="no")?`已识别需保护的预约：${activeParsed.activityMentions.filter(x=>x.locked!=="no").map(x=>`${x.startTime??"时间待补充"} ${x.name}`).join("；")}。固定性不明确时也会先按固定安排保护。`:"暂未识别到固定安排。"}</p>
           )}
           {parsed.disruptions.some((item) => item.kind === "closed") && (
             <fieldset className="field" style={{ marginTop: 18 }}>

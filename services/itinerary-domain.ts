@@ -8,6 +8,7 @@ import {
   type ItineraryEvent,
 } from "../types";
 import { confirmedOriginals, legacyActivitiesFromFacts, reconcileActivityFacts } from "./activity-facts";
+import { legacyProtectionPolicy, protectionPolicyForActivity, stationLevelLocation } from "./protection-policy";
 
 function activityNameKey(value: string) {
   return value
@@ -64,7 +65,19 @@ export function parsedToEvent(item: ParsedUserInput["existingPlans"][number], sn
   );
   const timing = materializeParsedTime(item, existing);
   const locked = Boolean(existing?.locked || item.locked);
-  const changedLocation = Boolean(existing && item.location.trim() !== existing.location.trim());
+  const normalizedLocation = existing ? item.location : stationLevelLocation(item.location).location;
+  const protectionPolicy = existing?.protectionPolicy ??
+    (existing ? legacyProtectionPolicy(existing) : undefined) ??
+    (locked ? item.protectionPolicy ?? protectionPolicyForActivity({
+      name: item.name,
+      location: normalizedLocation,
+      sourceText: item.name,
+      startTime: item.startTime,
+      endTime: item.endTime,
+      durationMinutes: item.durationMinutes,
+      commitment: "fixed",
+    }) : undefined);
+  const changedLocation = Boolean(existing && normalizedLocation.trim() !== existing.location.trim());
   return {
     ...(existing ?? {
       id: `event-${item.id}`,
@@ -83,8 +96,9 @@ export function parsedToEvent(item: ParsedUserInput["existingPlans"][number], sn
     startTime: item.startTime,
     endTime: timing.endTime,
     durationSource: timing.durationSource,
-    location: item.location,
+    location: normalizedLocation,
     locked,
+    protectionPolicy,
     status: locked ? "locked" : existing?.status === "completed" ? "completed" : "planned",
   };
 }
@@ -164,7 +178,7 @@ export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput):
       endTime: mention.endTime,
       durationMinutes: mention.durationMinutes,
       location: mention.location.trim(),
-      locked: mention.locked === "yes",
+      locked: mention.locked !== "no",
       source: "user",
     });
   }
@@ -187,6 +201,7 @@ export function hydrateParsedPlans(snapshot: Snapshot, parsed: ParsedUserInput):
       durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
       location: event.location,
       locked: event.locked,
+      protectionPolicy: event.protectionPolicy,
       source: "user",
     });
   }
@@ -241,6 +256,7 @@ export function confirmedDraftFromParsed(
         durationSource: event.durationSource ?? "unknown",
         location: event.location,
         locked: event.locked,
+        protectionPolicy: event.protectionPolicy,
       })),
     activityMentions: hydrated.activityMentions,
     disruptions: hydrated.disruptions,

@@ -41,6 +41,44 @@ export const StateSourcesSchema = z.object({
   energyLevel: FactSourceSchema,
   disruption: FactSourceSchema,
 });
+export const ProtectedFieldSchema = z.enum([
+  "name",
+  "startTime",
+  "endTime",
+  "duration",
+  "location",
+]);
+export const ProtectionPolicySchema = z.object({
+  source: z.enum(["confirmed", "possible", "legacy"]),
+  kind: z.enum([
+    "restaurant_reservation",
+    "ticketed_event",
+    "meeting",
+    "transport",
+    "rebookable",
+    "generic",
+  ]),
+  lockedFields: z.array(ProtectedFieldSchema).max(5),
+  timeAnchor: z.enum(["starts_at", "arrive_by", "departs_at"]),
+  durationPolicy: z.object({
+    mode: z.enum(["fixed", "suggested", "unknown"]),
+    defaultMinutes: z.number().int().positive().max(1440).nullable(),
+    minMinutes: z.number().int().positive().max(1440).nullable(),
+    maxMinutes: z.number().int().positive().max(1440).nullable(),
+  }),
+  allowedStartTimes: z.array(TimeSchema).max(12).default([]),
+  locationGranularity: z.enum(["venue", "station", "transport_hub"]),
+  transportKind: z.enum(["train", "flight"]).nullable().default(null),
+  arrivalBuffer: z
+    .object({
+      mode: z.literal("dynamic"),
+      recommendedMinutes: z.number().int().nonnegative().max(360),
+      basis: z.string().min(1).max(200),
+    })
+    .nullable()
+    .default(null),
+  locationNote: z.string().max(160).nullable().default(null),
+});
 export const EventSchema = z.object({
   id: z.string().min(1),
   placeId: z.string().min(1),
@@ -54,6 +92,7 @@ export const EventSchema = z.object({
   location: z.string(),
   status: z.enum(["completed", "missed", "planned", "locked"]),
   locked: z.boolean(),
+  protectionPolicy: ProtectionPolicySchema.optional(),
   indoorOutdoor: z.enum(["indoor", "outdoor", "mixed"]),
   openingTime: TimeSchema.nullable(),
   closingTime: TimeSchema.nullable(),
@@ -96,6 +135,7 @@ export const ActivityFactSchema = z.object({
   startTimeSource: z.enum(["user", "snapshot", "not_provided"]),
   durationMinutes: z.number().int().positive().max(1440).nullable(),
   commitment: z.enum(["fixed", "flexible", "uncertain"]),
+  protectionPolicy: ProtectionPolicySchema.optional(),
   sourceText: z.string().max(500).nullable(),
 });
 export const ReplanningRequestSchema = z.object({
@@ -251,6 +291,7 @@ export const ParsedPlanItemSchema = z.object({
   durationMinutes: z.number().int().positive().max(1440).nullable().default(null),
   location: z.string(),
   locked: z.boolean(),
+  protectionPolicy: ProtectionPolicySchema.optional(),
   source: FactSourceSchema,
 });
 export const ParsedDisruptionSchema = z.object({
@@ -269,6 +310,7 @@ export const ParsedContextSchema = TripStateSchema.partial().extend({
 });
 export const ParsedUserInputSchema = z.object({
   rawText: z.string().max(4000),
+  destinationDraft: z.string().max(80).optional(),
   intent: UnifiedIntentSchema,
   existingPlans: z.array(ParsedPlanItemSchema).max(30),
   activityFacts: z.array(ActivityFactSchema).max(30).default([]),
@@ -386,6 +428,7 @@ export type Trip = z.infer<typeof TripSchema>;
 export type TripState = z.infer<typeof TripStateSchema>;
 export type StateSources = z.infer<typeof StateSourcesSchema>;
 export type ItineraryEvent = z.infer<typeof EventSchema>;
+export type ProtectionPolicy = z.infer<typeof ProtectionPolicySchema>;
 export type Place = z.infer<typeof PlaceSchema>;
 export type ReplanningRequest = z.infer<typeof ReplanningRequestSchema>;
 export type ProposedPlan = z.infer<typeof ProposedPlanSchema>;
@@ -546,6 +589,25 @@ export const ConditionalAdviceSchema = z.object({
   suggestions: z.array(z.string().min(1)).min(1).max(30),
   warning: z.string().min(1),
 });
+export const ItineraryDraftItemSchema = ParsedPlanItemSchema.extend({
+  name: z.string().max(160),
+  startTime: TimeSchema.or(z.literal("")),
+  location: z.string().max(160),
+});
+export const ItineraryDraftSchema = z.object({
+  baseRevision: z.number().int().min(0),
+  profile: UserProfileSchema,
+  destination: z.string().max(80),
+  currentDate: DateSchema.or(z.literal("")),
+  currentTime: TimeSchema.or(z.literal("")),
+  currentLocation: z.string().max(100),
+  stateCapturedAt: z.string().datetime(),
+  currentTimeSource: FactSourceSchema,
+  currentLocationSource: FactSourceSchema,
+  rawInput: z.string().max(4000),
+  items: z.array(ItineraryDraftItemSchema).max(30),
+  updatedAt: z.string().datetime(),
+});
 export const RealSessionSchema = z.object({
   schemaVersion: z.literal(3),
   experienceMode: z.literal("real"),
@@ -557,10 +619,12 @@ export const RealSessionSchema = z.object({
   pendingPlan: PendingPlanSchema.nullable(),
   pendingInput: PendingInputSchema.nullable().default(null),
   conditionalAdvice: ConditionalAdviceSchema.nullable().default(null),
+  itineraryDraft: ItineraryDraftSchema.nullable().default(null),
   resolutionState: ResolutionStateSchema,
   updatedAt: z.string().datetime(),
 });
 export type PendingPlan = z.infer<typeof PendingPlanSchema>;
 export type ConditionalAdvice = z.infer<typeof ConditionalAdviceSchema>;
 export type ResolutionState = z.infer<typeof ResolutionStateSchema>;
+export type ItineraryDraft = z.infer<typeof ItineraryDraftSchema>;
 export type RealSession = z.infer<typeof RealSessionSchema>;

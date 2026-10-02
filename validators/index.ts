@@ -3,14 +3,14 @@ import {
   type AgentContext,
   type Violation,
 } from "../types";
-import { lockedEventValidator } from "./locked-event-validator";
+import { protectionPolicyValidator } from "./protection-policy-validator";
 import { timeConflictValidator } from "./time-conflict-validator";
 import { travelTimeValidator } from "./travel-time-validator";
 import { openingHoursValidator } from "./opening-hours-validator";
 import { pastEventValidator } from "./past-event-validator";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes as minutesOf } from "../lib/time";
 export const validators = [
-  lockedEventValidator,
+  protectionPolicyValidator,
   timeConflictValidator,
   travelTimeValidator,
   openingHoursValidator,

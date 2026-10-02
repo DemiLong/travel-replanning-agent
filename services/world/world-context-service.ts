@@ -5,7 +5,7 @@ import { AmapRoutesService, MAX_ROUTE_PAIRS } from "./amap-routes-service";
 import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
 import { requireAmapKey, WorldServiceError } from "./amap-client";
-import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes } from "./context-resolution";
+import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes, stationLevelCandidates } from "./context-resolution";
 
 const CITY_EVIDENCE_CONCURRENCY=3;
 async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promise<R>):Promise<R[]>{
@@ -111,7 +111,7 @@ export class WorldContextService {
           missing("user",field,`“${query}”可能对应多个分店，请补充所在城市、道路或具体分店。`);return null;
         }
         const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity,signal);
-        const eligibleCandidates=response.candidates.filter(p=>cityCompatible(p,searchCity,query));
+        const eligibleCandidates=stationLevelCandidates(response.candidates.filter(p=>cityCompatible(p,searchCity,query)),query);
         candidatePlaceIds[field]=eligibleCandidates.map(p=>p.poiId);
         if(selected) {
           const selectedCandidate=eligibleCandidates.find(p=>p.poiId===selected);

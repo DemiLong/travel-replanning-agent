@@ -1,4 +1,5 @@
 import type { AgentContext, AgentResult, ProposedPlan, Violation } from "../types";
+import { protectionSummary } from "./protection-policy";
 
 const validationChecks: Array<[Violation["code"], string]> = [
   ["locked_event", "固定安排"],
@@ -27,7 +28,7 @@ export function decisionTrace(
   ];
   const decisions: NonNullable<AgentResult["decisionTrace"]>["decisions"] = plan ? [
     ...(context.removedLockedIds ?? []).map((id) => ({ eventId: id, decision: "按用户明确指令移除固定安排", reason: "删除动作来自用户确认，不是合并时静默丢失。", evidence: ["用户在确认界面明确确认删除。"] })),
-    ...context.lockedEvents.map((event) => ({ eventId: event.id, decision: `保留 ${event.name}`, reason: "这是固定安排，系统不会自动删除或改动时间地点。", evidence: plan.events.some((next) => next.id === event.id && next.startTime === event.startTime && next.location === event.location) ? [`新行程保留在 ${event.startTime}，地点为 ${event.location}。`] : ["固定安排未被完整保留。"] })),
+    ...context.lockedEvents.map((event) => ({ eventId: event.id, decision: `保留 ${event.name}`, reason: protectionSummary(event), evidence: plan.events.some((next) => next.id === event.id && next.startTime === event.startTime && next.location === event.location) ? [`新行程保留在 ${event.startTime}，地点为 ${event.location}。`] : ["受保护字段未被完整保留。"] })),
     ...plan.removedEvents.map((change) => ({ eventId: change.eventId, decision: `移除 ${change.name}`, reason: change.reason, evidence: ["该活动未出现在新的可执行行程中。", `约束：${change.constraint}。`] })),
     ...plan.movedEvents.map((change) => ({ eventId: change.eventId, decision: `建议改到 ${change.suggestedDate} ${change.suggestedStart}`, reason: change.reason, evidence: [change.note, `约束：${change.constraint}。`] })),
     ...plan.events.filter((event) => context.existingItinerary.some((old) => old.id === event.id && !old.locked && (old.startTime !== event.startTime || old.endTime !== event.endTime))).map((event) => ({ eventId: event.id, decision: `调整 ${event.name} 到 ${event.startTime}–${event.endTime}`, reason: event.reason, evidence: [`输入变化：${context.disruption.freeText}`, `路线校验：${violations.some((item) => item.code === "travel_time" && item.eventId === event.id) ? "未通过" : "通过"}`] })),
