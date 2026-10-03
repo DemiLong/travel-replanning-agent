@@ -7,7 +7,7 @@ import { ActivityCoverageError, DeepSeekSemanticParser, normalizeSemanticExtract
 import { confirmedDraftFromParsed } from "../../services/itinerary-domain.ts";
 import { mergeConfirmedDraft, runAgentAssist } from "../../agents/agent-orchestrator.ts";
 import { validatePlan } from "../../validators/index.ts";
-import { browserSessionRepository, realSessionKey } from "../../services/trip-service.ts";
+import { loadSession, realSessionKey } from "../../services/trip-service.ts";
 import { amapGet, WorldServiceError } from "../../services/world/amap-client.ts";
 import { cityCompatible, uniquePlace } from "../../services/world/context-resolution.ts";
 
@@ -249,11 +249,11 @@ await check("6. 新提交请求排除旧草稿和答案，计数归零且 revisi
     updatedAt: new Date().toISOString() });
   const storage = new Map([[realSessionKey, JSON.stringify(saved)]]);
   globalThis.localStorage = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) };
-  const restored = browserSessionRepository.load();
+  const restored = loadSession();
   assert.equal(restored.pendingInput, null);
   assert.equal(restored.snapshot.revision, 5);
   storage.set(realSessionKey, JSON.stringify({ ...saved, snapshot: base, pendingInput: { ...saved.pendingInput, baseRevision: base.revision } }));
-  const legacyReview = browserSessionRepository.load();
+  const legacyReview = loadSession();
   assert.equal(legacyReview.pendingInput, null);
   assert.equal(legacyReview.snapshot.revision, base.revision);
   assert.equal(legacyReview.rawInput, raw);

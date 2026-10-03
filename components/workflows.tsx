@@ -32,15 +32,14 @@ import { confirmParsedInput, confirmedDraftFromParsed, hydrateParsedPlans, merge
 import { addMinutesWithinDay } from "@/lib/time";
 import { summarizeVerifiedPlan, validatePlanExplanation } from "@/services/plan-narrative";
 import {
-  commitItineraryDraft,
+  commitSnapshot,
   createItineraryDraft,
   loadSession,
   logEvent,
   saveFlowDraft,
   saveItineraryDraft,
   savePendingPlan,
-  saveSession,
-  saveTrip,
+  updateSession,
 } from "@/services/trip-service";
 import { authenticatedJsonFetch } from "@/services/api-client";
 import {
@@ -363,7 +362,7 @@ export function HomeFlow() {
     requestId.current += 1;
     controllerRef.current?.abort();
     const latest = loadSession();
-    const clean = saveSession({ ...latest, rawInput: raw, parsedInput: null, pendingInput: null, pendingPlan: null, conditionalAdvice: null,
+    const clean = updateSession({ rawInput: raw, parsedInput: null, pendingInput: null, pendingPlan: null, conditionalAdvice: null,
       flowStage: latest.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
       resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
     setSession(clean);
@@ -388,7 +387,7 @@ export function HomeFlow() {
     if (activeSession.conditionalAdvice) {
       const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
       setResolutionState(cleanResolutionState);
-      setSession(saveSession({ ...loadSession(), conditionalAdvice: null, parsedInput: null, resolutionState: cleanResolutionState }));
+      setSession(updateSession({ conditionalAdvice: null, parsedInput: null, resolutionState: cleanResolutionState }));
     }
   }
 
@@ -404,7 +403,7 @@ export function HomeFlow() {
       return;
     }
     const requestSession = fresh && activeSession.pendingInput ? abandonRound() : loadSession();
-    if (fresh && requestSession.pendingPlan) saveSession({ ...requestSession, pendingPlan: null,
+    if (fresh && requestSession.pendingPlan) updateSession({ pendingPlan: null,
       flowStage: requestSession.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY" });
     const currentRequestId = ++requestId.current;
     setBusy(true);
@@ -434,7 +433,7 @@ export function HomeFlow() {
         setConfirmedDraft(body.confirmedDraft);
         setResolutionState(body.resolutionState);
         setFollowUp("");
-        const updated = saveSession({ ...requestSession, rawInput: raw, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), flowStage: "NEEDS_INPUT", resolutionState: body.resolutionState, pendingPlan: null,
+        const updated = updateSession({ rawInput: raw, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), flowStage: "NEEDS_INPUT", resolutionState: body.resolutionState, pendingPlan: null,
           pendingInput: { stage: "follow_up", parsedInput: body.parsedInput, confirmedDraft: body.confirmedDraft,
             missingFact: body.missingFact, questionRawText: raw, baseRevision: requestSession.snapshot.revision } });
         setSession(updated);
@@ -443,7 +442,7 @@ export function HomeFlow() {
       if (body.status === "CONDITIONAL" && body.advice && body.parsedInput) {
         setMissingFact(null);
         setConfirmedDraft(null);
-        setSession(saveSession({ ...requestSession, rawInput: raw, parsedInput: body.parsedInput,
+        setSession(updateSession({ rawInput: raw, parsedInput: body.parsedInput,
           flowStage: "NO_SAFE_PLAN", pendingPlan: null, pendingInput: null,
           conditionalAdvice: body.advice, resolutionState: body.resolutionState ?? requestSession.resolutionState }));
         return;
@@ -458,7 +457,7 @@ export function HomeFlow() {
         setConfirmedDraft(null);
         setFollowUp("");
         setResolutionState(cleanResolutionState);
-        setSession(saveSession({ ...requestSession, rawInput: raw, flowStage, resolutionState: cleanResolutionState,
+        setSession(updateSession({ rawInput: raw, flowStage, resolutionState: cleanResolutionState,
           pendingInput: null, pendingPlan: null, conditionalAdvice: null }));
         throw new Error(body.message ?? "真实信息暂时不可用，请稍后重试。");
       }
@@ -467,7 +466,7 @@ export function HomeFlow() {
       const base = SnapshotSchema.parse(body.base);
       const request = ReplanningRequestSchema.parse(body.request);
       savePendingPlan({ result, base, request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
-      saveSession({ ...loadSession(), pendingInput: null, conditionalAdvice: null, resolutionState: body.resolutionState ?? requestSession.resolutionState });
+      updateSession({ pendingInput: null, conditionalAdvice: null, resolutionState: body.resolutionState ?? requestSession.resolutionState });
       window.location.assign("/result");
     } catch (cause) {
       if (currentRequestId === requestId.current && (cause as Error)?.name !== "AbortError") setError(errorText(cause));
@@ -669,7 +668,16 @@ export function OnboardingFlow() {
         itinerary: mergePlans({ ...editableSnapshot, itinerary: [] }, parsed),
         revision: activeDraft.baseRevision + 1,
       });
-      const updated = commitItineraryDraft(next, activeDraft.baseRevision);
+      commitSnapshot(next, activeDraft.baseRevision);
+      const updated = updateSession({
+        itineraryDraft: null,
+        rawInput: "",
+        parsedInput: null,
+        pendingInput: null,
+        pendingPlan: null,
+        conditionalAdvice: null,
+        flowStage: next.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
+      });
       setSession(updated);
       await logEvent("trip_created", { tripId: next.trip.id, mode: "real" });
       window.location.assign("/trip");
@@ -1167,10 +1175,10 @@ export function RescueFlow() {
         itinerary: mergePlans(activeSession.snapshot, normalized),
         revision: activeSession.snapshot.revision + 1,
       });
-      await saveTrip(next, activeSession.snapshot.revision);
-      saveSession({
-        ...loadSession(),
-        snapshot: { ...next, mode: "user" },
+      commitSnapshot(next, activeSession.snapshot.revision);
+      updateSession({
+        itineraryDraft: null,
+        pendingInput: null,
         flowStage: "HAS_ITINERARY",
         rawInput: "",
         parsedInput: null,
@@ -1205,8 +1213,7 @@ export function RescueFlow() {
         ),
         destination,
       });
-      const savedConfirmation = saveSession({
-        ...loadSession(),
+      const savedConfirmation = updateSession({
         rawInput: confirmed.rawText,
         parsedInput: confirmed,
         flowStage: "NEEDS_INPUT",
@@ -1232,7 +1239,7 @@ export function RescueFlow() {
       const result = AgentResultSchema.parse(body.result);
       const request = ReplanningRequestSchema.parse(body.request);
       savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
-      if (body.resolutionState) saveSession({ ...loadSession(), resolutionState: body.resolutionState });
+      if (body.resolutionState) updateSession({ resolutionState: body.resolutionState });
       window.location.assign("/result");
     } catch (cause) {
       setError(errorText(cause));
@@ -1828,7 +1835,6 @@ export function ResultFlow() {
   const plan = result.plan && !validatePlanExplanation(result.context, result.plan).length
     ? { ...result.plan, summary: summarizeVerifiedPlan(result.context, result.plan) } : null;
   const impact = pending.impactAnalysis ?? result.impactAnalysis;
-  const activeSession = session;
   const currentParsed = pending.parsedInput ? ParsedUserInputSchema.parse(pending.parsedInput) : null;
 
   async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
@@ -1848,7 +1854,7 @@ export function ResultFlow() {
     setBusy(true); setError("");
     try {
       if (option.action === "edit_locked_arrangement") {
-        setSession(saveSession({ ...activeSession, flowStage: "NEEDS_INPUT", pendingPlan: null }));
+        setSession(updateSession({ flowStage: "NEEDS_INPUT", pendingPlan: null }));
         window.location.assign("/rescue");
         return;
       }
@@ -1863,14 +1869,13 @@ export function ResultFlow() {
     if (!candidate.plan || !candidate.feasible || validatePlanExplanation(result.context, candidate.plan).length) return;
     const verifiedPlan = { ...candidate.plan, summary: summarizeVerifiedPlan(result.context, candidate.plan) };
     const nextResult = AgentResultSchema.parse({ ...result, id: result.id, ok: true, plan: verifiedPlan, message: candidate.tradeOff });
-    const updated = saveSession({ ...activeSession, pendingPlan: { base: activePending.base, request: activePending.request, accepted: false, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
+    const updated = updateSession({ pendingPlan: { base: activePending.base, request: activePending.request, accepted: false, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
     setSession(updated);
   }
 
   function reviseDescription() {
-    const latest = loadSession();
     const rawInput = activePending.parsedInput?.rawText ?? request.freeText;
-    const updated = saveSession({ ...latest, rawInput, parsedInput: null, pendingInput: null,
+    const updated = updateSession({ rawInput, parsedInput: null, pendingInput: null,
       flowStage: "PLAN_READY",
       resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
     setSession(updated);
@@ -1897,8 +1902,8 @@ export function ResultFlow() {
       if (!current.pendingPlan || current.flowStage !== "PLAN_READY" || current.pendingPlan.result.id !== result.id) throw new Error("当前方案已失效，请重新分析。");
       if (current.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
       const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...base.itinerary.filter(event => event.status === "completed"), ...plan.events], revision: current.snapshot.revision + 1 });
-      await saveTrip(next, current.snapshot.revision);
-      const updated = saveSession({ ...loadSession(), snapshot: { ...next, mode: "user" }, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null });
+      commitSnapshot(next, current.snapshot.revision);
+      const updated = updateSession({ itineraryDraft: null, pendingInput: null, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null });
       setSession(updated); await logEvent("replan_accepted", { planId: result.id, mode: "real" }); setNotice("方案已接受"); window.location.assign("/trip");
     } catch (cause) {
       if ((cause as Error)?.name !== "AbortError") setError(errorText(cause));

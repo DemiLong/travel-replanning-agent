@@ -129,6 +129,80 @@ test("首次创建只保存单日正式行程", async ({ page }) => {
   await page.getByRole("button", { name: /开始今天的行程/ }).click();
   await expect(page).toHaveURL(/\/trip$/);
   await expect(page.getByText("城市博物馆").first()).toBeVisible();
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(1);
+  expect(stored.flowStage).toBe("HAS_ITINERARY");
+  expect(stored.itineraryDraft).toBeNull();
+  expect(stored.rawInput).toBe("");
+  expect(stored.parsedInput).toBeNull();
+  expect(stored.pendingInput).toBeNull();
+  expect(stored.pendingPlan).toBeNull();
+  expect(stored.conditionalAdvice).toBeNull();
+});
+
+test("仅保存行程保持原有清理范围和 flowStage", async ({ page }) => {
+  const conditionalAdvice = { heading: "备用建议", suggestions: ["稍后再试"], warning: "当前仅保存行程" };
+  const editable = {
+    ...ordinarySession(),
+    flowStage: "NEEDS_INPUT",
+    rawInput: "保留城市博物馆安排",
+    parsedInput: {
+      ...parsedInput("保留城市博物馆安排"),
+      existingPlans: [{ id: event.id, name: event.name, startTime: event.startTime, endTime: event.endTime, durationMinutes: 60, location: event.location, locked: true, source: "user" }],
+      disruptions: [],
+    },
+    conditionalAdvice,
+  };
+  await seed(page, editable);
+  await page.goto("/rescue");
+  await page.getByRole("button", { name: "先保存行程" }).click();
+  await expect(page).toHaveURL(/\/trip$/);
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(2);
+  expect(stored.flowStage).toBe("HAS_ITINERARY");
+  expect(stored.itineraryDraft).toBeNull();
+  expect(stored.pendingInput).toBeNull();
+  expect(stored.rawInput).toBe("");
+  expect(stored.parsedInput).toBeNull();
+  expect(stored.pendingPlan).toBeNull();
+  expect(stored.conditionalAdvice).toEqual(conditionalAdvice);
+});
+
+test("两个标签页基于同一 revision 保存时后提交者冲突", async ({ page, context }) => {
+  await context.route("**/api/parse", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...parsedInput("10点去城市博物馆"),
+        intent: "create",
+        existingPlans: [{ id: "created", name: "城市博物馆", startTime: "10:00", endTime: "11:00", durationMinutes: 60, location: "城市博物馆", locked: false, source: "user" }],
+        disruptions: [],
+        context: { ...state, currentLocation: "人民广场" },
+        contextSources: { ...stateSources, disruption: "unset" },
+        status: "draft",
+      }),
+    });
+  });
+  await seed(page);
+  await page.goto("/onboarding");
+  const secondPage = await context.newPage();
+  await secondPage.goto("/onboarding");
+
+  for (const candidate of [page, secondPage]) {
+    await candidate.getByLabel("所在城市").fill("上海");
+    await candidate.getByLabel("现在在哪儿").fill("人民广场");
+    await candidate.getByLabel("你今天想怎么安排？").fill("10点去城市博物馆");
+    await candidate.getByRole("button", { name: "整理这份行程" }).click();
+    await expect(candidate.locator('input[id^="name-"]')).toHaveValue("城市博物馆");
+  }
+
+  await page.getByRole("button", { name: /开始今天的行程/ }).click();
+  await expect(page).toHaveURL(/\/trip$/);
+  await secondPage.getByRole("button", { name: /开始今天的行程/ }).click();
+  await expect(secondPage.locator(".error-box")).toContainText("行程已在其他页面更新");
+  const stored = await secondPage.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(2);
 });
 
 test("coveredYou 品牌页面与既有会话键保持兼容", async ({ page }) => {
@@ -449,7 +523,8 @@ test("主动取消复验保持静默并保留待接受方案", async ({ page }) 
 });
 
 test("接受方案前复验成功后才更新 revision", async ({ page }) => {
-  await seed(page, pendingPlanSession());
+  const conditionalAdvice = { heading: "旧建议", suggestions: ["保留用于行为兼容"], warning: "接受后仍保留" };
+  await seed(page, { ...pendingPlanSession(), conditionalAdvice });
   await page.route("**/api/validate", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, violations: [] }) }));
   await page.goto("/result");
   const acceptButton = page.getByRole("button", { name: /接受方案/ });
@@ -458,5 +533,29 @@ test("接受方案前复验成功后才更新 revision", async ({ page }) => {
   await expect(page).toHaveURL(/\/trip$/);
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   expect(stored.snapshot.revision).toBe(2);
+  expect(stored.flowStage).toBe("HAS_ITINERARY");
+  expect(stored.itineraryDraft).toBeNull();
+  expect(stored.pendingInput).toBeNull();
+  expect(stored.rawInput).toBe("");
+  expect(stored.parsedInput).toBeNull();
   expect(stored.pendingPlan).toBeNull();
+  expect(stored.lastDisruption).toEqual(pendingPlanSession().lastDisruption);
+  expect(stored.conditionalAdvice).toEqual(conditionalAdvice);
+});
+
+test("过期 pending plan 不能接受", async ({ page }) => {
+  const stale = pendingPlanSession();
+  await seed(page, { ...stale, snapshot: { ...stale.snapshot, revision: 2 } });
+  let validateCalls = 0;
+  await page.route("**/api/validate", async (route) => {
+    validateCalls += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, violations: [] }) });
+  });
+  await page.goto("/result");
+  await page.getByRole("button", { name: /接受方案/ }).click();
+  await expect(page.locator(".error-box")).toContainText("原行程已发生变化");
+  expect(validateCalls).toBe(0);
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(2);
+  expect(stored.pendingPlan).not.toBeNull();
 });

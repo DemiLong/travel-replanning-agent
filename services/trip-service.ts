@@ -144,12 +144,12 @@ function migrateLegacySession(): RealSession {
   return session;
 }
 
-export interface SessionRepository {
+interface SessionRepository {
   load(): RealSession;
   save(session: RealSession): RealSession;
 }
 
-export const browserSessionRepository: SessionRepository = {
+const browserSessionRepository: SessionRepository = {
   load() {
     const raw = localStorage.getItem(realSessionKey);
     if (!raw) {
@@ -159,7 +159,7 @@ export const browserSessionRepository: SessionRepository = {
         const migrated = migrateV2Session(legacySession);
         if (migrated) {
           localStorage.setItem(realSessionKey, JSON.stringify(migrated));
-          return refreshSessionClock(migrated);
+          return migrated;
         }
       }
       return migrateLegacySession();
@@ -176,9 +176,9 @@ export const browserSessionRepository: SessionRepository = {
           pendingInput: null, parsedInput: null, pendingPlan: null, flowStage: session.snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
           resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } });
         localStorage.setItem(realSessionKey, JSON.stringify(migrated));
-        return refreshSessionClock(migrated);
+        return migrated;
       }
-      return refreshSessionClock(session);
+      return session;
     } catch {
       return migrateLegacySession();
     }
@@ -196,10 +196,10 @@ export const browserSessionRepository: SessionRepository = {
 };
 
 export function loadSession() {
-  return browserSessionRepository.load();
+  return refreshSessionClock(browserSessionRepository.load());
 }
 
-export function saveSession(value: RealSession) {
+function persistSession(value: RealSession) {
   return browserSessionRepository.save(value);
 }
 
@@ -224,41 +224,35 @@ export function saveItineraryDraft(
   value: ItineraryDraft,
   parsedInput: ParsedUserInput | null = null,
 ) {
-  const session = loadSession();
+  const session = browserSessionRepository.load();
   const itineraryDraft = ItineraryDraftSchema.parse({
     ...value,
     updatedAt: new Date().toISOString(),
   });
   if (session.snapshot.revision !== itineraryDraft.baseRevision)
     throw new Error("行程已在其他页面更新，请刷新后重新编辑。");
-  return saveSession({ ...session, itineraryDraft, parsedInput });
+  return persistSession({ ...session, itineraryDraft, parsedInput });
 }
 
-export function commitItineraryDraft(
-  value: Snapshot,
+export function commitSnapshot(
+  next: Snapshot,
   expectedRevision: number,
-) {
-  const snapshot = SnapshotSchema.parse({ ...value, mode: "user" });
-  const session = loadSession();
+): RealSession {
+  const snapshot = SnapshotSchema.parse({ ...next, mode: "user" });
+  const session = browserSessionRepository.load();
   if (session.snapshot.revision !== expectedRevision)
     throw new Error("另一个标签页修改了你的行程，请刷新后再保存。");
   if (snapshot.revision !== expectedRevision + 1)
     throw new Error("行程版本不连续，请刷新后再保存。");
-  return saveSession({
-    ...session,
-    snapshot: { ...snapshot, mode: "user" },
-    itineraryDraft: null,
-    rawInput: "",
-    parsedInput: null,
-    pendingInput: null,
-    pendingPlan: null,
-    conditionalAdvice: null,
-    flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
-  });
+  return persistSession({ ...session, snapshot: { ...snapshot, mode: "user" } });
 }
 
-export function updateSession(patch: Partial<RealSession>) {
-  return saveSession({ ...loadSession(), ...patch });
+export type SessionPatch = Partial<Omit<RealSession, "snapshot">> & {
+  snapshot?: never;
+};
+
+export function updateSession(patch: SessionPatch): RealSession {
+  return persistSession({ ...browserSessionRepository.load(), ...patch });
 }
 
 export function saveFlowDraft(
@@ -283,8 +277,7 @@ export function savePendingPlan(
 
 export function clearPendingPlan(flowStage?: FlowStage) {
   const session = loadSession();
-  return saveSession({
-    ...session,
+  return updateSession({
     pendingPlan: null,
     flowStage:
       flowStage ??
@@ -297,23 +290,6 @@ export function localTrip(): Snapshot {
 }
 export async function loadTrip() {
   return localTrip();
-}
-export async function saveTrip(value: Snapshot, expectedRevision?: number) {
-  const snapshot = SnapshotSchema.parse({ ...value, mode: "user" });
-  const session = loadSession();
-  if (
-    expectedRevision !== undefined &&
-    session.snapshot.revision !== expectedRevision
-  )
-    throw new Error("另一个标签页修改了你的行程，请刷新后再保存。");
-  saveSession({
-    ...session,
-    snapshot: { ...snapshot, mode: "user" },
-    itineraryDraft: null,
-    pendingInput: null,
-    flowStage: snapshot.itinerary.length ? "HAS_ITINERARY" : "NO_ITINERARY",
-  });
-  return snapshot;
 }
 export type AnalyticsName =
   | "trip_created"
