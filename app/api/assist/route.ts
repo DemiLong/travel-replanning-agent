@@ -6,11 +6,12 @@ import {
 } from "@/services/failures";
 import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
 import { authorizeApiRequest } from "@/services/server-auth";
+import { REQUEST_DEADLINE_MS } from "@/types";
 
 export const maxDuration = 35;
 
 export async function POST(request: Request) {
-  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: 30000 });
+  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: REQUEST_DEADLINE_MS });
   const headers = { "Cache-Control": "no-store", "X-Trace-Id": execution.traceId };
 
   try {

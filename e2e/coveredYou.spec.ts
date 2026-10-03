@@ -217,6 +217,76 @@ test("coveredYou 品牌页面与既有会话键保持兼容", async ({ page }) =
   expect(stored.snapshot.itinerary[0].id).toBe("museum");
 });
 
+test("原始输入统一显示剩余字数并在提交前阻止超限内容", async ({ page }) => {
+  await seed(page);
+  let assistCalls = 0;
+  await page.route("**/api/assist", async (route) => {
+    assistCalls += 1;
+    await route.abort();
+  });
+  await page.goto("/");
+
+  const homeInput = page.getByLabel("描述今天的安排和变化");
+  await expect(homeInput).toHaveAttribute("maxlength", "4000");
+  await expect(page.locator("#home-input-limit")).toHaveText("还可输入 4000 个字");
+  const atLimit = "行".repeat(4000);
+  await homeInput.fill(atLimit);
+  await expect(page.locator("#home-input-limit")).toHaveText("还可输入 0 个字");
+
+  const overLimit = `${atLimit}程`;
+  await homeInput.evaluate((element, value) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, overLimit);
+  await expect(homeInput).toHaveValue(overLimit);
+  await page.getByRole("button", { name: "帮我重新安排今天" }).click();
+  await expect(page.locator(".error-box")).toContainText("输入最多 4000 个字，请删减后再提交。");
+  expect(assistCalls).toBe(0);
+
+  await page.goto("/onboarding");
+  const itineraryInput = page.getByLabel("你今天想怎么安排？");
+  await expect(itineraryInput).toHaveAttribute("maxlength", "4000");
+  await expect(itineraryInput).toHaveValue(atLimit);
+  await expect(page.locator("#itinerary-input-limit")).toHaveText("还可输入 0 个字");
+});
+
+test("rescue 修改原文和补充方案使用统一长度协议", async ({ page }) => {
+  const baseRaw = "行".repeat(3998);
+  const emptySnapshot = { ...ordinarySession().snapshot, itinerary: [] };
+  await seed(page, {
+    ...ordinarySession(),
+    flowStage: "NEEDS_INPUT",
+    snapshot: emptySnapshot,
+    rawInput: baseRaw,
+    parsedInput: parsedInput(baseRaw),
+  });
+  let parseCalls = 0;
+  await page.route("**/api/parse", async (route) => {
+    parseCalls += 1;
+    await route.abort();
+  });
+  await page.goto("/rescue");
+
+  const replacementInput = page.locator("#rescue-sentence");
+  await expect(replacementInput).toHaveAttribute("maxlength", "4000");
+  await expect(page.locator("#rescue-sentence-limit")).toHaveText("还可输入 2 个字");
+
+  const supplementalInput = page.locator("#missing-plans");
+  await expect(supplementalInput).toBeVisible();
+  await expect(supplementalInput).toHaveAttribute("maxlength", "1");
+  await expect(page.locator("#missing-plans-limit")).toHaveText("还可输入 1 个字");
+  await supplementalInput.evaluate((element) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    setter?.call(element, "安排");
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(supplementalInput).toHaveValue("安排");
+  await page.getByRole("button", { name: "识别补充安排" }).click();
+  await expect(page.locator(".error-box").last()).toContainText("输入最多 4000 个字，请删减后再提交。");
+  expect(parseCalls).toBe(0);
+});
+
 test("地点候选只作为当前 blocker 的字段答案提交", async ({ page }) => {
   await seed(page);
   const candidateState = { currentBlockerKey: "museum-poi", sameBlockerCount: 1, roundCount: 1, answeredFields: [], questionHistory: ["museum-poi"] };
@@ -558,4 +628,20 @@ test("过期 pending plan 不能接受", async ({ page }) => {
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   expect(stored.snapshot.revision).toBe(2);
   expect(stored.pendingPlan).not.toBeNull();
+});
+
+test("确认时间超过五分钟的方案不能进入复验", async ({ page }) => {
+  const stale = pendingPlanSession();
+  if (!stale.pendingPlan.result.context.world) throw new Error("测试方案缺少真实世界上下文");
+  stale.pendingPlan.result.context.world.currentTime.confirmedAt = new Date(Date.now() - 5 * 60 * 1000 - 1).toISOString();
+  await seed(page, stale);
+  let validateCalls = 0;
+  await page.route("**/api/validate", async (route) => {
+    validateCalls += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, violations: [] }) });
+  });
+  await page.goto("/result");
+  await page.getByRole("button", { name: /接受方案/ }).click();
+  await expect(page.locator(".error-box")).toContainText("距离确认时间较久");
+  expect(validateCalls).toBe(0);
 });

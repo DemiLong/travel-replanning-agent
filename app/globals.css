@@ -120,6 +120,7 @@ body {
 .home-card { padding: 13px; }
 .home-card textarea { display: block; width: 100%; min-height: 139px; resize: none; border: 0; padding: 7px 7px 12px; outline: 0; color: #171f2e; font-size: 15px; line-height: 1.65; background: transparent; }
 .home-card textarea::placeholder { color: #a3adbb; }
+.input-limit-hint { display: block; color: #8c98a8; font-size: 11px; line-height: 1.4; text-align: right; }
 .example-row { display: flex; flex-wrap: wrap; gap: 7px; padding: 5px 2px 4px; }
 .example-chip { border: 1px solid #e1e8f1; background: #f8fbff; border-radius: 99px; padding: 6px 10px; color: #6b788f; font-size: 11px; }
 .primary,

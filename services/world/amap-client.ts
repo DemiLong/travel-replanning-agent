@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { requestCancelled, ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
+import { MAP_REQUEST_TIMEOUT_MS } from "../../types/protocol";
 
 export class WorldServiceError extends ServiceFailure {
   constructor(
@@ -110,7 +111,7 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
   }
   const entry:InFlightEntry={promise:Promise.resolve({}),controller:new AbortController(),consumers:new Map(),settled:false};
   entry.promise = (async () => {
-    const timeoutSignal = AbortSignal.timeout(8000);
+    const timeoutSignal = AbortSignal.timeout(MAP_REQUEST_TIMEOUT_MS);
       const transportSignal=AbortSignal.any([entry.controller.signal,timeoutSignal]);
     try {
       if(options.paced!==false){

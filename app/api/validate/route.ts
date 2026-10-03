@@ -1,4 +1,4 @@
-import { ReplanInputSchema, ProposedPlanSchema } from "@/types";
+import { REQUEST_DEADLINE_MS, ReplanInputSchema, ProposedPlanSchema } from "@/types";
 import { validatePlan } from "@/validators";
 import { WorldContextService } from "@/services/world/world-context-service";
 import { buildRealContext } from "@/agents/real-context-builder";
@@ -7,7 +7,7 @@ import { ServiceFailure } from "@/services/failures";
 import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
 import { authorizeApiRequest } from "@/services/server-auth";
 export async function POST(request: Request) {
-  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: 30000 });
+  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: REQUEST_DEADLINE_MS });
   const headers = { "Cache-Control": "no-store", "X-Trace-Id": execution.traceId };
   try {
     await execution.measure("AUTH", () => authorizeApiRequest(request, "validate", execution.signal));

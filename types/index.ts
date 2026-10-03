@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { BrowserLocationSchema, WorldOptionsSchema, RealWorldContextSchema, ResolutionEvidenceSchema, type RealWorldContext } from "./world";
+import { MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE } from "./protocol";
 
 export const TimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 export const DateSchema = z
@@ -140,7 +141,7 @@ export const ActivityFactSchema = z.object({
 });
 export const ReplanningRequestSchema = z.object({
   reason: z.enum(reasons),
-  freeText: z.string().max(2000),
+  freeText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   currentState: TripStateSchema,
   closedPlaceIds: z.array(z.string()).max(30),
   variation: z.number().int().min(0).max(100),
@@ -309,7 +310,7 @@ export const ParsedContextSchema = TripStateSchema.partial().extend({
   currentTime: TimeSchema,
 });
 export const ParsedUserInputSchema = z.object({
-  rawText: z.string().max(4000),
+  rawText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   destinationDraft: z.string().max(80).optional(),
   intent: UnifiedIntentSchema,
   existingPlans: z.array(ParsedPlanItemSchema).max(30),
@@ -339,7 +340,7 @@ export const ConfirmedPlanItemWithPlaceSchema = ConfirmedPlanItemSchema.extend({
   durationSource: z.enum(["user", "suggested", "unknown"]).optional(),
 });
 export const ConfirmedDraftSchema = z.object({
-  rawText: z.string().max(4000),
+  rawText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   intent: UnifiedIntentSchema,
   existingPlans: z.array(ConfirmedPlanItemWithPlaceSchema).max(30),
   activityFacts: z.array(ActivityFactSchema).max(30).default([]),
@@ -581,7 +582,7 @@ export const PendingInputSchema = z.object({
   parsedInput: ParsedUserInputSchema,
   confirmedDraft: ConfirmedDraftSchema,
   missingFact: MissingFactSchema.nullable(),
-  questionRawText: z.string().max(4000),
+  questionRawText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   baseRevision: z.number().int().min(0),
 });
 export const ConditionalAdviceSchema = z.object({
@@ -604,7 +605,7 @@ export const ItineraryDraftSchema = z.object({
   stateCapturedAt: z.string().datetime(),
   currentTimeSource: FactSourceSchema,
   currentLocationSource: FactSourceSchema,
-  rawInput: z.string().max(4000),
+  rawInput: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   items: z.array(ItineraryDraftItemSchema).max(30),
   updatedAt: z.string().datetime(),
 });
@@ -613,7 +614,7 @@ export const RealSessionSchema = z.object({
   experienceMode: z.literal("real"),
   flowStage: FlowStageSchema,
   snapshot: SnapshotSchema.extend({ mode: z.literal("user") }),
-  rawInput: z.string().max(4000),
+  rawInput: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   parsedInput: ParsedUserInputSchema.nullable(),
   lastDisruption: ReplanningRequestSchema.nullable(),
   pendingPlan: PendingPlanSchema.nullable(),
@@ -629,3 +630,4 @@ export type ResolutionState = z.infer<typeof ResolutionStateSchema>;
 export type ItineraryDraft = z.infer<typeof ItineraryDraftSchema>;
 export type RealSession = z.infer<typeof RealSessionSchema>;
 export * from "./failures";
+export * from "./protocol";

@@ -8,6 +8,8 @@ import {
   ResolutionStateSchema,
   SnapshotSchema,
   TimeSchema,
+  MAX_RAW_INPUT_LENGTH,
+  RAW_INPUT_TOO_LONG_MESSAGE,
   type AgentResult,
   type ConfirmedDraft,
   type ConditionalAdvice,
@@ -49,7 +51,7 @@ const FieldAnswerSchema = z.discriminatedUnion("kind", [
 
 const AssistRequestBaseSchema = z.object({
   snapshot: SnapshotSchema,
-  rawText: z.string().trim().max(4000).optional(),
+  rawText: z.string().trim().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE).optional(),
   confirmedDraft: ConfirmedDraftSchema.optional(),
   answer: FieldAnswerSchema.optional(),
   resolutionState: ResolutionStateSchema.optional(),

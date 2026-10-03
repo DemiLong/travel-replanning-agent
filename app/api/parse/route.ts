@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { OpenAISemanticParser } from "@/services/semantic-parser";
-import { SnapshotSchema, reasons } from "@/types";
+import { MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE, SnapshotSchema, reasons } from "@/types";
 import { failureEnvelope, failureResponse } from "@/services/api-failure";
 import { ServiceFailure } from "@/services/failures";
 import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
@@ -10,7 +10,7 @@ export const maxDuration = 12;
 
 const ParseRequestSchema = z.object({
   snapshot: SnapshotSchema,
-  rawText: z.string().trim().min(1).max(4000),
+  rawText: z.string().trim().min(1).max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   hint: z.enum(reasons).optional(),
 });
 

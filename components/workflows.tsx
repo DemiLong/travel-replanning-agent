@@ -47,11 +47,16 @@ import {
   ConditionalAdviceSchema,
   ConfirmedDraftSchema,
   ImpactAnalysisSchema,
+  MAX_RAW_INPUT_LENGTH,
   MissingFactSchema,
   ParsedUserInputSchema,
+  RAW_INPUT_TOO_LONG_MESSAGE,
   ReplanningRequestSchema,
   ResolutionStateSchema,
   SnapshotSchema,
+  isRawInputWithinLimit,
+  isWorldConfirmationExpired,
+  rawInputRemaining,
   type ItineraryEvent,
   type ItineraryDraft,
   type ProposedPlan,
@@ -98,7 +103,7 @@ const displayDestination = (value: string) => value;
 const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
 const stationExitSuffix = /\s*[（(]?\s*(?:[A-Z]|\d+|[一二三四五六七八九十]+)\s*号?\s*(?:出入口|出口|口)\s*[）)]?\s*$/i;
 const metroLines = (value: string) => [...new Set([...value.matchAll(/(\d{1,2})\s*号线/g)].map(match => `${match[1]}号线`))];
-const worldConfirmationExpired = (confirmedAt: string) => Date.now() - Date.parse(confirmedAt) > 300000;
+const mergedRawInput = (current: string, addition: string) => `${current}\n${addition}`.trim();
 const eventDurationLabel = (event: ItineraryEvent) => {
   if (event.durationSource === "unknown") return "停留时间待定";
   const [startHour, startMinute] = event.startTime.split(":").map(Number);
@@ -112,6 +117,10 @@ const errorText = (error: unknown) => {
   if (!(error instanceof Error)) return "操作失败，请再试一次。";
   return error.message;
 };
+
+function RawInputLimitHint({ id, remaining }: { id: string; remaining: number }) {
+  return <small id={id} className="input-limit-hint">还可输入 {Math.max(0, remaining)} 个字</small>;
+}
 
 function snapshotFromItineraryDraft(
   base: Snapshot,
@@ -240,6 +249,7 @@ async function parseWithModel(
   rawText: string,
   hint?: ReplanningRequest["reason"],
 ) {
+  if (!isRawInputWithinLimit(rawText)) throw new Error(RAW_INPUT_TOO_LONG_MESSAGE);
   const response = await authenticatedJsonFetch("/api/parse", {
     json: { snapshot, rawText, hint },
   });
@@ -383,6 +393,10 @@ export function HomeFlow() {
       setBusy(false);
     }
     setRaw(text);
+    if (!isRawInputWithinLimit(text)) {
+      setError(RAW_INPUT_TOO_LONG_MESSAGE);
+      return;
+    }
     saveFlowDraft(text, null, activeSession.pendingPlan ? "PLAN_READY" : hasItinerary ? "HAS_ITINERARY" : "NO_ITINERARY");
     if (activeSession.conditionalAdvice) {
       const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
@@ -396,6 +410,10 @@ export function HomeFlow() {
     const fresh = forceFresh || descriptionChanged || !missingFact;
     if (fresh && !raw.trim()) {
       setError("先写下今天发生的变化吧。");
+      return;
+    }
+    if (fresh && !isRawInputWithinLimit(raw)) {
+      setError(RAW_INPUT_TOO_LONG_MESSAGE);
       return;
     }
     if (!fresh && missingFact && !candidateValue && !forcedAnswer && !followUp.trim()) {
@@ -510,7 +528,8 @@ export function HomeFlow() {
         <p>把你的原计划和突发情况直接告诉俺！</p>
       </div>
       <form className="mobile-card home-card" onSubmit={submitAssist}>
-        <textarea id="home-input" value={raw} maxLength={4000} onChange={event => changeRaw(event.target.value)} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" />
+        <textarea id="home-input" value={raw} maxLength={MAX_RAW_INPUT_LENGTH} onChange={event => changeRaw(event.target.value)} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" aria-describedby="home-input-limit" />
+        <RawInputLimitHint id="home-input-limit" remaining={rawInputRemaining(raw)} />
         <div className="example-row" aria-label="示例提示">
           {["航班晚点了", "突然下雨了", "起晚了", "景点关闭"].map(item => <button key={item} type="button" className="example-chip" onClick={() => chooseQuick(item)}>{item}</button>)}
         </div>
@@ -607,6 +626,10 @@ export function OnboardingFlow() {
       setError("请先填写今天的日期和当前时间。");
       return;
     }
+    if (!isRawInputWithinLimit(raw)) {
+      setError(RAW_INPUT_TOO_LONG_MESSAGE);
+      return;
+    }
     setParsing(true);
     setError("");
     try {
@@ -627,6 +650,8 @@ export function OnboardingFlow() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     try {
+      if (!isRawInputWithinLimit(raw))
+        throw new Error(RAW_INPUT_TOO_LONG_MESSAGE);
       if (!items.length)
         throw new Error("请先解析并确认至少一项今天已有的安排。");
       if (!activeDraft.destination.trim()) throw new Error("请填写所在城市。");
@@ -782,13 +807,15 @@ export function OnboardingFlow() {
             <label htmlFor="itinerary-input">你今天想怎么安排？</label>
             <textarea
               id="itinerary-input"
-              maxLength={4000}
+              maxLength={MAX_RAW_INPUT_LENGTH}
               value={raw}
               onChange={(event) =>
                 persistDraft({ ...activeDraft, rawInput: event.target.value })
               }
               placeholder="10 点去城市博物馆，12:30 午餐，19 点已预订晚餐"
+              aria-describedby="itinerary-input-limit"
             />
+            <RawInputLimitHint id="itinerary-input-limit" remaining={rawInputRemaining(raw)} />
           </div>
           <button
             type="button"
@@ -1087,6 +1114,11 @@ export function RescueFlow() {
       setError("请先写下要补充的安排。");
       return;
     }
+    const nextRawText = mergedRawInput(activeParsed.rawText, extraPlans);
+    if (!isRawInputWithinLimit(nextRawText)) {
+      setError(RAW_INPUT_TOO_LONG_MESSAGE);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -1096,7 +1128,7 @@ export function RescueFlow() {
       }
       updateParsed({
         ...activeParsed,
-        rawText: `${activeParsed.rawText}\n${extraPlans}`.trim(),
+        rawText: nextRawText,
         existingPlans: [...activeParsed.existingPlans, ...parsedAddition.existingPlans],
         activityMentions: [...activeParsed.activityMentions, ...parsedAddition.activityMentions],
         intent: activeParsed.disruptions.length ? "mixed" : "create",
@@ -1254,6 +1286,11 @@ export function RescueFlow() {
       activeParsed.closedPlaceIds,
     ).missingFacts,
   );
+  const editableRawText = extraPlans || activeParsed.rawText;
+  const supplementalInputLimit = Math.max(
+    0,
+    rawInputRemaining(activeParsed.rawText) - (activeParsed.rawText.length ? 1 : 0),
+  );
   return (
     <div className="workspace">
       <div className="page-heading">
@@ -1282,7 +1319,21 @@ export function RescueFlow() {
         </p>
       </div>
       {activeParsed.question && <p>这次要解决：{activeParsed.question}</p>}
-      <details className="advanced-details"><summary>修改原文或补充回答</summary><div className="field"><label htmlFor="rescue-sentence">告诉我今天的安排和现在发生的变化</label><textarea id="rescue-sentence" value={extraPlans||activeParsed.rawText} onChange={event=>setExtraPlans(event.target.value)}/><button type="button" className="secondary" disabled={busy} onClick={reparseSentence}>{busy?"正在解析……":"用 AI 重新理解"}</button></div></details>
+      <details className="advanced-details">
+        <summary>修改原文或补充回答</summary>
+        <div className="field">
+          <label htmlFor="rescue-sentence">告诉我今天的安排和现在发生的变化</label>
+          <textarea
+            id="rescue-sentence"
+            value={editableRawText}
+            maxLength={MAX_RAW_INPUT_LENGTH}
+            aria-describedby="rescue-sentence-limit"
+            onChange={event => setExtraPlans(event.target.value)}
+          />
+          <RawInputLimitHint id="rescue-sentence-limit" remaining={rawInputRemaining(editableRawText)} />
+          <button type="button" className="secondary" disabled={busy} onClick={reparseSentence}>{busy ? "正在解析……" : "用 AI 重新理解"}</button>
+        </div>
+      </details>
       {activeParsed.parseWarnings.length > 0 && (
         <div className="error-box" role="alert">
           <b>需要你留意</b>
@@ -1309,8 +1360,14 @@ export function RescueFlow() {
               <textarea
                 id="missing-plans"
                 value={extraPlans}
+                maxLength={supplementalInputLimit}
                 onChange={(event) => setExtraPlans(event.target.value)}
                 placeholder="例如：19 点已预订晚餐"
+                aria-describedby="missing-plans-limit"
+              />
+              <RawInputLimitHint
+                id="missing-plans-limit"
+                remaining={supplementalInputLimit - extraPlans.length}
               />
               <button type="button" className="secondary" onClick={addPlans}>
                 识别补充安排
@@ -1892,7 +1949,7 @@ export function ResultFlow() {
       const latest = loadSession();
       if (!latest.pendingPlan || latest.flowStage !== "PLAN_READY") throw new Error("当前方案已失效，请重新分析。");
       if (latest.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
-      if (result.context.world && worldConfirmationExpired(result.context.world.currentTime.confirmedAt)) throw new Error("距离确认时间较久，请重新生成方案。");
+      if (result.context.world && isWorldConfirmationExpired(result.context.world.currentTime.confirmedAt)) throw new Error("距离确认时间较久，请重新生成方案。");
       const response = await authenticatedJsonFetch("/api/validate", { json: { snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }, signal: controller.signal });
       const validationBody = await readApiJson(response);
       if (!response.ok) throw new Error(FailureEnvelopeSchema.parse(validationBody).message);
