@@ -5,6 +5,7 @@ import type { AgentContext, PlanConflict, ProposedPlan, Violation } from "../typ
 import { DEFAULT_UNKNOWN_DURATION, MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes, time } from "../lib/time";
 import { summarizeVerifiedPlan } from "./plan-narrative";
 import { effectiveProtectionPolicy, protectedArrivalDeadline } from "./protection-policy";
+import { modelInvalidOutput, normalizeModelFailure, ServiceFailure } from "./failures";
 
 export const CandidateSchema=z.object({
   title:z.string().min(1),tradeOff:z.string().min(1),
@@ -25,15 +26,19 @@ export class DeepSeekPlanner implements CandidatePlanner {
   readonly name:string; private client:OpenAI;
   constructor(){
     if(typeof window!=="undefined")throw new Error("SERVER_ONLY");
-    if(!process.env.DEEPSEEK_API_KEY?.trim())throw new Error("MODEL_NOT_CONFIGURED");
+    if(!process.env.DEEPSEEK_API_KEY?.trim())throw new ServiceFailure("MODEL_NOT_CONFIGURED","PLANNER",{retryable:true,provider:"deepseek"});
     this.name=process.env.DEEPSEEK_MODEL||"deepseek-v4-flash";
     this.client=new OpenAI({apiKey:process.env.DEEPSEEK_API_KEY,baseURL:process.env.DEEPSEEK_BASE_URL||"https://api.deepseek.com",maxRetries:0,timeout:10000});
   }
   async generateCandidates(context:AgentContext,feedback:Violation[],attempt:number,signal?:AbortSignal){
-    if(context.world?.status!=="ready")throw new Error("WORLD_CONTEXT_NOT_READY");
+    if(context.world?.status!=="ready")throw new ServiceFailure("INTERNAL_ERROR","PLANNER",{retryable:true,detail:"WORLD_CONTEXT_NOT_READY"});
+    try {
       const response=await this.client.responses.parse({model:this.name,store:false,reasoning:{effort:"none"},max_output_tokens:5000,input:[{role:"system",content:DEEPSEEK_PLANNER_PROMPT},{role:"user",content:JSON.stringify({confirmedItinerary:context.remainingEvents,unscheduledOriginals:context.unscheduledOriginals,impactAnalysis:context.impactAnalysis,userRequest:context.disruption,preferences:context.profile,world:context.world,validationFeedback:feedback,attempt})}],text:{format:deepSeekFormat(CandidateSetSchema,"coveredYou_plan_candidates")}}, { signal });
-    if(response.status!=="completed"||!response.output_parsed)throw new Error("MODEL_OUTPUT_INCOMPLETE");
-    return CandidateSetSchema.parse(response.output_parsed).candidates;
+      if(response.status!=="completed"||!response.output_parsed)throw modelInvalidOutput("PLANNER",attempt);
+      return CandidateSetSchema.parse(response.output_parsed).candidates;
+    } catch (error) {
+      throw normalizeModelFailure(error,"PLANNER",{externalSignal:signal});
+    }
   }
 }
 
@@ -44,6 +49,13 @@ export class UnknownDurationConflict extends Error {
     super(conflict.message);
     this.name = "UnknownDurationConflict";
     this.conflict = conflict;
+  }
+}
+
+export class CandidateOutputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CandidateOutputError";
   }
 }
 
@@ -145,15 +157,15 @@ function resolveUnknownDuration(
 
 export function materializeCandidate(c:AgentContext,raw:PlanCandidate):ProposedPlan{
   const candidate=CandidateSchema.parse(raw),world=c.world;
-  if(!world?.currentLocation || world.status!=="ready")throw new Error("WORLD_CONTEXT_NOT_READY");
+  if(!world?.currentLocation || world.status!=="ready")throw new ServiceFailure("INTERNAL_ERROR","PLANNER",{retryable:true,detail:"WORLD_CONTEXT_NOT_READY"});
   let cursor=minutes(c.state.currentTime),previous="current";
   const events:ProposedPlan["events"]=[];
   for(const [index,step] of candidate.steps.entries()){
-    if(Boolean(step.eventId)===Boolean(step.poiId))throw new Error("每一步必须且只能对应一项已确认活动或真实候选地点。");
+    if(Boolean(step.eventId)===Boolean(step.poiId))throw new CandidateOutputError("每一步必须且只能对应一项已确认活动或真实候选地点。");
     const old=step.eventId?c.remainingEvents.find(e=>e.id===step.eventId):undefined;
     const unscheduled=step.eventId?c.unscheduledOriginals?.find(fact=>fact.id===step.eventId):undefined;
     const poi=step.poiId?world.alternatives.find(p=>p.poiId===step.poiId):undefined;
-    if(!old&&!unscheduled&&!poi)throw new Error("模型引用了未知活动或地点。");
+    if(!old&&!unscheduled&&!poi)throw new CandidateOutputError("模型引用了未知活动或地点。");
     const id=old?.placeId??(unscheduled?`custom-${unscheduled.id}`:poi!.poiId);
     const requestedMode=step.travelMode??world.travelMode;
     const available=world.routes.filter(r=>r.origin.id===previous&&r.destination.id===id&&(!requestedMode||r.travelMode===requestedMode)&&r.status==="available");
@@ -161,7 +173,7 @@ export function materializeCandidate(c:AgentContext,raw:PlanCandidate):ProposedP
     // grounding; it must never create an unqueried travel time.
     const leg=[...available].sort((a,b)=>(a.trafficDurationSeconds??a.durationSeconds??Infinity)-(b.trafficDurationSeconds??b.durationSeconds??Infinity))[0];
     const mode=requestedMode??leg?.travelMode;
-    if(previous!==id && (!leg||leg.durationSeconds===null))throw new Error(`缺少 ${previous} 到 ${id} 的可用高德路线。`);
+    if(previous!==id && (!leg||leg.durationSeconds===null))throw new CandidateOutputError(`缺少 ${previous} 到 ${id} 的可用高德路线。`);
     const transfer=previous===id?0:Math.ceil((leg!.trafficDurationSeconds??leg!.durationSeconds!)/60);
     const policy=old?effectiveProtectionPolicy(old):undefined;
     const allowedStarts=policy?.kind==="rebookable"?policy.allowedStartTimes:[];
@@ -173,9 +185,9 @@ export function materializeCandidate(c:AgentContext,raw:PlanCandidate):ProposedP
       : {duration:old?minutes(old.endTime)-minutes(old.startTime):unscheduled?(unscheduled.durationMinutes??step.durationMinutes??DEFAULT_UNKNOWN_DURATION):step.durationMinutes,arrivalOnly:false,reason:""};
     const arrivalOnly=resolution.arrivalOnly;
     const duration=resolution.duration;
-    if(duration===null||duration===undefined||duration<0||(!arrivalOnly&&duration<MIN_SUGGESTED_DURATION))throw new Error("这项安排没有足够的可执行停留时间。");
+    if(duration===null||duration===undefined||duration<0||(!arrivalOnly&&duration<MIN_SUGGESTED_DURATION))throw new CandidateOutputError("这项安排没有足够的可执行停留时间。");
     const end=start+duration;
-    if(end>=1440)throw new Error("候选安排超出当天，不能自动跨日。");
+    if(end>=1440)throw new CandidateOutputError("候选安排超出当天，不能自动跨日。");
     events.push(old?{...old,startTime:time(start),endTime:time(end),status:old.locked?"locked":"planned",travelTimeFromPrevious:transfer,reason:step.reason,openingTime:null,closingTime:null}:unscheduled?{id:unscheduled.id,placeId:id,name:unscheduled.name,category:"user activity",startTime:time(start),endTime:time(end),startTimeSource:"suggested",durationSource:unscheduled.durationMinutes===null?"suggested":"user",location:unscheduled.placeQuery??unscheduled.name,status:"planned",locked:false,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:transfer,reason:step.reason,constraint:"开始时间由系统建议；营业状态与室内外情况尚未核实。"}:{id:`ai-${poi!.poiId}-${index}`,placeId:id,name:poi!.name,category:poi!.type,startTime:time(start),endTime:time(end),location:poi!.address||poi!.name,status:"planned",locked:false,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:transfer,reason:step.reason,constraint:"候选停留时长为建议；营业状态与室内外情况尚未核实。"});
     const created=events[events.length-1];
     if(leg)created.travelMode=leg.travelMode;
@@ -185,7 +197,7 @@ export function materializeCandidate(c:AgentContext,raw:PlanCandidate):ProposedP
   const plan:ProposedPlan={summary:"待生成",explanation:candidate.tradeOff,events,movedEvents:[],removedEvents:candidate.removed.map(change=>{
     const old=c.remainingEvents.find(e=>e.id===change.eventId);
     const unscheduled=c.unscheduledOriginals?.find(fact=>fact.id===change.eventId);
-    if(!old&&!unscheduled)throw new Error("删除理由引用了未知安排。");
+    if(!old&&!unscheduled)throw new CandidateOutputError("删除理由引用了未知安排。");
     return {eventId:change.eventId,name:old?.name??unscheduled!.name,reason:change.reason,constraint:old&&c.disruption.closedPlaceIds.includes(old.placeId)?"用户报告地点关闭":"用户确认后的非固定活动调整"};
   })};
   plan.summary=summarizeVerifiedPlan(c,plan);

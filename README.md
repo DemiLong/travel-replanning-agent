@@ -1,7 +1,7 @@
 # coveredYou · 接住临时变化，重新安排今天
 下雨了、起晚了、景点关门了，或者原来的安排实在太赶——把接下来的行程和变化告诉 coveredYou，我会结合地点、路线和你的限制，尝试给出新的安排。
 
-定位：这是一个仍在迭代的单日行程调整应用。目前的主流程是匿名使用，行程保存在当前浏览器。你可以先创建今天的行程，也可以直接在首页说出原计划和遇到的问题，不必先填完一整张表。
+定位：这是一个仍在迭代的单日行程调整应用。目前的主流程使用静默匿名会话保护高成本接口，行程仍保存在当前浏览器。你可以先创建今天的行程，也可以直接在首页说出原计划和遇到的问题，不必先填完一整张表。
 
 当前支持范围：
 	- 单日行程、以高德数据为基础的地点与路线查询。
@@ -21,11 +21,15 @@ DEEPSEEK_API_KEY=你的DeepSeek密钥
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 AMAP_API_KEY=你的高德Web服务密钥
+NEXT_PUBLIC_SUPABASE_URL=你的Supabase项目地址
+NEXT_PUBLIC_SUPABASE_ANON_KEY=你的Supabase匿名公钥
 ```
 
 模型名是项目当前的默认配置，可换成账号实际可用的兼容模型。密钥只供服务端使用，不要加 `NEXT_PUBLIC_` 前缀，也不要提交到仓库。
 
-`.env.example` 里保留了 Supabase 等历史配置；当前匿名浏览器主流程不依赖这些配置，无需为本地体验专门搭建数据库。
+生产环境使用 Supabase 匿名身份和数据库计数保护 `/api/parse`、`/api/assist`、`/api/validate`。部署前需要在 Supabase 开启 Anonymous Sign-Ins，并依次应用 `supabase/migrations`。行程内容不会因此上传到 Supabase。
+
+只在本机开发时，可以设置 `ALLOW_LOCAL_LIVE=true` 跳过身份和限流；该开关仅对开发模式和回环地址生效，生产环境会忽略它。
 
 启动开发服务：
 
@@ -70,7 +74,7 @@ npm start
 | `/rescue` | 编辑复杂活动信息，或重新理解原文 |
 | `/result` | 查看推荐与可能的备选方案，确认接受 |
 
-`/replan` 是兼容入口，会跳转到 `/rescue`。
+旧的 `/replan` 兼容入口已经移除，请使用 `/rescue`。
 
 ## 目前修到了哪里
 
@@ -155,6 +159,8 @@ docs/         修补与验证记录
 | `POST /api/assist` | 串联草稿、补问、地图查询和规划 |
 | `POST /api/validate` | 接受调整结果前重新校验 |
 | `GET /api/config` | 查询服务配置状态 |
+
+前三个 POST 接口要求静默匿名会话，并分别执行用户级和项目级一分钟限流；`GET /api/config` 保持公开。一次 `/api/assist` 只申领一次 assist 额度，其内部解析、地图查询、规划和校验不会重复扣取其他接口额度。
 
 `/api/assist` 的业务状态为：
  	`READY`、`NEEDS_INPUT`、`OUT_OF_SCOPE`、`UPSTREAM_UNAVAILABLE` 和 `NO_SAFE_PLAN`。

@@ -155,7 +155,7 @@ test("地点候选只作为当前 blocker 的字段答案提交", async ({ page 
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "NEEDS_INPUT", parsedInput: parsedInput(), confirmedDraft: confirmedDraft(), impactAnalysis: { completedActivities: [], preservedActivities: ["museum"], affectedActivities: [], modifiedActivities: [], removedActivities: [], riskActivities: [], lockedActivities: ["museum"], replacementCandidates: [], availableTimeWindows: [] }, resolutionState: candidateState, missingFact: { key: "museum-poi", field: "museum-poi", importance: "blocking", reason: "请选择地点", question: "你指的是哪一个城市博物馆？", answerType: "poi", candidates: [{ value: "poi-1", label: "城市博物馆东馆", description: "浦东新区" }, { value: "poi-2", label: "城市博物馆西馆", description: "黄浦区" }] } }) });
     } else {
       continuation = body;
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "OUT_OF_SCOPE", error: "测试结束，原行程没有改变。", retryable: false, parsedInput: parsedInput(), impactAnalysis: { completedActivities: [], preservedActivities: ["museum"], affectedActivities: [], modifiedActivities: [], removedActivities: [], riskActivities: [], lockedActivities: ["museum"], replacementCandidates: [], availableTimeWindows: [] }, resolutionState: candidateState }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "OUT_OF_SCOPE", message: "测试结束，原行程没有改变。", parsedInput: parsedInput(), impactAnalysis: { completedActivities: [], preservedActivities: ["museum"], affectedActivities: [], modifiedActivities: [], removedActivities: [], riskActivities: [], lockedActivities: ["museum"], replacementCandidates: [], availableTimeWindows: [] }, resolutionState: candidateState }) });
     }
   });
   await page.goto("/");
@@ -170,7 +170,7 @@ test("地点候选只作为当前 blocker 的字段答案提交", async ({ page 
 
 test("上游失败保留正式行程并提供可行动错误", async ({ page }) => {
   await seed(page);
-  await page.route("**/api/assist", async (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "UPSTREAM_UNAVAILABLE", failedStage: "GROUNDING", retryable: true, error: "路线服务暂时不可用，请稍后重试。" }) }));
+  await page.route("**/api/assist", async (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "UPSTREAM_UNAVAILABLE", message: "路线服务暂时不可用，请稍后重试。", failure: { code: "MAP_NETWORK_ERROR", stage: "GROUNDING", retryable: true, traceId: "e2e-map-network" } }) }));
   await page.goto("/");
   await page.getByLabel("描述今天的安排和变化").fill("下雨了，请调整下午行程");
   await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
@@ -179,6 +179,48 @@ test("上游失败保留正式行程并提供可行动错误", async ({ page }) 
   expect(stored.snapshot.revision).toBe(1);
   expect(stored.snapshot.itinerary).toHaveLength(1);
 });
+
+for (const authFailure of [
+  {
+    label: "达到调用额度",
+    httpStatus: 429,
+    status: "RATE_LIMITED",
+    message: "操作有些频繁，请在 18 秒后重试。",
+    failure: { code: "RATE_LIMITED", stage: "AUTH", retryable: true, traceId: "e2e-rate-limit", retryAfterSeconds: 18 },
+  },
+  {
+    label: "身份服务不可用",
+    httpStatus: 503,
+    status: "UPSTREAM_UNAVAILABLE",
+    message: "会话服务暂时不可用，请稍后重试。",
+    failure: { code: "AUTH_PROVIDER_ERROR", stage: "AUTH", retryable: true, traceId: "e2e-auth-provider" },
+  },
+] as const) {
+  test(`${authFailure.label}时保留输入和业务状态`, async ({ page }) => {
+    await seed(page);
+    await page.route("**/api/assist", async (route) => route.fulfill({
+      status: authFailure.httpStatus,
+      contentType: "application/json",
+      headers: authFailure.httpStatus === 429 ? { "Retry-After": "18" } : undefined,
+      body: JSON.stringify({
+        status: authFailure.status,
+        message: authFailure.message,
+        failure: authFailure.failure,
+      }),
+    }));
+    await page.goto("/");
+    const input = page.getByLabel("描述今天的安排和变化");
+    await input.fill("下雨了，请保留晚餐预约并调整下午行程");
+    await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
+    await expect(page.locator(".error-box")).toContainText(authFailure.message);
+    await expect(input).toHaveValue("下雨了，请保留晚餐预约并调整下午行程");
+    const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+    expect(stored.flowStage).toBe("HAS_ITINERARY");
+    expect(stored.rawInput).toBe("下雨了，请保留晚餐预约并调整下午行程");
+    expect(stored.snapshot.revision).toBe(1);
+    expect(stored.snapshot.itinerary).toHaveLength(1);
+  });
+}
 
 for (const responseKind of ["html", "empty", "truncated"] as const) {
   const responseLabel = responseKind === "html" ? "HTML" : responseKind === "empty" ? "空" : "截断 JSON";
@@ -297,7 +339,7 @@ test("故障注入：取消请求不显示技术错误或迟到保存", async ({
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ status: "OUT_OF_SCOPE", error: "迟到响应不应生效", retryable: false }),
+      body: JSON.stringify({ status: "OUT_OF_SCOPE", message: "迟到响应不应生效" }),
     }).catch(() => undefined);
   });
   await page.goto("/");
@@ -361,12 +403,58 @@ for (const invalidOk of ["false", 1] as const) {
   });
 }
 
+test("复验服务超时保留待接受方案并显示可重试提示", async ({ page }) => {
+  await seed(page, pendingPlanSession());
+  await page.route("**/api/validate", async (route) => route.fulfill({
+    status: 504,
+    contentType: "application/json",
+    body: JSON.stringify({
+      status: "UPSTREAM_UNAVAILABLE",
+      message: "本次处理时间较长，请重试。",
+      failure: { code: "MAP_TIMEOUT", stage: "GROUNDING", retryable: true, traceId: "e2e-map-timeout" },
+    }),
+  }));
+  await page.goto("/result");
+  await page.getByRole("button", { name: /接受方案/ }).click();
+  await expect(page.locator(".error-box")).toContainText("本次处理时间较长，请重试");
+  await expect(page).toHaveURL(/\/result$/);
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(1);
+  expect(stored.pendingPlan).not.toBeNull();
+});
+
+test("主动取消复验保持静默并保留待接受方案", async ({ page }) => {
+  await seed(page, pendingPlanSession());
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes("/api/validate")) return originalFetch(input, init);
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+        if (init?.signal?.aborted) abort();
+        else init?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    }) as typeof window.fetch;
+  });
+  await page.goto("/result");
+  await page.getByRole("button", { name: /接受方案/ }).click();
+  await page.getByRole("button", { name: "取消复验" }).click();
+  await expect(page.locator(".error-box")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/result$/);
+  await expect(page.getByRole("button", { name: /接受方案/ })).toBeEnabled();
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(stored.snapshot.revision).toBe(1);
+  expect(stored.pendingPlan).not.toBeNull();
+});
+
 test("接受方案前复验成功后才更新 revision", async ({ page }) => {
   await seed(page, pendingPlanSession());
   await page.route("**/api/validate", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, violations: [] }) }));
   await page.goto("/result");
-  await expect(page.getByText("保留固定预约").first()).toBeVisible();
-  await page.getByRole("button", { name: /接受方案/ }).click();
+  const acceptButton = page.getByRole("button", { name: /接受方案/ });
+  await expect(acceptButton).toBeVisible();
+  await acceptButton.click();
   await expect(page).toHaveURL(/\/trip$/);
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   expect(stored.snapshot.revision).toBe(2);

@@ -27,6 +27,16 @@ import { WorldContextService } from "../services/world/world-context-service";
 import { allowedModes } from "../services/world/context-resolution";
 import { effectiveProtectionPolicy, protectionPolicyForActivity, stationLevelLocation } from "../services/protection-policy";
 import { replanReal } from "./real-replanning-agent";
+import type { FailureInfo, FailureStage } from "../types/failures";
+import {
+  failureInfo,
+  failureMessage,
+  failureStatus,
+  modelInvalidOutput,
+  normalizeFailure,
+  ServiceFailure,
+} from "../services/failures";
+import { RequestExecution } from "../services/request-execution";
 
 const FieldAnswerSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), field: z.string().min(1), value: z.string().trim().min(1).max(200) }),
@@ -60,16 +70,16 @@ export type AssistDependencies = {
   ground?: (raw: unknown, signal?: AbortSignal) => Promise<RealWorldContext>;
   replan?: typeof replanReal;
 };
-type FailureStage = "PARSER" | "GROUNDING" | "PLANNER" | "VALIDATOR";
 type ResponseContext = { parsedInput: ParsedUserInput; impactAnalysis: ImpactAnalysis; resolutionState: ResolutionState };
+type AssistFailureStatus = "AUTH_REQUIRED" | "RATE_LIMITED" | "INVALID_REQUEST" | "UPSTREAM_UNAVAILABLE" | "REQUEST_TIMEOUT" | "SYSTEM_ERROR";
 
 export type AssistResponse =
-  | (ResponseContext & { status: "CONDITIONAL"; error: string; retryable: false; advice: ConditionalAdvice })
+  | (ResponseContext & { status: "CONDITIONAL"; message: string; advice: ConditionalAdvice })
   | (ResponseContext & { status: "NEEDS_INPUT"; confirmedDraft: ConfirmedDraft; missingFact: MissingFact; ambiguities?: RealWorldContext["ambiguities"]; world?: RealWorldContext })
   | (ResponseContext & { status: "READY"; result: AgentResult; base: Snapshot; request: ReturnType<typeof ReplanningRequestSchema.parse> })
-  | (ResponseContext & { status: "NO_SAFE_PLAN"; result?: AgentResult; base?: Snapshot; request?: ReturnType<typeof ReplanningRequestSchema.parse>; error: string; retryable: false; failedStage: "PLANNER" | "VALIDATOR" })
-  | (Partial<ResponseContext> & { status: "OUT_OF_SCOPE"; error: string; retryable: false })
-  | (Partial<ResponseContext> & { status: "UPSTREAM_UNAVAILABLE"; error: string; retryable: true; failedStage: FailureStage });
+  | (ResponseContext & { status: "NO_SAFE_PLAN"; result?: AgentResult; base?: Snapshot; request?: ReturnType<typeof ReplanningRequestSchema.parse>; message: string })
+  | (Partial<ResponseContext> & { status: "OUT_OF_SCOPE"; message: string })
+  | (Partial<ResponseContext> & { status: AssistFailureStatus; message: string; failure: FailureInfo });
 
 const emptyResolutionState = (): ResolutionState => ({ currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] });
 
@@ -345,26 +355,28 @@ function noImpact(snapshot: Snapshot) {
   return analyzeImpact(snapshot, ReplanningRequestSchema.parse({ reason: "other", freeText: "", currentState: snapshot.state, closedPlaceIds: [], variation: 0, stateSources: snapshot.stateSources }));
 }
 
-function upstreamMessage(stage: FailureStage, error: unknown) {
-  const message = error instanceof Error ? error.message : "";
-  const invalidOutput =
-    error instanceof SyntaxError ||
-    error instanceof z.ZodError ||
-    /invalid json|json|output_incomplete|output.*invalid|parse/i.test(message);
-  if (stage === "PARSER" && message === "MODEL_NOT_CONFIGURED") {
-    return "AI 解析尚未配置，原文已保留。请联系维护者完成服务配置后重试。";
-  }
-  if (invalidOutput) {
-    return "服务暂时未能生成有效结果，你的输入已保留，请重试。";
-  }
-  if (stage === "PARSER") return "解析服务暂时不可用，你的输入已保留，请稍后重试。";
-  if (stage === "GROUNDING") return "地点与路线服务暂时不可用，你的输入已保留，请稍后重试。";
-  return "规划服务暂时不可用，你的输入已保留，请稍后重试。";
+function assistFailure(
+  error: unknown,
+  stage: FailureStage,
+  traceId: string,
+  context: Partial<ResponseContext> = {},
+  message?: string,
+): AssistResponse {
+  const failure = normalizeFailure(error, stage);
+  if (failure.code === "REQUEST_CANCELLED") throw failure;
+  return {
+    ...context,
+    status: failureStatus(failure.code),
+    message: message ?? failureMessage(failure.code),
+    failure: failureInfo(failure, traceId),
+  };
 }
 
-export async function runAgentAssist(raw: unknown, signal?: AbortSignal, dependencies: AssistDependencies = {}): Promise<AssistResponse> {
+export async function runAgentAssist(raw: unknown, execution: RequestExecution = new RequestExecution({ deadlineMs: null }), dependencies: AssistDependencies = {}): Promise<AssistResponse> {
+  const signal = execution.signal;
+  const traceId = execution.traceId;
   const input = AssistRequestSchema.parse(raw);
-  if (input.snapshot.mode !== "user" || Object.values(input.snapshot.stateSources).includes("demo")) throw new Error("真实流程不接受示例状态。");
+  if (input.snapshot.mode !== "user" || Object.values(input.snapshot.stateSources).includes("demo")) throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
   const base = refreshSystemTime(input.snapshot);
   let resolutionState = input.resolutionState ?? emptyResolutionState();
   let parsed: ParsedUserInput;
@@ -384,12 +396,14 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     snapshot = mergeConfirmedDraft(base, draft);
   } else {
     try {
-      parsed = dependencies.parse
-        ? await dependencies.parse(base, input.rawText!, signal)
-        : await new DeepSeekSemanticParser().parse(base, input.rawText!, undefined, signal);
+      parsed = await execution.measure("PARSER", () => dependencies.parse
+        ? dependencies.parse(base, input.rawText!, signal)
+        : new DeepSeekSemanticParser().parse(base, input.rawText!, undefined, signal, undefined, execution));
     } catch (error) {
-      if (error instanceof ActivityCoverageError) return { status: "UPSTREAM_UNAVAILABLE", error: "原文中的部分原安排仍未能可靠识别。请把每项安排分别写清楚后重新分析；本次不会生成缺项方案。", retryable: true, failedStage: "PARSER" };
-      return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("PARSER", error), retryable: true, failedStage: "PARSER" };
+      if (error instanceof ActivityCoverageError) {
+        return assistFailure(modelInvalidOutput("PARSER", 2, error), "PARSER", traceId, {}, "原文中的部分原安排仍未能可靠识别。请把每项安排分别写清楚后重新分析；本次不会生成缺项方案。");
+      }
+      return assistFailure(error, "PARSER", traceId);
     }
     parsed = normalizePlanningFacts(base, parsed);
     draft = confirmedDraftFromParsed(base, parsed);
@@ -399,7 +413,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
   const confirmedActivities = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id));
   if (!confirmedActivities.length && !snapshot.itinerary.some(event => event.status !== "completed") &&
       draft.activityFacts.some(fact => fact.role === "considering")) {
-    return { status: "OUT_OF_SCOPE", error: "我只能帮助你救回已确定的行程，暂时不支持对比多个备选目的地哟", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    return { status: "OUT_OF_SCOPE", message: "我只能帮助你救回已确定的行程，暂时不支持对比多个备选目的地哟", parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
   const uncertainActivity = draft.activityFacts.find(fact => fact.role === "uncertain");
   if (uncertainActivity) {
@@ -409,14 +423,14 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
       { value: "reference", label: "仅作背景" },
     ]);
     const nextState = nextResolutionState(resolutionState, blocker);
-    if (!nextState) return { status: "OUT_OF_SCOPE", error: "这项安排仍未能确认，请修改描述后重新分析。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    if (!nextState) return { status: "OUT_OF_SCOPE", message: "这项安排仍未能确认，请修改描述后重新分析。", parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
     parsed.missingFacts = [blocker.key];
     parsed.status = "needs_input";
     return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: noImpact(snapshot), resolutionState: nextState, missingFact: blocker };
   }
 
   if (!hasActionableIntent(parsed, parsed.rawText)) {
-    return { status: "OUT_OF_SCOPE", error: "我只处理已有单日行程中的明确变化或明确优化请求。请说明发生了什么变化，例如“下雨了，把下午的户外行程调一下”。", retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    return { status: "OUT_OF_SCOPE", message: "我只处理已有单日行程中的明确变化或明确优化请求。请说明发生了什么变化，例如“下雨了，把下午的户外行程调一下”。", parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
   const unresolvedExistingPlans = (draft.activityFacts.length ? [] : draft.activityMentions).filter(
     (mention) => mention.role === "existing_plan",
@@ -428,7 +442,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     const message = draft.activityMentions.some((mention) => mention.role === "considering")
       ? "你提到的是尚未决定的备选活动。请先告诉我最终想安排哪一项，以及大致时间和地点。"
       : "请告诉我接下来想做什么，以及大致时间和地点；也可以先到创建页整理今天的行程。";
-    return { status: "OUT_OF_SCOPE", error: message, retryable: false, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    return { status: "OUT_OF_SCOPE", message, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
 
   const unknownFixed = confirmedOriginals(draft.activityFacts).filter(fact => !draft.removedOriginalIds.includes(fact.id) && fact.commitment !== "flexible" && fact.startTime === null);
@@ -444,7 +458,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
       ],
       warning: "预约时间未提供，无法验证是否赶上；地点和路线也尚未完成校验。这些是条件性建议，不能直接接受为最终方案。",
     };
-    return { status: "CONDITIONAL", error: advice.warning, retryable: false, advice, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    return { status: "CONDITIONAL", message: advice.warning, advice, parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
   }
   const request = buildRequest(snapshot, parsed, draft);
   let impact = analyzeImpact(snapshot, request);
@@ -454,7 +468,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
     const priority = (fact: MissingFact) => snapshot.itinerary.some((event) => event.placeId === fact.field && event.locked) ? 0 : fact.field === "currentLocation" ? 1 : 2;
     const blocker = [...blockers].sort((a, b) => priority(a) - priority(b))[0];
     const nextState = nextResolutionState(resolutionState, blocker);
-    if (!nextState) return { status: "OUT_OF_SCOPE", error: "同一个关键信息仍未能确认。本次调整已安全结束，原行程没有改变；请修改正式行程后重新发起。", retryable: false, parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    if (!nextState) return { status: "OUT_OF_SCOPE", message: "同一个关键信息仍未能确认。本次调整已安全结束，原行程没有改变；请修改正式行程后重新发起。", parsedInput: parsed, impactAnalysis: impact, resolutionState };
     parsed.missingFacts = [blocker.key];
     parsed.status = "needs_input";
     return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: impact, resolutionState: nextState, missingFact: blocker, ambiguities: world?.ambiguities.filter((item) => item.field === blocker.field) ?? [], world };
@@ -477,10 +491,10 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
 
   let world: RealWorldContext;
   try {
-    const ground = dependencies.ground ?? ((value: unknown, abortSignal?: AbortSignal) => new WorldContextService().ground(value, abortSignal));
-    world = await ground({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, signal);
+    const ground = dependencies.ground ?? ((value: unknown, abortSignal?: AbortSignal) => new WorldContextService().ground(value, abortSignal, execution));
+    world = await execution.measure("GROUNDING", () => ground({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, signal));
   } catch (error) {
-    return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("GROUNDING", error), retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    return assistFailure(error, "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState });
   }
   impact = analyzeImpact(snapshot, request, world);
   parsed.resolutionEvidence = world.resolutionEvidence;
@@ -496,7 +510,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
       continue;
     }
     if (matchingEvents.length !== 1) {
-      return { status: "UPSTREAM_UNAVAILABLE", error: "地点补充问题无法安全对应到唯一活动，原行程没有改变。请核对正式行程后重试。", retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+      return assistFailure(new ServiceFailure("INTERNAL_ERROR", "GROUNDING", { retryable: true, detail: "AMBIGUITY_MAPPING_FAILED" }), "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState }, "地点补充问题无法安全对应到唯一活动，原行程没有改变。请核对正式行程后重试。");
     }
     const event = matchingEvents[0];
     add(missingFact(`activity:${event.id}:location`, fact.message));
@@ -524,7 +538,7 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
   }
   if (blockers.length) return respondWithBlocker(world);
   if (world.status !== "ready") {
-    return { status: "UPSTREAM_UNAVAILABLE", error: world.missingWorldFacts.find((item) => item.kind === "world")?.message ?? "真实地点或路线数据暂时不可用，请稍后重试。", retryable: true, failedStage: "GROUNDING", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    return assistFailure(new ServiceFailure("MAP_PROVIDER_ERROR", "GROUNDING", { retryable: true, provider: "amap", detail: "WORLD_CONTEXT_UNAVAILABLE" }), "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState }, world.missingWorldFacts.find((item) => item.kind === "world")?.message ?? "真实地点或路线数据暂时不可用，请稍后重试。");
   }
 
   if (world.currentLocation?.city) snapshot.trip.destination = world.currentLocation.city;
@@ -537,11 +551,11 @@ export async function runAgentAssist(raw: unknown, signal?: AbortSignal, depende
 
   try {
     const replan = dependencies.replan ?? replanReal;
-    const result = await replan({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, undefined, { ground: async () => world }, impact, signal);
-    if ("error" in result) return { status: "NO_SAFE_PLAN", error: result.error, retryable: false, failedStage: "VALIDATOR", parsedInput: parsed, impactAnalysis: impact, resolutionState, base: snapshot, request };
-    if (!result.ok || !result.plan) return { status: "NO_SAFE_PLAN", error: result.message, retryable: false, failedStage: "VALIDATOR", parsedInput: parsed, impactAnalysis: impact, resolutionState, result, base: snapshot, request };
+    const result = await replan({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, undefined, { ground: async () => world }, impact, signal, execution);
+    if ("world" in result) return assistFailure(new ServiceFailure("MAP_PROVIDER_ERROR", "GROUNDING", { retryable: true, provider: "amap", detail: "REPLAN_WORLD_CONTEXT_UNAVAILABLE" }), "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState }, result.message);
+    if (!result.ok || !result.plan) return { status: "NO_SAFE_PLAN", message: result.message, parsedInput: parsed, impactAnalysis: impact, resolutionState, result, base: snapshot, request };
     return { status: "READY", parsedInput: ParsedUserInputSchema.parse(parsed), impactAnalysis: impact, resolutionState, result, base: snapshot, request };
   } catch (error) {
-    return { status: "UPSTREAM_UNAVAILABLE", error: upstreamMessage("PLANNER", error), retryable: true, failedStage: "PLANNER", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    return assistFailure(error, "PLANNER", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState });
   }
 }

@@ -36,13 +36,13 @@ import {
   createItineraryDraft,
   loadSession,
   logEvent,
-  requestHeaders,
   saveFlowDraft,
   saveItineraryDraft,
   savePendingPlan,
   saveSession,
   saveTrip,
 } from "@/services/trip-service";
+import { authenticatedJsonFetch } from "@/services/api-client";
 import {
   AgentResultSchema,
   ConditionalAdviceSchema,
@@ -64,11 +64,13 @@ import {
   type Snapshot,
 } from "@/types";
 import type { ImpactAnalysis, MissingFact, ResolutionOption } from "@/types";
+import { FailureEnvelopeSchema, type FailureInfo } from "@/types/failures";
 
 type AssistBody = {
-  error?: string;
+  message?: string;
+  failure?: FailureInfo;
   advice?: ConditionalAdvice;
-  status?: "CONDITIONAL" | "READY" | "NEEDS_INPUT" | "OUT_OF_SCOPE" | "UPSTREAM_UNAVAILABLE" | "NO_SAFE_PLAN";
+  status?: "CONDITIONAL" | "READY" | "NEEDS_INPUT" | "OUT_OF_SCOPE" | "AUTH_REQUIRED" | "RATE_LIMITED" | "UPSTREAM_UNAVAILABLE" | "REQUEST_TIMEOUT" | "SYSTEM_ERROR" | "INVALID_REQUEST" | "NO_SAFE_PLAN";
   parsedInput?: ParsedUserInput;
   confirmedDraft?: ReturnType<typeof confirmedDraftFromParsed>;
   missingFact?: MissingFact;
@@ -107,13 +109,8 @@ const eventDurationLabel = (event: ItineraryEvent) => {
 };
 const errorText = (error: unknown) => {
   if (error instanceof ZodError) return "服务暂时返回异常，你的输入已保留，请稍后重试。";
+  if (error instanceof TypeError) return "服务暂时无法连接，你的输入已保留，请稍后重试。";
   if (!(error instanceof Error)) return "操作失败，请再试一次。";
-  if (/unexpected token|json|invalid_type|invalid input|syntaxerror/i.test(error.message)) {
-    return "服务暂时返回异常，你的输入已保留，请稍后重试。";
-  }
-  if (/failed to fetch|networkerror|load failed|connection/i.test(error.message)) {
-    return "服务暂时无法连接，你的输入已保留，请稍后重试。";
-  }
   return error.message;
 };
 
@@ -167,11 +164,6 @@ async function readApiJson(response: Response): Promise<unknown> {
   }
 }
 
-const ApiErrorBodySchema = z.object({
-  error: z.string().min(1),
-  code: z.string().min(1).optional(),
-}).passthrough();
-
 const AssistNeedsInputSchema = z.object({
   status: z.literal("NEEDS_INPUT"),
   parsedInput: ParsedUserInputSchema,
@@ -193,23 +185,25 @@ const AssistReadySchema = z.object({
 }).passthrough();
 
 const AssistTerminalSchema = z.object({
-  status: z.enum(["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN", "CONDITIONAL"]),
-  error: z.string().min(1),
-  retryable: z.boolean().optional(),
-  failedStage: z.enum(["PARSER", "GROUNDING", "PLANNER", "VALIDATOR"]).optional(),
+  status: z.enum(["OUT_OF_SCOPE", "NO_SAFE_PLAN", "CONDITIONAL"]),
+  message: z.string().min(1),
+  parsedInput: ParsedUserInputSchema.optional(),
+  impactAnalysis: ImpactAnalysisSchema.optional(),
+  resolutionState: ResolutionStateSchema.optional(),
+}).passthrough();
+const AssistFailureSchema = FailureEnvelopeSchema.extend({
   parsedInput: ParsedUserInputSchema.optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
   resolutionState: ResolutionStateSchema.optional(),
 }).passthrough();
 const AssistConditionalSchema = z.object({
-  status: z.literal("CONDITIONAL"), error: z.string().min(1),
+  status: z.literal("CONDITIONAL"), message: z.string().min(1),
   advice: ConditionalAdviceSchema, parsedInput: ParsedUserInputSchema,
   resolutionState: ResolutionStateSchema,
 }).passthrough();
 
 const ValidateResponseSchema = z.object({
   ok: z.boolean(),
-  error: z.string().min(1).optional(),
   violations: z.array(z.unknown()).optional(),
 }).passthrough();
 
@@ -218,10 +212,13 @@ function parseAssistBody(value: unknown, responseOk: boolean): AssistBody {
   if (objectValue.status === "NEEDS_INPUT") return AssistNeedsInputSchema.parse(objectValue);
   if (objectValue.status === "READY") return AssistReadySchema.parse(objectValue);
   if (objectValue.status === "CONDITIONAL") return AssistConditionalSchema.parse(objectValue);
-  if (["OUT_OF_SCOPE", "UPSTREAM_UNAVAILABLE", "NO_SAFE_PLAN"].includes(String(objectValue.status))) {
+  if (["OUT_OF_SCOPE", "NO_SAFE_PLAN"].includes(String(objectValue.status))) {
     return AssistTerminalSchema.parse(objectValue);
   }
-  if (!responseOk && objectValue.status === undefined) return ApiErrorBodySchema.parse(objectValue);
+  if (["AUTH_REQUIRED", "RATE_LIMITED", "INVALID_REQUEST", "UPSTREAM_UNAVAILABLE", "REQUEST_TIMEOUT", "SYSTEM_ERROR"].includes(String(objectValue.status))) {
+    return AssistFailureSchema.parse(objectValue);
+  }
+  if (!responseOk) return FailureEnvelopeSchema.parse(objectValue);
   throw new ZodError([{ code: "custom", path: ["status"], message: "Unknown assist response status" }]);
 }
 
@@ -244,18 +241,16 @@ async function parseWithModel(
   rawText: string,
   hint?: ReplanningRequest["reason"],
 ) {
-  const response = await fetch("/api/parse", {
-    method: "POST",
-    headers: await requestHeaders(),
-    body: JSON.stringify({ snapshot, rawText, hint }),
+  const response = await authenticatedJsonFetch("/api/parse", {
+    json: { snapshot, rawText, hint },
   });
   const rawBody = await readApiJson(response);
   if (response.ok) return ParsedUserInputSchema.parse(rawBody);
-  const body = ApiErrorBodySchema.parse(rawBody);
-  if (response.status === 503 && body.code === "MODEL_NOT_CONFIGURED") {
+  const body = FailureEnvelopeSchema.parse(rawBody);
+  if (body.failure.code === "MODEL_NOT_CONFIGURED") {
     throw new Error("AI 解析未启用，请先配置服务端 DEEPSEEK_API_KEY。");
   }
-  throw new Error(body.error ?? "AI 语义解析失败，原文已经保留，请重试。");
+  throw new Error(body.message);
 }
 
 function useRealSession() {
@@ -340,6 +335,10 @@ export function HomeFlow() {
   const [requestController, setRequestController] = useState<AbortController | null>(null);
   const requestId = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    requestId.current += 1;
+    controllerRef.current?.abort();
+  }, []);
   useEffect(() => {
     if (!session || ready) return;
     const timeout = window.setTimeout(() => {
@@ -427,7 +426,7 @@ export function HomeFlow() {
       const payload = fresh
         ? { snapshot: requestSession.snapshot, rawText: raw, resolutionState: requestSession.resolutionState }
         : { snapshot: requestSession.snapshot, confirmedDraft, answer, resolutionState };
-      const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify(payload), signal: controller.signal });
+      const response = await authenticatedJsonFetch("/api/assist", { json: payload, signal: controller.signal });
       const body = await readAssistResponse(response);
       if (currentRequestId !== requestId.current) return;
       if (body.status === "NEEDS_INPUT" && body.parsedInput && body.confirmedDraft && body.missingFact && body.resolutionState) {
@@ -450,6 +449,9 @@ export function HomeFlow() {
         return;
       }
       if (!response.ok || body.status !== "READY") {
+        if (body.status === "AUTH_REQUIRED" || body.status === "RATE_LIMITED" || body.failure?.stage === "AUTH") {
+          throw new Error(body.message ?? "会话服务暂时不可用，请稍后重试。");
+        }
         const flowStage = body.status === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : body.status === "NO_SAFE_PLAN" || body.status === "CONDITIONAL" ? "NO_SAFE_PLAN" : "UNAVAILABLE";
         const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
         setMissingFact(null);
@@ -458,7 +460,7 @@ export function HomeFlow() {
         setResolutionState(cleanResolutionState);
         setSession(saveSession({ ...requestSession, rawInput: raw, flowStage, resolutionState: cleanResolutionState,
           pendingInput: null, pendingPlan: null, conditionalAdvice: null }));
-        throw new Error(body.error ?? "真实信息暂时不可用，请稍后重试。");
+        throw new Error(body.message ?? "真实信息暂时不可用，请稍后重试。");
       }
       if (!body.parsedInput || !body.result || !body.base || !body.request) throw new Error("服务没有返回完整方案，原行程未改变。");
       const result = AgentResultSchema.parse(body.result);
@@ -1210,17 +1212,15 @@ export function RescueFlow() {
         flowStage: "NEEDS_INPUT",
       });
       setSession(savedConfirmation);
-      const response = await fetch("/api/assist", {
-        method: "POST",
-        headers: await requestHeaders(),
-        body: JSON.stringify({
+      const response = await authenticatedJsonFetch("/api/assist", {
+        json: {
           snapshot: activeSession.snapshot,
           confirmedDraft,
           resolutionState: activeSession.resolutionState,
-        }),
+        },
       });
       const body = await readAssistResponse(response);
-      if (!response.ok) throw new Error(body.error ?? "暂时无法生成方案。");
+      if (!response.ok) throw new Error(body.message ?? "暂时无法生成方案。");
       if (body.status === "NEEDS_INPUT") {
         if (body.world) setWorld(RealWorldContextSchema.parse(body.world));
         if (body.parsedInput) setParsed(ParsedUserInputSchema.parse(body.parsedInput));
@@ -1228,7 +1228,7 @@ export function RescueFlow() {
         setBusy(false);
         return;
       }
-      if (body.status !== "READY") throw new Error(body.error ?? "真实信息暂时不可用，请稍后重试。");
+      if (body.status !== "READY") throw new Error(body.message ?? "真实信息暂时不可用，请稍后重试。");
       const result = AgentResultSchema.parse(body.result);
       const request = ReplanningRequestSchema.parse(body.request);
       savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
@@ -1815,8 +1815,11 @@ function ResultAnalysisContent({ plan, impact, request, base }: {
 export function ResultFlow() {
   const { session, setSession, error, setError } = useRealSession();
   const [busy, setBusy] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("");
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const validationControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => validationControllerRef.current?.abort(), []);
   if (!session) return <Loading error={error} />;
   const pending = session.flowStage === "PLAN_READY" ? session.pendingPlan : null;
   if (!pending || pending.result.mode !== "live") return <div className="mobile-workspace empty-screen"><span className="eyebrow">方案</span><h1>还没有待确认的方案。</h1><p className="muted">先从首页告诉我今天发生了什么。</p><Link className="primary full" href="/">返回首页 <ArrowRight size={17} /></Link></div>;
@@ -1830,10 +1833,10 @@ export function ResultFlow() {
 
   async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
     const confirmedDraft = confirmedDraftFromParsed(base, nextParsed, nextParsed.closedPlaceIds, removedLockedIds, removedEventIds);
-    const response = await fetch("/api/assist", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, confirmedDraft, resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } }) });
+    const response = await authenticatedJsonFetch("/api/assist", { json: { snapshot: base, confirmedDraft, resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } } });
     const body = await readAssistResponse(response);
-    if (!response.ok) throw new Error(body.error ?? "暂时无法重新安排。");
-    if (body.status !== "READY" || !body.result || !body.base || !body.request || !body.parsedInput) throw new Error(body.missingFact?.question ?? body.error ?? "请先补充这次调整需要的信息。");
+    if (!response.ok) throw new Error(body.message ?? "暂时无法重新安排。");
+    if (body.status !== "READY" || !body.result || !body.base || !body.request || !body.parsedInput) throw new Error(body.missingFact?.question ?? body.message ?? "请先补充这次调整需要的信息。");
     const nextResult = AgentResultSchema.parse(body.result);
     const nextRequest = ReplanningRequestSchema.parse(body.request);
     savePendingPlan({ result: nextResult, base: SnapshotSchema.parse(body.base), request: nextRequest, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, nextRequest);
@@ -1877,14 +1880,19 @@ export function ResultFlow() {
   async function accept() {
     if (!plan) return;
     setBusy(true); setError("");
+    setValidating(true);
+    const controller = new AbortController();
+    validationControllerRef.current = controller;
     try {
       const latest = loadSession();
       if (!latest.pendingPlan || latest.flowStage !== "PLAN_READY") throw new Error("当前方案已失效，请重新分析。");
       if (latest.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
       if (result.context.world && worldConfirmationExpired(result.context.world.currentTime.confirmedAt)) throw new Error("距离确认时间较久，请重新生成方案。");
-      const response = await fetch("/api/validate", { method: "POST", headers: await requestHeaders(), body: JSON.stringify({ snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }) });
-      const checked = ValidateResponseSchema.parse(await readApiJson(response));
-      if (!response.ok || !checked.ok) throw new Error("方案已不再满足当前安排，请重新生成。");
+      const response = await authenticatedJsonFetch("/api/validate", { json: { snapshot: base, request, mode: result.mode, confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() }, plan }, signal: controller.signal });
+      const validationBody = await readApiJson(response);
+      if (!response.ok) throw new Error(FailureEnvelopeSchema.parse(validationBody).message);
+      const checked = ValidateResponseSchema.parse(validationBody);
+      if (!checked.ok) throw new Error("方案已不再满足当前安排，请重新生成。");
       const current = loadSession();
       if (!current.pendingPlan || current.flowStage !== "PLAN_READY" || current.pendingPlan.result.id !== result.id) throw new Error("当前方案已失效，请重新分析。");
       if (current.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
@@ -1892,7 +1900,13 @@ export function ResultFlow() {
       await saveTrip(next, current.snapshot.revision);
       const updated = saveSession({ ...loadSession(), snapshot: { ...next, mode: "user" }, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null });
       setSession(updated); await logEvent("replan_accepted", { planId: result.id, mode: "real" }); setNotice("方案已接受"); window.location.assign("/trip");
-    } catch (cause) { setError(errorText(cause)); setBusy(false); }
+    } catch (cause) {
+      if ((cause as Error)?.name !== "AbortError") setError(errorText(cause));
+    } finally {
+      if (validationControllerRef.current === controller) validationControllerRef.current = null;
+      setValidating(false);
+      setBusy(false);
+    }
   }
 
   const baseMap = new Map(base.itinerary.map(event => [event.id, event]));
@@ -1923,7 +1937,7 @@ export function ResultFlow() {
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
         {candidatePlans.length > 0 && <section className="candidate-section"><div className="section-title"><h2>备选方案</h2><span>1 个取舍不同的方案</span></div><div className="candidate-list">{candidatePlans.map(candidate => <button type="button" key={candidate.id} className="candidate-card" onClick={() => chooseCandidate(candidate)}><span><b>{summarizeVerifiedPlan(result.context, candidate.plan!)}</b><small>{candidate.tradeOff}</small></span><ChevronRight size={18} /></button>)}</div></section>}
       </>}
-      {!notice && plan && <div className="plan-actions"><button className="primary full" disabled={busy} onClick={() => void accept()}>{busy ? "正在确认…" : "接受方案"}<Check size={17} /></button>{candidatePlans.length > 0 && <button className="text-action centered" type="button" onClick={() => document.querySelector<HTMLButtonElement>(".candidate-section .candidate-card")?.focus()}>看备选方案</button>}</div>}
+      {!notice && plan && <div className="plan-actions"><button className="primary full" disabled={busy} onClick={() => void accept()}>{validating ? "正在复验…" : busy ? "正在处理…" : "接受方案"}<Check size={17} /></button>{validating && <button className="text-action centered" type="button" onClick={() => validationControllerRef.current?.abort()}>取消复验</button>}{candidatePlans.length > 0 && !validating && <button className="text-action centered" type="button" onClick={() => document.querySelector<HTMLButtonElement>(".candidate-section .candidate-card")?.focus()}>看备选方案</button>}</div>}
       {notice && <div className="success-box" role="status">{notice}</div>}
     </div>
   );

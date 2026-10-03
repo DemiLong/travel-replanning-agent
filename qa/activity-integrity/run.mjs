@@ -78,8 +78,8 @@ await check("新增 C. 纯比较备选目的地直接返回产品边界文案（
   const parsed = normalizeSemanticExtraction(snapshot(), raw, model, "controlled");
   const result = await runAgentAssist({ snapshot: snapshot(), rawText: raw }, undefined, { parse: async () => parsed });
   assert.equal(result.status, "OUT_OF_SCOPE");
-  assert.equal(result.error, "我只能帮助你救回已确定的行程，暂时不支持对比多个备选目的地哟");
-  return { status: result.status, message: result.error };
+  assert.equal(result.message, "我只能帮助你救回已确定的行程，暂时不支持对比多个备选目的地哟");
+  return { status: result.status, message: result.message };
 });
 
 await check("1. 多个无时间弹性原安排首次提交直达地点查询且不问原定几点（受控）", async () => {
@@ -165,7 +165,7 @@ await check("3a. 独立原文覆盖检查发现合并或漏项时禁止缺项 RE
   const result = await runAgentAssist({ snapshot: snapshot(), rawText: "晚点了，原计划去上海静安寺，再去上海自然博物馆" },
     undefined, { parse: async () => { throw new ActivityCoverageError(missing); } });
   assert.equal(result.status, "UPSTREAM_UNAVAILABLE");
-  assert.match(result.error, /不会生成缺项方案/);
+  assert.match(result.message, /不会生成缺项方案/);
   return { independentNames: coverage.map(item => item.name), combinedFactId: combined[0].id,
     missingNames: missing.map(item => item.name), resultStatus: result.status };
 });
@@ -194,9 +194,9 @@ await check("3c. 高德错误按安全类别与代码记录，不泄露密钥（
     process.env.AMAP_API_KEY = "qa-placeholder-key";
     globalThis.fetch = async () => new Response(JSON.stringify({ status: "0", infocode: "10021" }), { status: 200 });
     await assert.rejects(() => amapGet("/v3/place/text", { keywords: "上海人民广场", qa: crypto.randomUUID() }),
-      error => error instanceof WorldServiceError && error.code === "AMAP_PROVIDER" && error.detail === "10021" &&
+      error => error instanceof WorldServiceError && error.code === "MAP_PROVIDER_ERROR" && error.detail === "10021" &&
         !error.message.includes("qa-placeholder-key"));
-    return { category: "AMAP_PROVIDER", providerCode: "10021", keyPresentInError: false };
+    return { category: "MAP_PROVIDER_ERROR", providerCode: "10021", keyPresentInError: false };
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.AMAP_API_KEY;
@@ -291,8 +291,8 @@ await check("8. 固定预约时间未知只能返回未验证的条件建议", a
   const base = snapshot(); const raw = "晚点了，原计划去上海国金中心商场鼎泰丰吃饭，已经预约，请重新安排";
   const parsed = normalizeSemanticExtraction(base, raw, extraction([activity("上海国金中心商场鼎泰丰", "原计划去上海国金中心商场鼎泰丰吃饭，已经预约", { locked: "yes" })]), "qa");
   const result = await runAgentAssist({ snapshot: base, rawText: raw }, undefined, { parse: async () => parsed });
-  assert.equal(result.status, "CONDITIONAL"); assert.match(result.error, /预约时间未提供/);
-  return { status: result.status, message: result.error };
+  assert.equal(result.status, "CONDITIONAL"); assert.match(result.message, /预约时间未提供/);
+  return { status: result.status, message: result.message };
 });
 
 await check("8a. 仅对分类不确定的活动单项补问，回答后继续规划（受控）", async () => {
@@ -438,7 +438,7 @@ if (process.argv.includes("--live")) await check("11. 真实模型与高德：�
     current = await runAgentAssist({ snapshot: base, confirmedDraft: current.confirmedDraft,
       resolutionState: current.resolutionState, answer });
   }
-  assert.equal(current.status, "READY", JSON.stringify({ status: current.status, error: current.error, questions,
+  assert.equal(current.status, "READY", JSON.stringify({ status: current.status, message: current.message, questions,
     attempts: current.result?.attempts, comparisons: current.result?.candidateComparisons }));
   const plan = current.result.plan;
   const accounted = new Set([...plan.events.map(x => x.id), ...plan.removedEvents.map(x => x.eventId)]);

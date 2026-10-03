@@ -1,42 +1,58 @@
 import { AssistRequestSchema, runAgentAssist } from "@/agents/agent-orchestrator";
-import { WorldServiceError } from "@/services/world/amap-client";
+import { failureEnvelope, failureResponse } from "@/services/api-failure";
+import {
+  failureHttpStatus,
+  ServiceFailure,
+} from "@/services/failures";
+import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
+import { authorizeApiRequest } from "@/services/server-auth";
 
 export const maxDuration = 35;
 
-function isModelUnavailable(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /connection error|fetch failed|network|timed out|timeout|econn|enotfound|socket/i.test(message);
-}
-
-function safeBusinessError(error: unknown) {
-  const message = error instanceof Error ? error.message : "";
-  if (/原行程版本已变化|固定安排|已完成安排|当前.*回答|所选活动|这条回答不属于/.test(message)) {
-    return message;
-  }
-  return "服务暂时返回异常，你的输入已保留，请稍后重试。";
-}
-
 export async function POST(request: Request) {
-  const deadline = new AbortController();
-  const timeout = setTimeout(() => deadline.abort(new Error("ASSIST_DEADLINE_EXCEEDED")), 30000);
+  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: 30000 });
+  const headers = { "Cache-Control": "no-store", "X-Trace-Id": execution.traceId };
+
   try {
-    const raw = await request.text();
-    if (raw.length > 80000) return Response.json({ error: "请求内容过大。" }, { status: 413 });
-    const input = AssistRequestSchema.parse(JSON.parse(raw));
-    const result = await runAgentAssist(input, deadline.signal);
-    return Response.json(result, { status: result.status === "UPSTREAM_UNAVAILABLE" ? 503 : 200, headers: { "Cache-Control": "no-store" } });
+    await execution.measure("AUTH", () => authorizeApiRequest(request, "assist", execution.signal));
+    const input = await execution.measure("REQUEST", async () => {
+      const raw = await request.text();
+      if (raw.length > 80000) {
+        throw new ServiceFailure("INVALID_REQUEST", "REQUEST", {
+          retryable: false,
+          detail: "PAYLOAD_TOO_LARGE",
+        });
+      }
+      return AssistRequestSchema.parse(JSON.parse(raw));
+    });
+    const result = await runAgentAssist(input, execution);
+    if ("failure" in result) {
+      const provider = result.failure.code.startsWith("MODEL_")
+        ? "deepseek"
+        : result.failure.code.startsWith("MAP_")
+          ? "amap"
+          : undefined;
+      const failure = new ServiceFailure(result.failure.code, result.failure.stage, {
+        retryable: result.failure.retryable,
+        provider,
+      });
+      const httpStatus = failureHttpStatus(failure.code);
+      const response = Response.json(result, { status: httpStatus, headers });
+      execution.finish({ route: "/api/assist", outcome: outcomeForFailure(failure), httpStatus, status: result.status, failure });
+      return response;
+    }
+    const response = Response.json(result, { status: 200, headers });
+    execution.finish({ route: "/api/assist", outcome: result.status === "READY" ? "success" : "business", httpStatus: 200, status: result.status });
+    return response;
   } catch (error) {
-    if (deadline.signal.aborted) return Response.json({ status: "UPSTREAM_UNAVAILABLE", failedStage: "PLANNER", retryable: true, error: "本次处理已达到 30 秒上限，原行程没有改变。你可以稍后重试。" }, { status: 503 });
-    if (error instanceof WorldServiceError) return Response.json({ status: "UPSTREAM_UNAVAILABLE", failedStage: "GROUNDING", retryable: true, error: "地点与路线服务暂时不可用，你的输入已保留，请稍后重试。" }, { status: 503 });
-    if (error instanceof SyntaxError) return Response.json({ error: "请求无效。" }, { status: 400 });
-    if (error instanceof Error && error.message === "MODEL_NOT_CONFIGURED") {
-      return Response.json({ status: "UPSTREAM_UNAVAILABLE", failedStage: "PARSER", retryable: true, code: "MODEL_NOT_CONFIGURED", error: "AI 解析未启用，请配置服务端 DEEPSEEK_API_KEY。" }, { status: 503 });
-    }
-    if (isModelUnavailable(error)) {
-      return Response.json({ status: "UPSTREAM_UNAVAILABLE", failedStage: "PARSER", retryable: true, code: "MODEL_UPSTREAM_UNAVAILABLE", error: "AI 服务暂时无法连接，请稍后重试。" }, { status: 503 });
-    }
-    return Response.json({ error: safeBusinessError(error) }, { status: 400 });
+    const mapped = failureEnvelope(execution.failureFor(error), {
+      traceId: execution.traceId,
+      stage: execution.activeStage,
+    });
+    const response = failureResponse(mapped.failure, { traceId: execution.traceId, stage: execution.activeStage });
+    execution.finish({ route: "/api/assist", outcome: outcomeForFailure(mapped.failure), httpStatus: mapped.httpStatus, status: mapped.body.status, failure: mapped.failure });
+    return response;
   } finally {
-    clearTimeout(timeout);
+    execution.dispose();
   }
 }

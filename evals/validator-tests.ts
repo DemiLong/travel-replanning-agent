@@ -508,8 +508,8 @@ async function main() {
       undefined,
       { parse: async () => parsed("现在下雨了，请调整原定安排"), ground: async () => unsafeWorldQuestion },
     );
-    assert.equal(unsafeResult.status, "UPSTREAM_UNAVAILABLE", `${unsafeMapping.name}时必须受控失败`);
-    assert.match(unsafeResult.error, /无法安全对应到唯一活动/);
+    assert.equal(unsafeResult.status, "SYSTEM_ERROR", `${unsafeMapping.name}时必须受控失败`);
+    assert.match(unsafeResult.message, /无法安全对应到唯一活动/);
   }
 
   const missingTime = await runAgentAssist(
@@ -565,8 +565,8 @@ async function main() {
     { parse: async () => { throw new SyntaxError("Unexpected token < in JSON"); } },
   );
   assert.equal(invalidParserResult.status, "UPSTREAM_UNAVAILABLE");
-  assert.equal(invalidParserResult.error, "服务暂时未能生成有效结果，你的输入已保留，请重试。");
-  assert(!invalidParserResult.error.includes("Unexpected token"));
+  assert.equal(invalidParserResult.message, "服务暂时未能生成有效结果，请重试。");
+  assert(!invalidParserResult.message.includes("Unexpected token"));
 
   const emptyCandidatePlanner: CandidatePlanner = {
     name: "empty-candidate-test",
@@ -763,8 +763,8 @@ async function main() {
 
   const planner: CandidatePlanner = { name: "bounded-test", generateCandidates: async () => [] };
   const replanned = await replanReal(input(), planner, { ground: async () => world() });
-  assert(!("error" in replanned));
-  if ("error" in replanned) throw new Error(String(replanned.error));
+  assert(!("world" in replanned));
+  if ("world" in replanned) throw new Error(replanned.message);
   assert.equal(replanned.ok, false);
   assert.equal(replanned.attempts.length, MAX_REPLAN_ATTEMPTS);
   assert.equal(MAX_REPLAN_ATTEMPTS, 2);

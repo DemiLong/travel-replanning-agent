@@ -97,7 +97,7 @@ for (const item of cases.filter(value => !selectedCase || value.id === selectedC
         resolutionState: result.resolutionState, answer }, undefined, dependencies);
     }
     const sourceById = new Map((result.parsedInput?.activityFacts ?? []).map(fact => [fact.id, fact.sourceText]));
-    record.stages.push({ stage: "assistResult", value: { status: result.status, error: result.error ?? null,
+    record.stages.push({ stage: "assistResult", value: { status: result.status, message: result.message ?? null,
       advice: result.advice ?? null,
       attempts: result.result?.attempts ?? null, candidateComparisons: result.result?.candidateComparisons ?? null,
       parsedFacts: summarizeActivities(result.parsedInput?.activityFacts ?? []),

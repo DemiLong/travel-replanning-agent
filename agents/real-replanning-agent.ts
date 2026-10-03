@@ -1,6 +1,6 @@
 import { WorldContextService } from "../services/world/world-context-service";
 import { buildRealContext } from "./real-context-builder";
-import { DeepSeekPlanner, materializeCandidate, type CandidatePlanner } from "../services/deepseek-planner";
+import { CandidateOutputError, DeepSeekPlanner, materializeCandidate, type CandidatePlanner } from "../services/deepseek-planner";
 import { UnknownDurationConflict } from "../services/deepseek-planner";
 import { validatePlan } from "../validators";
 import { validatePlanExplanation } from "../services/plan-narrative";
@@ -8,6 +8,9 @@ import { decisionTrace } from "../services/decision-trace";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION } from "../lib/time";
 import type { AgentResult, ImpactAnalysis, PlanConflict, ResolutionOption, Violation } from "../types";
 import type { RealWorldContext } from "../types/world";
+import { ZodError } from "zod";
+import { modelInvalidOutput, normalizeModelFailure } from "../services/failures";
+import type { RequestExecution } from "../services/request-execution";
 export const MAX_REPLAN_ATTEMPTS=2;
 
 function collectConflicts(violations: Violation[]) {
@@ -60,34 +63,58 @@ function resolutionOptions(context: ReturnType<typeof buildRealContext>, conflic
   return options;
 }
 
-export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSeekPlanner(),worldService:Pick<WorldContextService,"ground">=new WorldContextService(),impactAnalysis?:ImpactAnalysis,signal?:AbortSignal):Promise<AgentResult|{world:RealWorldContext;error:string}>{
+export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSeekPlanner(),worldService:Pick<WorldContextService,"ground">=new WorldContextService(),impactAnalysis?:ImpactAnalysis,signal?:AbortSignal,execution?:RequestExecution):Promise<AgentResult|{world:RealWorldContext;message:string}>{
   const world=await worldService.ground(raw, signal);
-  if(world.status!=="ready")return {world,error:"真实世界数据尚未完整，请确认地点或补充必要信息。"};
+  if(world.status!=="ready")return {world,message:"真实世界数据尚未完整，请确认地点或补充必要信息。"};
   const context=buildRealContext(raw,world,impactAnalysis),attempts:AgentResult["attempts"]=[];
   let feedback:Violation[]=[],comparisons:NonNullable<AgentResult["candidateComparisons"]>=[],candidatePlans:NonNullable<AgentResult["candidatePlans"]>=[];
   for(let attempt=0;attempt<MAX_REPLAN_ATTEMPTS;attempt++){
     const started=Date.now();feedback=attempt?feedback:[];
     let selected:AgentResult["plan"]=null;
+    let invalidCandidateOutput=false;
     try{
-      const candidates=await planner.generateCandidates(context,feedback,attempt,signal);
+      const plannerStarted=performance.now();
+      const isDeepSeek=planner instanceof DeepSeekPlanner;
+      if(isDeepSeek)execution?.recordProvider("deepseek",{requestCount:1});
+      let candidates:Awaited<ReturnType<CandidatePlanner["generateCandidates"]>>;
+      try{
+        candidates=execution
+          ? await execution.measure("PLANNER",()=>planner.generateCandidates(context,feedback,attempt,signal))
+          : await planner.generateCandidates(context,feedback,attempt,signal);
+      }finally{
+        if(isDeepSeek)execution?.recordProvider("deepseek",{networkMs:performance.now()-plannerStarted});
+      }
       feedback=[];comparisons=[];candidatePlans=[];
       for(const candidate of candidates){
         try{
-          const plan=materializeCandidate(context,candidate),violations=[...validatePlan(context,plan),...validatePlanExplanation(context,plan)];
+          const evaluated=()=>{const plan=materializeCandidate(context,candidate);return {plan,violations:[...validatePlan(context,plan),...validatePlanExplanation(context,plan)]};};
+          const {plan,violations}=execution?execution.measureSync("VALIDATOR",evaluated):evaluated();
           comparisons.push({title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,conflicts:violations.map(v=>v.message)});
           candidatePlans.push({id:crypto.randomUUID(),title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,plan,conflicts:violations.flatMap(v=>v.conflict?[v.conflict]:[])});
           feedback.push(...violations);
           if(!selected&&!violations.length)selected=plan;
         }catch(error){
-          const message=error instanceof Error?error.message:"候选结构无效。";
           const conflict=error instanceof UnknownDurationConflict?error.conflict:undefined;
-          feedback.push({code:conflict?.kind==="travel_time"?"travel_time":"duration",message,eventId:conflict?.eventId,conflict});comparisons.push({title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,conflicts:[message]});
-          candidatePlans.push({id:crypto.randomUUID(),title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,plan:null,conflicts:conflict?[conflict]:[]});
+          if(conflict){
+            feedback.push({code:conflict.kind==="travel_time"?"travel_time":"duration",message:conflict.message,eventId:conflict.eventId,conflict});comparisons.push({title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,conflicts:[conflict.message]});
+            candidatePlans.push({id:crypto.randomUUID(),title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,plan:null,conflicts:[conflict]});
+          }else if(error instanceof CandidateOutputError || error instanceof ZodError){
+            invalidCandidateOutput=true;
+            const message="候选方案结构无效，已要求模型重新生成。";
+            feedback.push({code:"schema",message});comparisons.push({title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,conflicts:[message]});
+            candidatePlans.push({id:crypto.randomUUID(),title:candidate.title,tradeOff:candidate.tradeOff,feasible:false,plan:null,conflicts:[]});
+          }else throw error;
         }
       }
-    }catch{feedback=[{code:"schema",message:"DeepSeek 未返回完整候选方案，本轮没有使用本地规划替代。"}];}
+    }catch(error){
+      const failure=normalizeModelFailure(error,"PLANNER",{externalSignal:signal});
+      if(failure.code!=="MODEL_INVALID_OUTPUT")throw failure;
+      invalidCandidateOutput=true;
+      feedback=[{code:"schema",message:"DeepSeek 未返回完整候选方案，本轮没有使用本地规划替代。"}];
+    }
     attempts.push({attempt:attempt+1,durationMs:Date.now()-started,violations:selected?[]:feedback});
     if(selected)return {id:crypto.randomUUID(),ok:true,plan:selected,attempts,mode:"live",model:planner.name,message:"已通过当前可验证规则。营业状态等未确认信息请查看说明。",verificationLevel:"partial",context,impactAnalysis,decisionTrace:decisionTrace(context,selected,[]),candidateComparisons:comparisons,candidatePlans};
+    if(invalidCandidateOutput && attempt===MAX_REPLAN_ATTEMPTS-1)throw modelInvalidOutput("PLANNER",attempt+1);
   }
   const conflicts=collectConflicts(feedback);
   const reasons=[...new Set(feedback.map(item=>item.message).filter(Boolean))].slice(0,2);

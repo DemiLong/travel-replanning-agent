@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { z, ZodError } from "zod";
+import { z } from "zod";
 import { deepSeekFormat } from "./deepseek-format";
 import {
   ParsedUserInputSchema,
@@ -12,6 +12,8 @@ import {
 import { addMinutesWithinDay } from "../lib/time";
 import { legacyActivitiesFromFacts, reconcileActivityFacts } from "./activity-facts";
 import { protectionPolicyForActivity, stationLevelLocation } from "./protection-policy";
+import { modelInvalidOutput, normalizeModelFailure, ServiceFailure } from "./failures";
+import type { RequestExecution } from "./request-execution";
 
 export const SEMANTIC_PARSER_PROMPT = `You extract facts from a traveler's Chinese or English message for a same-day itinerary rescue assistant.
 
@@ -337,7 +339,7 @@ export class DeepSeekSemanticParser {
     baseURL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
   ) {
     if(typeof window!=="undefined")throw new Error("SERVER_ONLY");
-    if (!process.env.DEEPSEEK_API_KEY) throw new Error("MODEL_NOT_CONFIGURED");
+    if (!process.env.DEEPSEEK_API_KEY) throw new ServiceFailure("MODEL_NOT_CONFIGURED", "PARSER", { retryable: true, provider: "deepseek" });
     this.model = model;
     this.client = new OpenAI({
       apiKey: process.env.DEEPSEEK_API_KEY,
@@ -347,56 +349,80 @@ export class DeepSeekSemanticParser {
     });
   }
 
-  private async checkActivityCoverage(rawText: string, signal?: AbortSignal) {
-    const response = await this.client.responses.parse({
+  private async trackedModelCall<T>(execution: RequestExecution | undefined, operation: () => Promise<T>) {
+    const startedAt = performance.now();
+    execution?.recordProvider("deepseek", { requestCount: 1 });
+    try { return await operation(); }
+    finally { execution?.recordProvider("deepseek", { networkMs: performance.now() - startedAt }); }
+  }
+
+  private async modelCall<T>(signal: AbortSignal | undefined, operation: (requestSignal: AbortSignal) => Promise<T>, execution?: RequestExecution) {
+    const timeoutSignal = AbortSignal.timeout(8000);
+    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    try {
+      return await this.trackedModelCall(execution, () => operation(requestSignal));
+    } catch (error) {
+      if (error instanceof ActivityCoverageError) throw error;
+      throw normalizeModelFailure(error, "PARSER", { externalSignal: signal, providerTimedOut: timeoutSignal.aborted });
+    }
+  }
+
+  private async checkActivityCoverage(rawText: string, signal?: AbortSignal, execution?: RequestExecution) {
+    return this.modelCall(signal, async requestSignal => {
+      const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 1400, reasoning: { effort: "none" },
       input: [
         { role: "system", content: "Independently inspect the traveler text. List each distinct activity the traveler says was already planned, decided or booked for today. Include an uncertain activity if its decision status cannot be determined. Exclude current position, completed background references and mere options. Split separately named activities even when they share one sentence. Each sourceText must be an exact substring of travelerText. Return structured data only." },
         { role: "user", content: JSON.stringify({ travelerText: rawText }) },
       ],
       text: { format: deepSeekFormat(ActivityCoverageSchema, "coveredYou_activity_coverage") },
-    }, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000) });
-    if (response.status !== "completed" || !response.output_parsed) throw new Error("ACTIVITY_COVERAGE_INCOMPLETE");
-    const coverage = ActivityCoverageSchema.parse(response.output_parsed).activities;
-    if (coverage.some(item => !rawText.includes(item.sourceText))) throw new ActivityCoverageError(coverage);
-    return coverage;
+      }, { signal: requestSignal });
+      if (response.status !== "completed" || !response.output_parsed) throw modelInvalidOutput("PARSER");
+      const coverage = ActivityCoverageSchema.parse(response.output_parsed).activities;
+      if (coverage.some(item => !rawText.includes(item.sourceText))) throw new ActivityCoverageError(coverage);
+      return coverage;
+    }, execution);
   }
 
-  private async supplementActivities(rawText: string, missing: CoverageActivity[], signal?: AbortSignal) {
-    const response = await this.client.responses.parse({
+  private async supplementActivities(rawText: string, missing: CoverageActivity[], signal?: AbortSignal, execution?: RequestExecution) {
+    return this.modelCall(signal, async requestSignal => {
+      const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 2200, reasoning: { effort: "none" },
       input: [
         { role: "system", content: `${SEMANTIC_PARSER_PROMPT}\nExtract activities only for the supplied uncovered original-text spans. Use the full traveler text to understand each span's role and time. Do not repeat any other activities.` },
         { role: "user", content: JSON.stringify({ travelerText: rawText, uncoveredSpans: missing }) },
       ],
       text: { format: deepSeekFormat(SemanticExtractionSchema, "coveredYou_missing_activities") },
-    }, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000) });
-    if (response.status !== "completed" || !response.output_parsed) throw new Error("ACTIVITY_SUPPLEMENT_INCOMPLETE");
-    return SemanticExtractionSchema.parse(response.output_parsed).activities;
+      }, { signal: requestSignal });
+      if (response.status !== "completed" || !response.output_parsed) throw modelInvalidOutput("PARSER");
+      return SemanticExtractionSchema.parse(response.output_parsed).activities;
+    }, execution);
   }
 
-  private async auditClosedVenue(rawText: string, extraction: SemanticExtraction, signal?: AbortSignal) {
-    const response = await this.client.responses.parse({
+  private async auditClosedVenue(rawText: string, extraction: SemanticExtraction, signal?: AbortSignal, execution?: RequestExecution) {
+    return this.modelCall(signal, async requestSignal => {
+      const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 900, reasoning: { effort: "none" },
       input: [
         { role: "system", content: "Determine only entity relationships in the traveler's original text. For each supplied planned activity, identify the exact words naming the venue where that activity would take place, not the street/area where the traveler currently stands. Return the exact venue substring in venueText, or null if no venue is named. If a closure is reported, identify which supplied activity it refers to by returning its exact activitySourceText; return null if unclear. Do not infer from what would be convenient for the itinerary. Return structured data only." },
         { role: "user", content: JSON.stringify({ travelerText: rawText, activities: extraction.activities.map(item => ({ name: item.name, activitySourceText: item.sourceText, currentVenueGuess: item.location })), disruptions: extraction.disruptions }) },
       ],
       text: { format: deepSeekFormat(VenueAuditSchema, "coveredYou_venue_relation_audit") },
-    }, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000) });
-    if (response.status !== "completed" || !response.output_parsed) throw new Error("CLOSED_VENUE_AUDIT_INCOMPLETE");
-    return VenueAuditSchema.parse(response.output_parsed);
+      }, { signal: requestSignal });
+      if (response.status !== "completed" || !response.output_parsed) throw modelInvalidOutput("PARSER");
+      return VenueAuditSchema.parse(response.output_parsed);
+    }, execution);
   }
 
   async parse(snapshot: Snapshot, rawText: string, hint?: ReplanningRequest["reason"], signal?: AbortSignal,
-    trace?: (stage: string, value: unknown) => void) {
-    if(snapshot.mode!=="user" || Object.values(snapshot.stateSources).includes("demo"))throw new Error("DEMO_CONTEXT_REJECTED");
+    trace?: (stage: string, value: unknown) => void, execution?: RequestExecution) {
+    if(snapshot.mode!=="user" || Object.values(snapshot.stateSources).includes("demo"))throw new ServiceFailure("INVALID_REQUEST", "PARSER", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
     const timeoutSignal = AbortSignal.timeout(8000);
     const parserSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     // One bounded structured-output repair; no network/API-key fallback and no local parsing.
     for(let attempt=0;attempt<2;attempt++){
     try{
-    const response = await this.client.responses.parse({
+    const response = await this.trackedModelCall(execution, () => this.client.responses.parse({
       model: this.model,
       store: false,
       max_output_tokens: 3000,
@@ -424,9 +450,9 @@ export class DeepSeekSemanticParser {
         },
       ],
       text: { format: deepSeekFormat(SemanticExtractionSchema, "coveredYou_semantic_facts") },
-    }, { signal: parserSignal });
+    }, { signal: parserSignal }));
     if (response.status !== "completed" || !response.output_parsed) {
-      throw new Error("MODEL_OUTPUT_INCOMPLETE");
+      throw modelInvalidOutput("PARSER", attempt + 1);
     }
     let extraction = SemanticExtractionSchema.parse(response.output_parsed);
     trace?.("model_extraction", extraction);
@@ -435,7 +461,7 @@ export class DeepSeekSemanticParser {
     const closureMismatch = closedLabels.length > 0 && !normalized.activityFacts.some(fact => fact.role === "existing_plan" &&
       closedLabels.some(label => fact.placeQuery && label.includes(fact.placeQuery)));
     if (closureMismatch) {
-      const audited = await this.auditClosedVenue(rawText, extraction, signal);
+      const audited = await this.auditClosedVenue(rawText, extraction, signal, execution);
       trace?.("conditional_closed_venue_audit", audited);
       const closedActivity = extraction.activities.find(activity => activity.sourceText === audited.closedActivitySourceText);
       const closedVenue = closedActivity && audited.venues.find(item => item.activitySourceText === closedActivity.sourceText)?.venueText;
@@ -461,13 +487,13 @@ export class DeepSeekSemanticParser {
       extraction.disruptions.some(item => item.kind === "closed") &&
         !normalized.activityFacts.some(fact => fact.role === "existing_plan" && extraction.disruptions.some(item => item.label.includes(fact.name) || item.label.includes(fact.placeQuery ?? "")));
     if (needsAudit) {
-      const coverage = await this.checkActivityCoverage(rawText, signal);
+      const coverage = await this.checkActivityCoverage(rawText, signal, execution);
       trace?.("conditional_coverage", coverage);
       let missing = uncoveredActivities(coverage, normalized.activityFacts.filter(fact => fact.origin === "message"));
       if (missing.length) {
       const combined = extraction.activities.filter(activity => coverage.filter(item => activityMatches(activity.name, item.name)).length > 1);
       const targets = [...new Map([...missing, ...coverage.filter(item => combined.some(activity => activityMatches(activity.name, item.name)))].map(item => [item.sourceText, item])).values()];
-      const supplementary = await this.supplementActivities(rawText, targets, signal);
+      const supplementary = await this.supplementActivities(rawText, targets, signal, execution);
       trace?.("supplemental_extraction", supplementary);
       const merged = SemanticExtractionSchema.parse({ ...extraction, activities: [
         ...extraction.activities.filter(activity => !combined.includes(activity)),
@@ -482,11 +508,11 @@ export class DeepSeekSemanticParser {
       warnings: normalized.parseWarnings });
     return normalized;
     }catch(error){
-      const invalidOutput=error instanceof SyntaxError || error instanceof ZodError || error instanceof Error&&error.message==="MODEL_OUTPUT_INCOMPLETE";
-      if(!invalidOutput || attempt===1)throw error;
+      const failure=normalizeModelFailure(error,"PARSER",{externalSignal:signal,providerTimedOut:timeoutSignal.aborted});
+      if(failure.code!=="MODEL_INVALID_OUTPUT" || attempt===1)throw failure;
     }
     }
-    throw new Error("MODEL_OUTPUT_INCOMPLETE");
+    throw modelInvalidOutput("PARSER",2);
   }
 }
 

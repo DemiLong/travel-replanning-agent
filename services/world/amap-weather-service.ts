@@ -1,14 +1,17 @@
 import { WeatherSchema, type WorldWeather } from "../../types/world";
 import { amapGet, objects, requireAmapKey, textValue } from "./amap-client";
+import { ServiceFailure } from "../failures";
+import type { RequestExecution } from "../request-execution";
 export function emptyWeather(status: "unavailable" | "not_requested"): WorldWeather {
   return {condition:null,temperature:null,humidity:null,windDirection:null,windPower:null,forecast:[],source:"amap",fetchedAt:new Date().toISOString(),reportedAt:null,status};
 }
 const number = (x: unknown) => (typeof x==="number" || typeof x==="string" && x.trim()!=="") && Number.isFinite(Number(x)) ? Number(x) : null;
 export class AmapWeatherService {
-  async weather(adcode: string, signal?: AbortSignal): Promise<WorldWeather> {
+  async weather(adcode: string, signal?: AbortSignal, execution?: RequestExecution): Promise<WorldWeather> {
     requireAmapKey();
     if (!/^\d{6}$/.test(adcode)) return emptyWeather("unavailable");
-    const responses = await Promise.allSettled([amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"base"},600000,{ signal }),amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"all"},600000,{ signal })]);
+    const responses = await Promise.allSettled([amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"base"},600000,{ signal, execution }),amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"all"},600000,{ signal, execution })]);
+    if (responses[0].status === "rejected" && responses[0].reason instanceof ServiceFailure) throw responses[0].reason;
     const liveBody = responses[0].status==="fulfilled" ? responses[0].value : null;
     const forecastBody = responses[1].status==="fulfilled" ? responses[1].value : null;
     const live = objects(liveBody?.lives)[0];

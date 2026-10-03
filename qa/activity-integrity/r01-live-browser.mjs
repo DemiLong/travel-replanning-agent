@@ -29,7 +29,7 @@ page.on("response", async response => {
   try {
     const body = await response.json();
     const sourceById = new Map((body.parsedInput?.activityFacts ?? []).map(fact => [fact.id, fact.sourceText]));
-    evidence.responses.push({ status: body.status, error: body.error ?? null,
+    evidence.responses.push({ status: body.status, message: body.message ?? null,
       facts: body.parsedInput?.activityFacts?.map(({ id, name, sourceText, role }) => ({ id, name, sourceText, role })) ?? [],
       originalActivityIds: body.request?.originalActivityIds ?? null,
       plan: body.result?.plan ? { summary: body.result.plan.summary, explanation: body.result.plan.explanation,

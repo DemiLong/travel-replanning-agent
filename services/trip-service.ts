@@ -315,9 +315,6 @@ export async function saveTrip(value: Snapshot, expectedRevision?: number) {
   });
   return snapshot;
 }
-export async function requestHeaders() {
-  return { "Content-Type": "application/json" };
-}
 export type AnalyticsName =
   | "trip_created"
   | "replan_started"

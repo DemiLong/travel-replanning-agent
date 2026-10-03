@@ -8,8 +8,8 @@ const defectEvidenceDirectory = path.resolve("work", "three-defect-live-evidence
 
 type AssistBody = {
   status?: string;
-  failedStage?: string;
-  error?: string;
+  message?: string;
+  failure?: { code?: string; stage?: string; retryable?: boolean; traceId?: string };
   missingFact?: { key?: string; question?: string; answerType?: string };
   parsedInput?: {
     existingPlans?: Array<{ id?: string; name?: string; startTime?: string; endTime?: string | null; durationSource?: string; location?: string; locked?: boolean }>;
@@ -82,8 +82,8 @@ async function continueHomeFlow(page: Page, first: AssistBody) {
 function responseSummary(body: AssistBody) {
   return {
     status: body.status,
-    failedStage: body.failedStage,
-    error: body.error,
+    failure: body.failure,
+    message: body.message,
     blocker: body.missingFact,
     parsedActivities: [
       ...(body.parsedInput?.existingPlans ?? []),
@@ -302,7 +302,7 @@ test("P0-04 空行程的酒店地点答案只归属酒店活动", async ({ page 
   expect(hotelActivity?.location).toMatch(/上海和平饭店|和平饭店|酒店/);
   expect(financeActivity?.startTime).toBe("18:00");
   expect(financeActivity?.location).toMatch(/上海国金中心/);
-  expect(bodies.at(-1)?.error ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
+  expect(bodies.at(-1)?.message ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
 });
 
 test("P0-05 空行程活动缺时间时答案可定向更新且 ID 稳定", async ({ page }) => {
@@ -336,7 +336,7 @@ test("P0-05 空行程活动缺时间时答案可定向更新且 ID 稳定", asyn
   expect(finalParsed.map((item) => item.id)).toEqual(initialIds);
   expect(finalParsed.find((item) => /国金|金融中心/.test(item.name ?? ""))?.startTime).toBe("15:00");
   expect(finalParsed.find((item) => /外滩/.test(item.name ?? ""))?.startTime).toBe("18:00");
-  expect(bodies.at(-1)?.error ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
+  expect(bodies.at(-1)?.message ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
 });
 
 test("P0-06 已有活动的取消问题保留原活动身份且接受前不改正式行程", async ({ page }) => {
@@ -371,7 +371,7 @@ test("P0-06 已有活动的取消问题保留原活动身份且接受前不改�
   expect(handledActivities.some((item) => item.id === activityB.id || /外滩/.test(item.name ?? ""))).toBeTruthy();
   expect(unchanged.snapshot.revision).toBe(1);
   expect(unchanged.snapshot.itinerary.map((item: { id: string }) => item.id)).toEqual(original.map((item: { id: string }) => item.id));
-  expect(bodies.at(-1)?.error ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
+  expect(bodies.at(-1)?.message ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
 });
 
 test("P0-07 真正考虑中的互斥选项不会自动变成两项确定行程", async ({ page }) => {

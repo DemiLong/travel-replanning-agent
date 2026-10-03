@@ -6,6 +6,8 @@ import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
 import { requireAmapKey, WorldServiceError } from "./amap-client";
 import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes, stationLevelCandidates } from "./context-resolution";
+import { ServiceFailure } from "../failures";
+import type { RequestExecution } from "../request-execution";
 
 const CITY_EVIDENCE_CONCURRENCY=3;
 async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promise<R>):Promise<R[]>{
@@ -18,20 +20,20 @@ async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promis
 
 export function validateRealInput(raw: unknown) {
   const input = ReplanInputSchema.parse(raw);
-  if (input.snapshot.mode!=="user" || input.mode==="demo") throw new Error("真实世界服务不接受示例行程。");
-  if (!input.confirmation || !(input.snapshot.itinerary.some(e=>e.status!=="completed") || input.request.unscheduledOriginals?.length)) throw new Error("请先确认至少一项今日安排及解析结果。");
+  if (input.snapshot.mode!=="user" || input.mode==="demo") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
+  if (!input.confirmation || !(input.snapshot.itinerary.some(e=>e.status!=="completed") || input.request.unscheduledOriginals?.length)) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "CONFIRMED_ITINERARY_REQUIRED" });
   const state=input.request.currentState, sources=input.request.stateSources ?? input.snapshot.stateSources;
-  if (Object.values(sources).includes("demo")) throw new Error("示例状态不能进入真实规划。");
-  if (state.currentDate!==input.snapshot.state.currentDate || state.currentDate<input.snapshot.trip.startDate || state.currentDate>input.snapshot.trip.endDate) throw new Error("日期不属于当前行程。");
-  if (sources.currentTime==="unset") throw new Error("请确认当前时间。");
-  if (!input.request.freeText.trim() && input.request.reason!=="optimize") throw new Error("请先确认本次变化或选择优化行程。");
-  if (new Set(input.snapshot.itinerary.map(e=>e.id)).size!==input.snapshot.itinerary.length) throw new Error("活动 ID 重复。");
+  if (Object.values(sources).includes("demo")) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DEMO_STATE_REJECTED" });
+  if (state.currentDate!==input.snapshot.state.currentDate || state.currentDate<input.snapshot.trip.startDate || state.currentDate>input.snapshot.trip.endDate) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "TRIP_DATE_MISMATCH" });
+  if (sources.currentTime==="unset") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "CURRENT_TIME_REQUIRED" });
+  if (!input.request.freeText.trim() && input.request.reason!=="optimize") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DISRUPTION_REQUIRED" });
+  if (new Set(input.snapshot.itinerary.map(e=>e.id)).size!==input.snapshot.itinerary.length) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DUPLICATE_ACTIVITY_ID" });
   return input;
 }
 
 export class WorldContextService {
   constructor(private places=new AmapPlacesService(), private routes=new AmapRoutesService(), private weather=new AmapWeatherService(), private coordinates=new CoordinateService()) {}
-  async ground(raw: unknown, signal?: AbortSignal): Promise<RealWorldContext> {
+  async ground(raw: unknown, signal?: AbortSignal, execution?: RequestExecution): Promise<RealWorldContext> {
     const input=validateRealInput(raw);
     requireAmapKey();
     const {snapshot,request}=input, state=request.currentState, options=request.worldOptions;
@@ -55,7 +57,7 @@ export class WorldContextService {
     })).values()].filter(anchor=>anchor.query.trim()&&!genericLocation(anchor.query)&&!broadHotelQuery(anchor.query));
     const cityResults=await mapConcurrent(cityAnchors,CITY_EVIDENCE_CONCURRENCY,async anchor=>{
       try{
-        const response=await this.places.searchUnbounded(anchor.query, signal);
+        const response=await this.places.searchUnbounded(anchor.query, signal, execution);
         candidatePlaceIds[anchor.field]=response.candidates.map(p=>p.poiId);
         const selected=options?.selectedPois[anchor.field];
         const resolvedPoi=response.candidates.find(p=>p.poiId===selected)??uniquePlace(response.candidates,anchor.query,"");
@@ -63,7 +65,7 @@ export class WorldContextService {
         const evidencePoi=resolvedPoi??(candidateCities.length===1?response.candidates[0]:null);
         return evidencePoi?{...anchor,evidencePoi,resolvedPoi}:null;
       }catch(error){
-        if(error instanceof WorldServiceError&&error.code==="AMAP_NOT_CONFIGURED")throw error;
+        if(error instanceof ServiceFailure)throw error;
         return null;
       }
     });
@@ -110,7 +112,7 @@ export class WorldContextService {
         if(broadHotelQuery(query)&&!searchCity){
           missing("user",field,`“${query}”可能对应多个分店，请补充所在城市、道路或具体分店。`);return null;
         }
-        const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity,signal);
+        const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity,signal,execution);
         const eligibleCandidates=stationLevelCandidates(response.candidates.filter(p=>cityCompatible(p,searchCity,query)),query);
         candidatePlaceIds[field]=eligibleCandidates.map(p=>p.poiId);
         if(selected) {
@@ -129,7 +131,7 @@ export class WorldContextService {
         else if(response.candidates.length) missing("world",field,`“${query}”的候选地点均不在已确认城市“${searchCity}”，未擅自用于本次行程。`);
         else missing("world",field,`高德没有找到“${query}”的有效地点；未使用本地目录替代。`);
       }catch(error){
-        if(error instanceof WorldServiceError && error.code==="AMAP_NOT_CONFIGURED")throw error;
+        if(error instanceof ServiceFailure)throw error;
         const category=error instanceof WorldServiceError?`${error.code}${error.detail?`:${error.detail}`:""}`:"UNKNOWN";
         result.resolutionEvidence!.push({field,query,reason:`高德查询失败（${category}）。`,lookupCity:searchCity,citySource:traceSource??citySource});
         missing("world",field,`“${query}”的高德地点数据暂不可用。`);
@@ -155,13 +157,13 @@ export class WorldContextService {
       const age=Date.now()-Date.parse(state.browserLocation.capturedAt);
       if(age>600000 || age< -60000 || state.browserLocation.accuracy>1000) missing("user","currentLocation","浏览器位置已过期或精度不足，请重新定位或填写当前位置。");
       else try {
-        const coordinate=await this.coordinates.toGCJ02(state.browserLocation, signal);
-        const address=await this.places.reverse(coordinate, signal);
+        const coordinate=await this.coordinates.toGCJ02(state.browserLocation, signal, execution);
+        const address=await this.places.reverse(coordinate, signal, execution);
         const previousCity=city;
         result.currentLocation={...coordinate,id:"current",city:address.city,adcode:address.adcode,source:"browser_geolocation",capturedAt:state.browserLocation.capturedAt,accuracy:state.browserLocation.accuracy};
         if(previousCity&&normalizeCity(previousCity)!==normalizeCity(address.city))result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:address.city,message:`浏览器定位城市“${address.city}”与既有城市证据“${previousCity}”不一致，优先使用当前位置。`});
         city=address.city;citySource="current_location";result.cityResolution={...(result.cityResolution??{city:null,source:"none",evidence:[],conflicts:[]}),city,source:citySource};
-      }catch{missing("world","currentLocation","高德坐标转换或逆地理编码不可用。");}
+      }catch(error){if(error instanceof ServiceFailure)throw error;missing("world","currentLocation","高德坐标转换或逆地理编码不可用。");}
     }else missing("user","currentLocation","请允许浏览器定位，或填写当前位置。");
     if(!modes.length)missing("user","travelMode","已有交通限制互相冲突，这次有哪些出行方式可以使用？");
     if(selectedCity.competingCities.length&&!result.currentLocation)missing("user","destination",`明确地点对应多个城市（${selectedCity.competingCities.join("、")}），请确认这次行程所在城市。`);
@@ -176,16 +178,16 @@ export class WorldContextService {
     const needsWeather=request.reason==="weather" || state.weather!==undefined || /天气|下雨|高温|暴雨|暴晒/.test(request.freeText);
     if(needsWeather && result.currentLocation){
       if(!result.currentLocation.adcode){
-        try{result.currentLocation.adcode=(await this.places.reverse(result.currentLocation, signal)).adcode;}catch{ /* Keep unavailable instead of fabricating an administrative code. */ }
+        try{result.currentLocation.adcode=(await this.places.reverse(result.currentLocation, signal, execution)).adcode;}catch(error){if(error instanceof ServiceFailure)throw error; /* Keep unavailable instead of fabricating an administrative code. */ }
       }
-      result.weather=await this.weather.weather(result.currentLocation.adcode, signal);
+      result.weather=await this.weather.weather(result.currentLocation.adcode, signal, execution);
     }
     if(needsWeather && result.weather.status!=="available")missing("world","weather","天气数据不可用，不能确认天气适宜程度。");
     if(result.currentLocation && ["weather","closed","discovery","tired"].includes(request.reason)){
       try {
-        const search=await this.places.around(request.reason==="tired"?"咖啡馆":"博物馆",result.currentLocation, signal);
+        const search=await this.places.around(request.reason==="tired"?"咖啡馆":"博物馆",result.currentLocation, signal, execution);
         result.alternatives=search.candidates.filter(p=>!result.resolvedPlaces.some(r=>r.poi.poiId===p.poiId)).slice(0,MAX_PLACE_CANDIDATES);
-      }catch{missing("world","alternatives","附近替代地点暂不可用。已有安排仍可比较。");}
+      }catch(error){if(error instanceof ServiceFailure)throw error;missing("world","alternatives","附近替代地点暂不可用。已有安排仍可比较。");}
     }
     if(result.currentLocation && modes.length && !result.ambiguities.length && !result.missingWorldFacts.some(x=>x.kind==="user")){
       const endpoints:RouteEndpoint[]=result.resolvedPlaces.map(x=>({...x.poi,id:x.placeId}));
@@ -214,7 +216,7 @@ export class WorldContextService {
       if(new Set(required.map(p=>`${p.origin.id}>${p.destination.id}`)).size*modes.length>MAX_ROUTE_PAIRS)missing("world","routes","必要路线超过本轮 40 次查询上限，请分段调整行程。");
       else {
         const bounded=pairs.slice(0,Math.floor(MAX_ROUTE_PAIRS/modes.length));
-        for(const mode of modes)result.routes.push(...await this.routes.batch(bounded,mode,signal));
+        for(const mode of modes)result.routes.push(...await this.routes.batch(bounded,mode,signal,execution));
       }
       if(result.routes.some(r=>r.status==="unavailable"))missing("world","routes","部分路线不可用；不会用估算时间代替，包含这些路段的方案将被拒绝。");
     }

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { OpenAISemanticParser } from "@/services/semantic-parser";
 import { SnapshotSchema, reasons } from "@/types";
+import { failureEnvelope, failureResponse } from "@/services/api-failure";
+import { ServiceFailure } from "@/services/failures";
+import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
+import { authorizeApiRequest } from "@/services/server-auth";
 
 export const maxDuration = 12;
 
@@ -11,40 +15,34 @@ const ParseRequestSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: null });
+  const headers = { "Cache-Control": "no-store", "X-Trace-Id": execution.traceId };
   try {
-    if (Number(request.headers.get("content-length") ?? 0) > 50000) {
-      return Response.json({ error: "请求内容过大。" }, { status: 413 });
-    }
-    const raw = await request.text();
-    if (raw.length > 50000) return Response.json({ error: "请求内容过大。" }, { status: 413 });
-    let decoded:unknown;
-    try{decoded=JSON.parse(raw);}catch{return Response.json({error:"请求无效。"},{status:400});}
-    const input = ParseRequestSchema.safeParse(decoded);
-    if (!input.success) return Response.json({ error: "请提供有效的行程文字和当前行程。" }, { status: 400 });
-    if(input.data.snapshot.mode!=="user")return Response.json({error:"示例数据不能进入真实解析。"},{status:400});
+    await execution.measure("AUTH", () => authorizeApiRequest(request, "parse", execution.signal));
+    const input = await execution.measure("REQUEST", async () => {
+      if (Number(request.headers.get("content-length") ?? 0) > 50000) {
+        throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, detail: "PAYLOAD_TOO_LARGE" });
+      }
+      const raw = await request.text();
+      if (raw.length > 50000) throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, detail: "PAYLOAD_TOO_LARGE" });
+      let decoded:unknown;
+      try{decoded=JSON.parse(raw);}catch(error){throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, cause: error });}
+      const input = ParseRequestSchema.safeParse(decoded);
+      if (!input.success) throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, cause: input.error });
+      if(input.data.snapshot.mode!=="user")throw new ServiceFailure("INVALID_REQUEST", "REQUEST", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
+      return input.data;
+    });
     const parser = new OpenAISemanticParser();
-    const parsed = await parser.parse(input.data.snapshot, input.data.rawText, input.data.hint, request.signal);
-    return Response.json(parsed, { headers: { "Cache-Control": "no-store" } });
+    const parsed = await execution.measure("PARSER", () => parser.parse(input.snapshot, input.rawText, input.hint, execution.signal, undefined, execution));
+    const response = Response.json(parsed, { headers });
+    execution.finish({ route: "/api/parse", outcome: "success", httpStatus: 200, status: "PARSED" });
+    return response;
   } catch (error) {
-    // Only log an allowlist of diagnostic metadata, never SDK error objects or request headers.
-    const diagnostic=error as {name?:string;status?:number;code?:string};
-    console.error("DeepSeek parser failed",{name:diagnostic.name,status:diagnostic.status,code:diagnostic.code});
-    if (error instanceof Error && error.message === "MODEL_NOT_CONFIGURED") {
-      return Response.json(
-        { code: "MODEL_NOT_CONFIGURED", error: "AI 语义解析尚未配置服务端密钥。" },
-        { status: 503 },
-      );
-    }
-    const connectionMessage = error instanceof Error ? `${error.message} ${(error as Error & { cause?: unknown }).cause instanceof Error ? (error as Error & { cause: Error }).cause.message : ""}` : "";
-    if (/connection error|fetch failed|network/i.test(connectionMessage)) {
-      return Response.json(
-        { code: "MODEL_UPSTREAM_UNAVAILABLE", error: "AI 服务暂时无法连接，请稍后重试。" },
-        { status: 503 },
-      );
-    }
-    return Response.json(
-      { code: "MODEL_PARSE_FAILED", error: "服务暂时未能生成有效结果，你的输入已保留，请重试。" },
-      { status: 502 },
-    );
+    const mapped = failureEnvelope(execution.failureFor(error), { traceId: execution.traceId, stage: execution.activeStage });
+    const response = failureResponse(mapped.failure, { traceId: execution.traceId, stage: execution.activeStage });
+    execution.finish({ route: "/api/parse", outcome: outcomeForFailure(mapped.failure), httpStatus: mapped.httpStatus, status: mapped.body.status, failure: mapped.failure });
+    return response;
+  } finally {
+    execution.dispose();
   }
 }
