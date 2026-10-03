@@ -46,7 +46,7 @@ declare
   caller_id uuid := auth.uid();
   caller_subject text;
   policy_row public.travel_api_rate_limit_policies%rowtype;
-  current_time timestamptz := clock_timestamp();
+  request_time timestamptz := clock_timestamp();
   user_window_start timestamptz;
   global_window_start timestamptz;
   user_count integer;
@@ -75,11 +75,11 @@ begin
   perform pg_advisory_xact_lock(hashtextextended('coveredYou:user:' || caller_subject || ':' || requested_route, 0));
 
   insert into public.travel_api_rate_limit_counters(scope, subject, route, window_started_at, request_count)
-  values ('global', 'project', requested_route, current_time, 0)
+  values ('global', 'project', requested_route, request_time, 0)
   on conflict (scope, subject, route) do nothing;
 
   insert into public.travel_api_rate_limit_counters(scope, subject, route, window_started_at, request_count)
-  values ('user', caller_subject, requested_route, current_time, 0)
+  values ('user', caller_subject, requested_route, request_time, 0)
   on conflict (scope, subject, route) do nothing;
 
   select counters.window_started_at, counters.request_count
@@ -98,21 +98,21 @@ begin
     and counters.route = requested_route
   for update;
 
-  if global_window_start + make_interval(secs => policy_row.window_seconds) <= current_time then
-    global_window_start := current_time;
+  if global_window_start + make_interval(secs => policy_row.window_seconds) <= request_time then
+    global_window_start := request_time;
     global_count := 0;
     update public.travel_api_rate_limit_counters as counters
-    set window_started_at = current_time, request_count = 0
+    set window_started_at = request_time, request_count = 0
     where counters.scope = 'global'
       and counters.subject = 'project'
       and counters.route = requested_route;
   end if;
 
-  if user_window_start + make_interval(secs => policy_row.window_seconds) <= current_time then
-    user_window_start := current_time;
+  if user_window_start + make_interval(secs => policy_row.window_seconds) <= request_time then
+    user_window_start := request_time;
     user_count := 0;
     update public.travel_api_rate_limit_counters as counters
-    set window_started_at = current_time, request_count = 0
+    set window_started_at = request_time, request_count = 0
     where counters.scope = 'user'
       and counters.subject = caller_subject
       and counters.route = requested_route;
@@ -123,12 +123,12 @@ begin
 
   if user_exceeded then
     user_retry := greatest(1, ceil(extract(epoch from (
-      user_window_start + make_interval(secs => policy_row.window_seconds) - current_time
+      user_window_start + make_interval(secs => policy_row.window_seconds) - request_time
     )))::integer);
   end if;
   if global_exceeded then
     global_retry := greatest(1, ceil(extract(epoch from (
-      global_window_start + make_interval(secs => policy_row.window_seconds) - current_time
+      global_window_start + make_interval(secs => policy_row.window_seconds) - request_time
     )))::integer);
   end if;
 
@@ -160,7 +160,7 @@ begin
       least(
         user_window_start + make_interval(secs => policy_row.window_seconds),
         global_window_start + make_interval(secs => policy_row.window_seconds)
-      ) - current_time
+      ) - request_time
     )))::integer),
     null::text;
 end;
