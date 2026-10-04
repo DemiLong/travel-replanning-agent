@@ -1,6 +1,6 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
 import { minutes } from "../lib/time";
-import { effectiveProtectionPolicy, protectedArrivalDeadline } from "../services/protection-policy";
+import { protectedArrivalDeadline } from "../services/protection-policy";
 export function travelTimeValidator(
   c: AgentContext,
   p: ProposedPlan,
@@ -19,8 +19,9 @@ export function travelTimeValidator(
         errors.push({code:"travel_time",eventId:e.id,message:`缺少抵达 ${e.name} 的新鲜高德路线，无法判断是否来得及。`});
       }else{
         const required=from===e.placeId?0:Math.ceil((route!.trafficDurationSeconds??route!.durationSeconds!)/60);
-        const deadline=protectedArrivalDeadline(e);
-        const policy=effectiveProtectionPolicy(e);
+        const fact=c.activityFacts.find(item=>item.id===e.id);
+        const deadline=fact&&fact.commitment!=="flexible"?protectedArrivalDeadline(fact):minutes(e.startTime);
+        const policy=fact?.protectionPolicy;
         const buffer=policy?.timeAnchor==="departs_at" ? policy.arrivalBuffer?.recommendedMinutes??0 : 0;
         if(previousEnd+required>deadline)errors.push({
           code:"travel_time",

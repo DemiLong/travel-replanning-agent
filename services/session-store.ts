@@ -12,6 +12,8 @@ import {
   legacyFallbackSnapshotKey,
   legacyRealSessionBackupKey,
   legacyRealSessionKey,
+  legacyRealSessionV3BackupKey,
+  legacyRealSessionV3Key,
   legacySnapshotKey,
   realSessionKey,
   type BrowserSessionRepository,
@@ -20,6 +22,7 @@ import {
   createStarterSession,
   migrateLegacySnapshotValue,
   migrateV2SessionValue,
+  migrateV3SessionValue,
   parseCurrentSessionValue,
   repairCurrentSession,
 } from "./legacy-session-migration";
@@ -93,28 +96,40 @@ export function createSessionStore(
     return writeMigrated(createStarterSession());
   };
 
+  const migrateOlderSession = () => {
+    const v3 = repository.readRaw(legacyRealSessionV3Key);
+    if (v3) {
+      repository.writeRaw(legacyRealSessionV3BackupKey, v3);
+      try {
+        const migrated = migrateV3SessionValue(JSON.parse(v3));
+        if (migrated) return writeMigrated(migrated);
+      } catch {
+        // The exact v3 payload remains backed up before fallback continues.
+      }
+    }
+    const v2 = repository.readRaw(legacyRealSessionKey);
+    if (v2) {
+      repository.writeRaw(legacyRealSessionBackupKey, v2);
+      try {
+        const migrated = migrateV2SessionValue(JSON.parse(v2));
+        if (migrated) return writeMigrated(migrated);
+      } catch {
+        // The exact v2 payload remains backed up before fallback continues.
+      }
+    }
+    return migrateLegacySession();
+  };
+
   const loadPersisted = (): RealSession => {
     const raw = repository.readRaw(realSessionKey);
-    if (!raw) {
-      const legacySession = repository.readRaw(legacyRealSessionKey);
-      if (legacySession) {
-        repository.writeRaw(legacyRealSessionBackupKey, legacySession);
-        try {
-          const migrated = migrateV2SessionValue(JSON.parse(legacySession));
-          if (migrated) return writeMigrated(migrated);
-        } catch {
-          // The exact v2 payload remains backed up before fallback continues.
-        }
-      }
-      return migrateLegacySession();
-    }
+    if (!raw) return migrateOlderSession();
     try {
       const parsed = parseCurrentSessionValue(JSON.parse(raw));
       const repaired = repairCurrentSession(parsed);
       if (repaired.shouldPersist) writeMigrated(repaired.session);
       return repaired.session;
     } catch {
-      return migrateLegacySession();
+      return migrateOlderSession();
     }
   };
 

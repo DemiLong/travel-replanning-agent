@@ -5,6 +5,8 @@ import {
   legacyFallbackSnapshotKey,
   legacyRealSessionBackupKey,
   legacyRealSessionKey,
+  legacyRealSessionV3BackupKey,
+  legacyRealSessionV3Key,
   legacySnapshotKey,
   realSessionKey,
 } from "../services/browser-session-repository";
@@ -42,7 +44,7 @@ function session(): RealSession {
     revision: 0,
   });
   return RealSessionSchema.parse({
-    schemaVersion: 3,
+    schemaVersion: 4,
     experienceMode: "real",
     flowStage: "NO_ITINERARY",
     snapshot,
@@ -65,7 +67,7 @@ function parsedInput(base: RealSession["snapshot"], rawText = "下雨了") {
   return ParsedUserInputSchema.parse({
     rawText,
     intent: "rescue",
-    existingPlans: [],
+    activityFacts: [],
     disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
     constraints: [],
     context: base.state,
@@ -87,12 +89,111 @@ async function main() {
   const v2Storage = createStorage();
   const v2Repository = createBrowserSessionRepository(v2Storage.storage);
   const original = session();
+  const v3Storage=createStorage();
+  const v3Repository=createBrowserSessionRepository(v3Storage.storage);
+  const v3Raw=`  ${JSON.stringify({...original,schemaVersion:3})}`;
+  v3Repository.writeRaw(legacyRealSessionV3Key,v3Raw);
+  const migratedV3=createSessionStore(v3Repository).loadPersisted();
+  assert.equal(v3Repository.readRaw(legacyRealSessionV3BackupKey),v3Raw);
+  assert.equal(migratedV3.schemaVersion,4);
+
+  const nestedV3Storage=createStorage();
+  const nestedV3Repository=createBrowserSessionRepository(nestedV3Storage.storage);
+  const legacyPlan={
+    id:"old-plan",
+    name:"旧草稿活动",
+    startTime:"10:00",
+    endTime:null,
+    durationMinutes:30,
+    location:"旧地点",
+    locked:false,
+    source:"user",
+  };
+  const currentParsed=parsedInput(original.snapshot,"旧版解析原文");
+  const legacyParsed={...currentParsed,activityFacts:undefined,existingPlans:[legacyPlan],activityMentions:[]};
+  const currentDraft=createItineraryDraft(original);
+  const legacyDraft={...currentDraft,activityFacts:undefined,items:[legacyPlan]};
+  const legacyConfirmed={
+    rawText:legacyParsed.rawText,
+    intent:legacyParsed.intent,
+    existingPlans:[legacyPlan],
+    activityMentions:[],
+    disruptions:legacyParsed.disruptions,
+    constraints:legacyParsed.constraints,
+    context:legacyParsed.context,
+    contextSources:legacyParsed.contextSources,
+    closedPlaceIds:[],
+    baseRevision:original.snapshot.revision,
+  };
+  const legacyRequest={
+    reason:"weather",
+    freeText:legacyParsed.rawText,
+    currentState:original.snapshot.state,
+    closedPlaceIds:[],
+    variation:0,
+    stateSources:original.snapshot.stateSources,
+  };
+  const legacyPendingPlan={
+    result:{
+      id:"legacy-plan",
+      ok:false,
+      plan:null,
+      attempts:[],
+      mode:"local",
+      model:"legacy-test",
+      message:"旧方案",
+      context:{
+        profile:original.snapshot.profile,
+        trip:original.snapshot.trip,
+        state:original.snapshot.state,
+        stateSources:original.snapshot.stateSources,
+        existingItinerary:[],
+        lockedEvents:[],
+        remainingEvents:[],
+        disruption:legacyRequest,
+        places:[],
+        travelMinutes:{},
+      },
+    },
+    base:original.snapshot,
+    request:legacyRequest,
+    accepted:false,
+    parsedInput:legacyParsed,
+  };
+  const nestedV3Raw=JSON.stringify({
+    ...original,
+    schemaVersion:3,
+    parsedInput:legacyParsed,
+    itineraryDraft:legacyDraft,
+    pendingInput:{
+      stage:"follow_up",
+      parsedInput:legacyParsed,
+      confirmedDraft:legacyConfirmed,
+      missingFact:null,
+      questionRawText:legacyParsed.rawText,
+      baseRevision:original.snapshot.revision,
+    },
+    pendingPlan:legacyPendingPlan,
+  });
+  nestedV3Repository.writeRaw(legacyRealSessionV3Key,nestedV3Raw);
+  const migratedNestedV3=createSessionStore(nestedV3Repository).loadPersisted();
+  assert.equal(nestedV3Repository.readRaw(legacyRealSessionV3BackupKey),nestedV3Raw);
+  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].id,"old-plan");
+  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].placeId,"custom-old-plan");
+  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].endTime,"10:30");
+  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].durationSource,"user");
+  assert.equal(migratedNestedV3.itineraryDraft?.activityFacts[0].id,"old-plan");
+  assert.equal(migratedNestedV3.pendingInput?.parsedInput.activityFacts[0].id,"old-plan");
+  assert.equal(migratedNestedV3.pendingInput?.confirmedDraft.activityFacts[0].id,"old-plan");
+  assert.equal(migratedNestedV3.pendingPlan?.request.activityFacts[0].id,"old-plan");
+  assert.equal(migratedNestedV3.pendingPlan?.result.context.activityFacts[0].id,"old-plan");
+
   const v2Raw = `  ${JSON.stringify({ schemaVersion: 2, rawInput: "v2 原文", snapshot: original.snapshot })}`;
   v2Repository.writeRaw(legacyRealSessionKey, v2Raw);
   const v2Store = createSessionStore(v2Repository);
   const migratedV2 = v2Store.loadPersisted();
   assert.equal(v2Repository.readRaw(legacyRealSessionBackupKey), v2Raw);
-  assert.equal(migratedV2.schemaVersion, 3);
+  assert.equal(migratedV2.schemaVersion, 4);
   assert.equal(migratedV2.rawInput, "v2 原文");
   assert.equal(migratedV2.snapshot.revision, original.snapshot.revision);
 
@@ -150,13 +251,14 @@ async function main() {
       constraint: "固定预约",
     }],
   });
-  protectedRepository.writeJson(realSessionKey, {
+  protectedRepository.writeJson(legacyRealSessionV3Key, {
     ...original,
+    schemaVersion:3,
     snapshot: lockedSnapshot,
   });
   const protectedLoaded = createSessionStore(protectedRepository).loadPersisted();
   assert(protectedLoaded.snapshot.itinerary[0].protectionPolicy);
-  const rawProtected = JSON.parse(protectedRepository.readRaw(realSessionKey) ?? "null") as RealSession;
+  const rawProtected = JSON.parse(protectedRepository.readRaw(legacyRealSessionV3BackupKey) ?? "null") as RealSession;
   assert.equal(rawProtected.snapshot.itinerary[0].protectionPolicy, undefined);
 
   const repairStorage = createStorage();
@@ -183,7 +285,7 @@ async function main() {
   const confirmedDraft = ConfirmedDraftSchema.parse({
     rawText: parsed.rawText,
     intent: parsed.intent,
-    existingPlans: parsed.existingPlans,
+    activityFacts: parsed.activityFacts,
     disruptions: parsed.disruptions,
     constraints: parsed.constraints,
     context: parsed.context,

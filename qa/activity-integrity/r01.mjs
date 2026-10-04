@@ -6,6 +6,7 @@ import { RealSessionSchema, SnapshotSchema } from "../../types/index.ts";
 import { analyzeImpact } from "../../services/impact-analysis.ts";
 import { summarizeVerifiedPlan, validatePlanExplanation } from "../../services/plan-narrative.ts";
 import { replanReal } from "../../agents/real-replanning-agent.ts";
+import { snapshotActivityFacts } from "../../services/activity-facts.ts";
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const runDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "runs", stamp);
@@ -31,11 +32,12 @@ const base = SnapshotSchema.parse({ mode: "user", profile: { id: "qa", travelPac
   state: { currentDate: "2026-09-28", currentTime: "13:00", stateCapturedAt: "2026-09-28T05:00:00.000Z", currentLocation: "上海人民广场", weather: "rain" },
   stateSources: sources, itinerary: [bund], revision: 2 });
 const rawText = "现在下雨了，原计划18:00去外滩观景平台散步，请重新安排。";
+const activityFacts=snapshotActivityFacts(base);
 const request = { reason: "weather", freeText: rawText, currentState: base.state, closedPlaceIds: [], variation: 0,
-  stateSources: sources, originalActivityIds: [bund.id] };
+  stateSources: sources, activityFacts };
 const impact = analyzeImpact(base, request);
-const context = { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources, existingItinerary: base.itinerary,
-  remainingEvents: base.itinerary, lockedEvents: [], originalActivityIds: [bund.id], disruption: request, places: [], travelMinutes: {} };
+const context = { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources, activityFacts,
+  remainingActivityFacts:activityFacts, protectedActivityFacts:[],disruption: request, places: [], travelMinutes: {} };
 const removed = { eventId: bund.id, name: bund.name, reason: "雨天使原定户外散步体验受影响，因此本方案移除这项安排。", constraint: "弹性安排" };
 const longExplanation = "雨天对外滩散步有明确影响，因为用户描述了散步这一户外方式。本方案仍保留外滩散步，并新增上海博物馆人民广场馆。新增地点的室内外条件尚未核实，用户可以根据现场情况决定是否接受。";
 const keptPlan = { summary: "外滩改成博物馆", explanation: longExplanation,
@@ -54,12 +56,12 @@ await check("1. 矛盾说明被拒绝，概述只按最终活动计算", () => {
   return { violations, computedSummary: summary };
 });
 await check("2. mixed 活动按用户方式判断，未知地点不冒充室内，包含无时间原安排", () => {
-  const cycling = { id: "cycle", origin: "message", snapshotEventId: null, role: "existing_plan", progress: "not_started",
+  const cycling = { id: "cycle",placeId:"custom-cycle", origin: "message", snapshotEventId: null, role: "existing_plan", progress: "not_started",
     name: "黄浦江滨江绿道骑行", placeQuery: "黄浦江滨江绿道", startTime: null, startTimeSource: "not_provided",
-    durationMinutes: null, commitment: "flexible", sourceText: "原计划去黄浦江滨江绿道骑行" };
+    endTime:null,durationMinutes: null,durationSource:"unknown", commitment: "flexible", sourceText: "原计划去黄浦江滨江绿道骑行" };
   const mixedBase = SnapshotSchema.parse({ ...base, itinerary: [bund, mall] });
   const mixedRequest = { ...request, freeText: "现在下雨了，原计划去外滩散步，还原计划去黄浦江滨江绿道骑行，上海国金中心商场也在行程中。",
-    originalActivityIds: [bund.id, mall.id, cycling.id], unscheduledOriginals: [cycling] };
+    activityFacts: [...snapshotActivityFacts(mixedBase),cycling] };
   const result = analyzeImpact(mixedBase, mixedRequest);
   assert.ok(result.affectedActivities.includes(bund.id));
   assert.ok(result.affectedActivities.includes(cycling.id));
@@ -118,12 +120,12 @@ await browserContext.tracing.start({ screenshots: true, snapshots: true });
 async function showPlan(page, plan, alternatives = []) {
   const result = { id: `controlled-${crypto.randomUUID()}`, ok: true, plan, mode: "live", model: "controlled", message: "受控方案", attempts: [],
     context, candidatePlans: alternatives };
-  const session = RealSessionSchema.parse({ schemaVersion: 3, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
+  const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
     rawInput: rawText, parsedInput: null, lastDisruption: request, pendingPlan: { result, base, request, accepted: false, impactAnalysis: impact },
     resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
     updatedAt: new Date().toISOString() });
   await page.goto("http://127.0.0.1:3000/");
-  await page.evaluate(value => localStorage.setItem("travel-session-real-v3", JSON.stringify(value)), session);
+  await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
   await page.goto("http://127.0.0.1:3000/result");
 }
 async function screenshot(name, plan, inspect) {

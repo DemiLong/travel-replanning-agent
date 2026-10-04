@@ -7,6 +7,9 @@ import { normalizeSemanticExtraction } from "../../services/semantic-parser.ts";
 import { runAgentAssist } from "../../agents/agent-orchestrator.ts";
 import { analyzeImpact } from "../../services/impact-analysis.ts";
 import { allowedModes } from "../../services/world/context-resolution.ts";
+import { snapshotActivityFacts } from "../../services/activity-facts.ts";
+import { protectionPolicyForActivity } from "../../services/protection-policy.ts";
+import { ServiceFailure } from "../../services/failures.ts";
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const baseURL = process.env.QA_BASE_URL ?? "http://127.0.0.1:3000";
@@ -58,26 +61,26 @@ await check("固定有时间：证据绑定后进入规划，来源为用户", a
   assert.equal(fixed.startTimeSource, "user");
   let input;
   const response = await runAgentAssist({ snapshot: base, rawText: sentence }, undefined, {
-    parse: async () => parsed, ground: async value => { input = value; throw Error("controlled stop before map"); },
+    parse: async () => parsed, ground: async value => { input = value; throw new ServiceFailure("MAP_PROVIDER_ERROR","GROUNDING",{retryable:true}); },
   });
   assert.equal(response.status, "UPSTREAM_UNAVAILABLE");
-  assert.ok(input.request.originalActivityIds.includes(fixed.id));
-  assert.ok(input.snapshot.itinerary.some(event => event.id === fixed.id && event.locked && event.startTime === "18:00"));
-  return { fixed, requestIds: input.request.originalActivityIds };
+  assert.ok(input.request.activityFacts.some(fact=>fact.id===fixed.id&&fact.commitment==="fixed"&&fact.startTime==="18:00"));
+  return { fixed, requestIds: input.request.activityFacts.map(fact=>fact.id) };
 });
-await check("弹性无时间：null 进入 unscheduledOriginals，不追问原定几点", async () => {
+await check("弹性无时间：null 保留在 activityFacts，不追问原定几点", async () => {
   const parsed = normalizeSemanticExtraction(base, sentence, extract([
     activity("去上海自然博物馆", "上海自然博物馆", "原计划去上海自然博物馆", null, "no"),
     activity("到上海展览中心7号门集合", "上海展览中心7号门", "18:00必须到上海展览中心7号门集合", "18:00", "yes"),
   ]), "controlled");
   let input;
   await runAgentAssist({ snapshot: base, rawText: sentence }, undefined, {
-    parse: async () => parsed, ground: async value => { input = value; throw Error("controlled stop before map"); },
+    parse: async () => parsed, ground: async value => { input = value; throw new ServiceFailure("MAP_PROVIDER_ERROR","GROUNDING",{retryable:true}); },
   });
-  assert.deepEqual(input.request.unscheduledOriginals.map(fact => fact.name), ["去上海自然博物馆"]);
-  assert.equal(input.request.unscheduledOriginals[0].startTime, null);
+  const unscheduledFacts=input.request.activityFacts.filter(fact=>fact.startTime===null&&fact.commitment==="flexible");
+  assert.deepEqual(unscheduledFacts.map(fact => fact.name), ["去上海自然博物馆"]);
+  assert.equal(unscheduledFacts[0].startTime, null);
   assert.ok(!parsed.missingFacts.some(value => value.endsWith(":startTime")));
-  return { unscheduledOriginals: input.request.unscheduledOriginals.map(({ id, name, startTime }) => ({ id, name, startTime })) };
+  return { unscheduledFacts: unscheduledFacts.map(({ id, name, startTime }) => ({ id, name, startTime })) };
 });
 let conditional;
 await check("固定确实无时间：保留固定事实并返回不可接受的条件性建议", async () => {
@@ -115,30 +118,32 @@ await check("交通停运不是地点关闭，停运方式不参加路线比较"
 const browser = await chromium.launch({ headless: true });
 const browserContext = await browser.newContext({ viewport: { width: 1100, height: 1300 } });
 await browserContext.tracing.start({ screenshots: true, snapshots: true });
-const session = (state, rawInput = "") => RealSessionSchema.parse({ schemaVersion: 3, experienceMode: "real", flowStage: "NO_ITINERARY",
+const session = (state, rawInput = "") => RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "NO_ITINERARY",
   snapshot: state, rawInput, parsedInput: null, lastDisruption: null, pendingPlan: null,
   resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
   updatedAt: new Date().toISOString() });
 const event = (id, name, location, startTime, travelMode, locked = false) => ({ id, placeId: `place-${id}`, name,
   category: "user activity", location, startTime, endTime: startTime, status: locked ? "locked" : "planned", locked,
+  protectionPolicy:locked?protectionPolicyForActivity({name,location,sourceText:`${startTime}固定安排${name}`,startTime,durationMinutes:null,commitment:"fixed"}):undefined,
   indoorOutdoor: "mixed", openingTime: null, closingTime: null, travelTimeFromPrevious: null, travelMode,
   reason: "按原安排处理，路线仍以查询结果为准。", constraint: locked ? "固定安排" : "弹性安排", durationSource: "unknown" });
 async function showResult(page, state, request, plan, impact) {
+  const activityFacts=request.activityFacts;
   const result = { id: crypto.randomUUID(), ok: true, plan, mode: "live", model: "controlled", message: "受控页面截图", attempts: [],
     context: { profile: state.profile, trip: state.trip, state: state.state, stateSources: state.stateSources,
-      existingItinerary: state.itinerary, remainingEvents: state.itinerary, lockedEvents: state.itinerary.filter(item => item.locked),
-      originalActivityIds: request.originalActivityIds, disruption: request, places: [], travelMinutes: {} } };
+      activityFacts, remainingActivityFacts:activityFacts.filter(fact=>fact.progress!=="completed"),protectedActivityFacts:activityFacts.filter(fact=>fact.commitment!=="flexible"),
+      disruption: request, places: [], travelMinutes: {} } };
   const value = RealSessionSchema.parse({ ...session(state, request.freeText), flowStage: "PLAN_READY", lastDisruption: request,
     pendingPlan: { result, base: state, request, accepted: false, impactAnalysis: impact } });
   await page.goto(`${baseURL}/`);
-  await page.evaluate(data => localStorage.setItem("travel-session-real-v3", JSON.stringify(data)), value);
+  await page.evaluate(data => localStorage.setItem("travel-session-real-v4", JSON.stringify(data)), value);
   await page.goto(`${baseURL}/result`);
 }
 await check("条件性建议实际页面可见，不能接受方案；首页文本框无绿色焦点框", async () => {
   const page = await browserContext.newPage();
   try {
     await page.goto(`${baseURL}/`);
-    await page.evaluate(data => localStorage.setItem("travel-session-real-v3", JSON.stringify(data)), session(base));
+    await page.evaluate(data => localStorage.setItem("travel-session-real-v4", JSON.stringify(data)), session(base));
     await page.reload();
     await page.route("**/api/assist", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(conditional) }));
     const textarea = page.getByLabel("描述今天的安排和变化");
@@ -154,7 +159,7 @@ await check("条件性建议实际页面可见，不能接受方案；首页文�
     await page.screenshot({ path: path.join(runDir, "conditional-home.png"), fullPage: true });
     await textarea.fill(`${conditional.parsedInput.rawText} 预约时间是18:00。`);
     assert.equal(await page.getByText(conditional.advice.heading, { exact: true }).count(), 0);
-    const updated = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v3")));
+    const updated = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v4")));
     assert.equal(updated.resolutionState.roundCount, 0);
     return { status: "CONDITIONAL", acceptButtonCount: 0, textareaOutlineWidth: outline,
       oldAdviceAfterEdit: false, roundCountAfterEdit: updated.resolutionState.roundCount, screenshot: "conditional-home.png" };
@@ -168,7 +173,7 @@ for (const [label, mode] of [["方案一", "DRIVING"], ["方案二", "TRANSIT"]]
       const night = event("night", "去外滩观景平台夜游", "外滩观景平台", "20:00", mode);
       const state = snapshot([hotel, night]);
       const request = { reason: "late", freeText: "高铁晚点，请调整酒店入住和夜游。", currentState: state.state,
-        closedPlaceIds: [], variation: 0, stateSources: sources, originalActivityIds: [hotel.id, night.id] };
+        closedPlaceIds: [], variation: 0, stateSources: sources, activityFacts:snapshotActivityFacts(state) };
       const plan = { summary: "受控方案", explanation: "保持两项安排。", events: [hotel, night], movedEvents: [], removedEvents: [] };
       await showResult(page, state, request, plan, analyzeImpact(state, request));
       const tags = page.locator(".plan-event-card .travel-mode-tag");
@@ -189,7 +194,7 @@ await check("长地点换行时新增标签保持单行且不被挤出卡片", a
     await page.setViewportSize({ width: 390, height: 950 });
     const state = snapshot([]);
     const request = { reason: "late", freeText: "晚点了，改去附近新地点。", currentState: state.state,
-      closedPlaceIds: [], variation: 0, stateSources: sources, originalActivityIds: [] };
+      closedPlaceIds: [], variation: 0, stateSources: sources, activityFacts:[] };
     const added = event("long-name", "PLUSONE COFFEE(武康路店)与附近休息区域", "武康路286号", "17:00", "WALKING");
     const plan = { summary: "受控方案", explanation: "新增附近休息地点。", events: [added], movedEvents: [], removedEvents: [] };
     await showResult(page, state, request, plan, analyzeImpact(state, request));
@@ -213,7 +218,7 @@ await check("R01 弹窗把受影响与待判断分开，外滩与国金中心各
       stateSources: { ...sources, weather: "user" } });
     const request = { reason: "weather", freeText: "现在下雨了，原定去外滩散步，还要去上海国金中心商场。",
       currentState: state.state, closedPlaceIds: [], variation: 0, stateSources: state.stateSources,
-      originalActivityIds: [bund.id, mall.id] };
+      activityFacts:snapshotActivityFacts(state) };
     const plan = { summary: "受控方案", explanation: "保留原安排并提示雨天风险。", events: [mall, bund], movedEvents: [], removedEvents: [] };
     await showResult(page, state, request, plan, analyzeImpact(state, request));
     await page.getByRole("button", { name: "查看我的情况分析" }).click();

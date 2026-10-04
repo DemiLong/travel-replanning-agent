@@ -1,14 +1,14 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes } from "../lib/time";
-import { effectiveProtectionPolicy } from "../services/protection-policy";
+import { stationLevelLocation } from "../services/protection-policy";
 
 export function protectionPolicyValidator(
   context: AgentContext,
   plan: ProposedPlan,
 ): Violation[] {
-  return context.lockedEvents.flatMap((old) => {
+  return context.protectedActivityFacts.flatMap((old) => {
     const next = plan.events.find((event) => event.id === old.id);
-    const policy = effectiveProtectionPolicy(old);
+    const policy = old.protectionPolicy;
     if (!next || !next.locked || next.status !== "locked" || !policy) {
       return [{
         code: "locked_event" as const,
@@ -20,13 +20,14 @@ export function protectionPolicyValidator(
     const fields = new Set(policy.lockedFields);
     const violations: string[] = [];
     if (fields.has("name") && next.name !== old.name) violations.push("名称");
-    if (fields.has("location") && (next.placeId !== old.placeId || next.location !== old.location)) violations.push("地点");
+    if (fields.has("location") && (next.placeId !== old.placeId || ![old.placeQuery,stationLevelLocation(old.placeQuery ?? "").location].includes(next.location))) violations.push("地点");
     if (fields.has("startTime")) {
-      const allowed = policy.allowedStartTimes.length ? policy.allowedStartTimes : [old.startTime];
+      const allowed = policy.allowedStartTimes.length ? policy.allowedStartTimes : old.startTime ? [old.startTime] : [];
       if (!allowed.includes(next.startTime)) violations.push("开始时间");
     }
-    if (fields.has("endTime") && next.endTime !== old.endTime) violations.push("结束时间");
-    if (fields.has("duration") && minutes(next.endTime) - minutes(next.startTime) !== minutes(old.endTime) - minutes(old.startTime)) {
+    if (fields.has("endTime") && old.endTime !== null && next.endTime !== old.endTime) violations.push("结束时间");
+    const oldDuration=old.durationMinutes??(old.startTime&&old.endTime?minutes(old.endTime)-minutes(old.startTime):null);
+    if (fields.has("duration") && oldDuration !== null && minutes(next.endTime) - minutes(next.startTime) !== oldDuration) {
       violations.push("时长");
     }
 

@@ -88,7 +88,7 @@ async function main() {
       parse: async () => ParsedUserInputSchema.parse({
         rawText: longRawText,
         intent: "rescue",
-        existingPlans: [],
+        activityFacts: [],
         disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
         constraints: [],
         context: planningSnapshot.state,
@@ -103,7 +103,7 @@ async function main() {
       },
     },
   );
-  assert.equal(groundingReached, true, "3000-character input must pass request construction and reach grounding");
+  assert.equal(groundingReached, true, `3000-character input must pass request construction and reach grounding: ${JSON.stringify(result)}`);
   assert.equal(result.status, "SYSTEM_ERROR");
 
   const now = Date.parse("2026-10-03T10:00:00.000Z");

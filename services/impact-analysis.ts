@@ -18,26 +18,18 @@ function activityExposure(name: string, place: string, sourceText: string | null
  * decide whether a window should contain rest, free time, or a new activity.
  */
 export function analyzeImpact(
-  snapshot: Snapshot,
+  _snapshot: Snapshot,
   request: ReplanningRequest,
   world?: RealWorldContext,
 ): ImpactAnalysis {
   const now = minutes(request.currentState.currentTime);
-  const remaining = [
-    ...snapshot.itinerary.filter((event) => event.status !== "completed").map(event => ({
-      id: event.id, name: event.name, placeId: event.placeId, location: event.location,
-      locked: event.locked, startTime: event.startTime as string | null, sourceText: null as string | null,
-      arrivalDeadline: protectedArrivalDeadline(event),
-    })),
-    ...(request.unscheduledOriginals ?? []).filter(fact => fact.role === "existing_plan" && fact.progress !== "completed").map(fact => ({
-      id: fact.id, name: fact.name, placeId: `custom-${fact.id}`, location: fact.placeQuery ?? "",
-      locked: fact.commitment !== "flexible", startTime: fact.startTime as string | null, sourceText: fact.sourceText,
-      arrivalDeadline: fact.startTime ? minutes(fact.startTime) : null,
-    })),
-  ];
-  const completed = snapshot.itinerary.filter(
-    (event) => event.status === "completed",
-  );
+  const remaining = request.activityFacts.filter(fact => fact.progress !== "completed").map(fact => ({
+    ...fact,
+    location: fact.placeQuery ?? "",
+    locked: fact.commitment !== "flexible",
+    arrivalDeadline: protectedArrivalDeadline(fact),
+  }));
+  const completed = request.activityFacts.filter(fact => fact.progress === "completed");
   const locked = remaining.filter((event) => event.locked);
   const closed = new Set(request.closedPlaceIds);
   const affected = new Set<string>();
@@ -84,7 +76,7 @@ export function analyzeImpact(
         constraints: locked.filter((event) => event.startTime !== null && (event.arrivalDeadline ?? minutes(event.startTime)) === start).map((event) => `${time(start)} 前需抵达 ${event.name}`),
       });
     }
-    const fixed = snapshot.itinerary.find((event) => event.locked && protectedArrivalDeadline(event) === start);
+    const fixed = request.activityFacts.find((fact) => fact.commitment !== "flexible" && protectedArrivalDeadline(fact) === start);
     // Unknown duration is not a question for the traveler. If another fixed
     // appointment follows, keep the gap open so the planner can suggest a
     // stay length and validate whether that appointment remains reachable. If
@@ -93,7 +85,7 @@ export function analyzeImpact(
     const hasLaterFixed = fixedStarts.some((value) => value > start);
     cursor = fixed?.durationSource === "unknown"
       ? hasLaterFixed ? start : 1440
-      : Math.max(cursor, fixed ? minutes(fixed.endTime) : start);
+      : Math.max(cursor, fixed?.endTime ? minutes(fixed.endTime) : start);
   }
   if (cursor < 24 * 60) {
     windows.push({

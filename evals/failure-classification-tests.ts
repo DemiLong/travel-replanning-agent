@@ -22,6 +22,8 @@ import {
 } from "../types";
 import { RealWorldContextSchema, type RealWorldContext } from "../types/world";
 import { amapGet, clearWorldCache, WorldServiceError } from "../services/world/amap-client";
+import { snapshotActivityFacts } from "../services/activity-facts";
+import { protectionPolicyForActivity } from "../services/protection-policy";
 
 function snapshot(): Snapshot {
   const base = createStarterSnapshot();
@@ -51,6 +53,7 @@ function snapshot(): Snapshot {
       location: "城市博物馆",
       status: "locked",
       locked: true,
+      protectionPolicy: protectionPolicyForActivity({name:"城市博物馆",location:"城市博物馆",sourceText:"10点固定预约城市博物馆",startTime:"10:00",endTime:"11:00",durationMinutes:60,commitment:"fixed"}),
       indoorOutdoor: "mixed",
       openingTime: null,
       closingTime: null,
@@ -66,8 +69,7 @@ function parsed(base: Snapshot): ParsedUserInput {
   return ParsedUserInputSchema.parse({
     rawText: "下雨了，把今天的行程调整一下",
     intent: "rescue",
-    existingPlans: [],
-    activityMentions: [],
+    activityFacts: [],
     disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
     constraints: [],
     context: base.state,
@@ -104,6 +106,7 @@ function world(base: Snapshot): RealWorldContext {
 }
 
 function input(base: Snapshot) {
+  const activityFacts=snapshotActivityFacts(base);
   return {
     snapshot: base,
     request: ReplanningRequestSchema.parse({
@@ -114,6 +117,7 @@ function input(base: Snapshot) {
       variation: 0,
       stateSources: base.stateSources,
       worldOptions: { selectedPois: {}, travelMode: "TRANSIT", allowedTravelModes: ["TRANSIT"] },
+      activityFacts,
     }),
     mode: "live" as const,
     confirmation: { status: "confirmed" as const, confirmedAt: new Date().toISOString() },

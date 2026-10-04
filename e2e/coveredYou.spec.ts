@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const sessionKey = "travel-session-real-v3";
+const sessionKey = "travel-session-real-v4";
 const date = new Date().toISOString().slice(0, 10);
 const capturedAt = new Date().toISOString();
 
@@ -9,9 +9,39 @@ const trip = { id: "e2e-trip", destination: "上海", startDate: date, endDate: 
 const state = { currentDate: date, currentTime: "09:00", stateCapturedAt: capturedAt, currentLocation: "人民广场" };
 const stateSources = { currentTime: "user", currentLocation: "user", weather: "unset", energyLevel: "unset", disruption: "user" };
 const resolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };
+const protectionPolicy = {
+  source: "confirmed",
+  kind: "generic",
+  lockedFields: ["name", "startTime", "endTime", "duration", "location"],
+  timeAnchor: "starts_at",
+  durationPolicy: { mode: "fixed", defaultMinutes: 60, minMinutes: 60, maxMinutes: 60 },
+  allowedStartTimes: ["10:00"],
+  locationGranularity: "venue",
+  transportKind: null,
+  arrivalBuffer: null,
+  locationNote: null,
+};
 
-test.beforeEach(async ({ page }) => {
+const externalAuthRequestsByPage = new WeakMap<Page, string[]>();
+test.beforeEach(async ({ context, page }) => {
+  await context.addInitScript(() => {
+    const testEnvironment = globalThis as typeof globalThis & {
+      __COVEREDYOU_DISABLE_AUTH_FOR_TESTS__?: boolean;
+    };
+    testEnvironment.__COVEREDYOU_DISABLE_AUTH_FOR_TESTS__ = true;
+  });
   page.on("pageerror", (error) => console.error("browser page error:", error.message));
+  const externalAuthRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== "http://127.0.0.1:3000" && url.pathname.includes("/auth/v1/")) {
+      externalAuthRequests.push(request.url());
+    }
+  });
+  externalAuthRequestsByPage.set(page, externalAuthRequests);
+});
+test.afterEach(async ({ page }) => {
+  expect(externalAuthRequestsByPage.get(page) ?? [], "默认浏览器回归不得访问外部认证服务").toEqual([]);
 });
 const event = {
   id: "museum",
@@ -30,14 +60,53 @@ const event = {
   travelTimeFromPrevious: null,
   reason: "用户确认的固定安排。",
   constraint: "固定预约",
+  protectionPolicy,
 };
+
+const museumFact = {
+  id: event.id,
+  placeId: event.placeId,
+  origin: "snapshot",
+  snapshotEventId: event.id,
+  role: "existing_plan",
+  progress: "not_started",
+  name: event.name,
+  placeQuery: event.location,
+  startTime: event.startTime,
+  startTimeSource: "snapshot",
+  endTime: event.endTime,
+  durationMinutes: 60,
+  durationSource: "user",
+  commitment: "fixed",
+  protectionPolicy,
+  sourceText: null,
+};
+
+function messageFact(id: string, name: string, startTime: string, endTime: string, placeQuery: string) {
+  return {
+    id,
+    placeId: `custom-${id}`,
+    origin: "message",
+    snapshotEventId: null,
+    role: "existing_plan",
+    progress: "not_started",
+    name,
+    placeQuery,
+    startTime,
+    startTimeSource: "user",
+    endTime,
+    durationMinutes: 60,
+    durationSource: "user",
+    commitment: "flexible",
+    sourceText: `${startTime} ${name}`,
+  };
+}
 
 function parsedInput(rawText = "下雨了，把下午行程调一下") {
   return {
     rawText,
     intent: "rescue",
-    existingPlans: [],
-    activityMentions: [],
+    activityFacts: [],
     disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
     constraints: [],
     context: state,
@@ -56,8 +125,7 @@ function confirmedDraft(rawText = "下雨了，把下午行程调一下") {
   return {
     rawText,
     intent: "rescue",
-    existingPlans: [{ id: event.id, placeId: event.placeId, name: event.name, startTime: event.startTime, endTime: event.endTime, durationMinutes: 60, location: event.location, locked: true }],
-    activityMentions: [],
+    activityFacts: [museumFact],
     disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
     constraints: [],
     context: state,
@@ -72,7 +140,7 @@ function confirmedDraft(rawText = "下雨了，把下午行程调一下") {
 
 function ordinarySession() {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     experienceMode: "real",
     flowStage: "HAS_ITINERARY",
     snapshot: { mode: "user", profile, trip, state, stateSources, itinerary: [event], revision: 1 },
@@ -87,13 +155,13 @@ function ordinarySession() {
 
 function pendingPlanSession() {
   const base = ordinarySession().snapshot;
-  const request = { reason: "weather", freeText: "下雨了", currentState: state, closedPlaceIds: [], variation: 0, stateSources, worldOptions: { selectedPois: {}, travelMode: "TRANSIT", allowedTravelModes: ["TRANSIT"] } };
+  const request = { reason: "weather", freeText: "下雨了", currentState: state, closedPlaceIds: [], variation: 0, stateSources, activityFacts: [museumFact], worldOptions: { selectedPois: {}, travelMode: "TRANSIT", allowedTravelModes: ["TRANSIT"] } };
   const current = { id: "current", city: "上海市", longitude: 121.47, latitude: 31.23, coordinateSystem: "GCJ02", source: "user", capturedAt, adcode: "310101" };
   const place = { poiId: "museum-poi", name: "城市博物馆", address: "城市博物馆", city: "上海市", district: "黄浦区", adcode: "310101", longitude: 121.49, latitude: 31.23, coordinateSystem: "GCJ02", type: "科教文化服务", source: "amap", fetchedAt: capturedAt, status: "available" };
   const world = { currentTime: { value: "09:00", date, source: "user", confirmedAt: capturedAt }, currentLocation: current, resolvedPlaces: [{ placeId: "museum-poi", poi: place }], alternatives: [], routes: [{ origin: current, destination: { ...place, id: "museum-poi" }, travelMode: "TRANSIT", distanceMeters: 2500, durationSeconds: 900, source: "amap", fetchedAt: capturedAt, status: "available" }], weather: { condition: "小雨", temperature: 20, humidity: 80, windDirection: null, windPower: null, forecast: [], source: "amap", fetchedAt: capturedAt, reportedAt: capturedAt, status: "available" }, dataFreshness: { groundedAt: capturedAt, routeMaxAgeSeconds: 120, locationMaxAgeSeconds: 600 }, missingWorldFacts: [], ambiguities: [], candidatePlaceIds: {}, travelMode: "TRANSIT", cityResolution: { city: "上海市", source: "current_location", evidence: [], conflicts: [] }, resolutionEvidence: [], status: "ready" };
   const plannedEvent = { ...event, travelMode: "TRANSIT", travelTimeFromPrevious: 15, reason: "保留固定预约" };
   const plan = { summary: "保留固定预约", explanation: "雨天只保留已确认安排。", events: [plannedEvent], movedEvents: [], removedEvents: [] };
-  const context = { profile, trip, state, stateSources, existingItinerary: [event], lockedEvents: [event], remainingEvents: [event], disruption: request, places: [], travelMinutes: {}, world };
+  const context = { profile, trip, state, stateSources, activityFacts: [museumFact], remainingActivityFacts: [museumFact], protectedActivityFacts: [museumFact], disruption: request, places: [], travelMinutes: {}, world };
   const result = { id: "plan-1", ok: true, plan, attempts: [{ attempt: 1, durationMs: 10, violations: [] }], mode: "live", model: "e2e", message: "已通过当前可验证规则。", verificationLevel: "partial", context, candidatePlans: [{ id: "candidate-1", title: "推荐方案", tradeOff: "保留预约", feasible: true, plan, conflicts: [] }] };
   return { ...ordinarySession(), flowStage: "PLAN_READY", lastDisruption: request, pendingPlan: { result, base, request, accepted: false } };
 }
@@ -112,7 +180,7 @@ test("首次创建只保存单日正式行程", async ({ page }) => {
       body: JSON.stringify({
         ...parsedInput("10点去城市博物馆"),
         intent: "create",
-        existingPlans: [{ id: "created", name: "城市博物馆", startTime: "10:00", endTime: "11:00", durationMinutes: 60, location: "城市博物馆", locked: false, source: "user" }],
+        activityFacts: [messageFact("created", "城市博物馆", "10:00", "11:00", "城市博物馆")],
         disruptions: [],
         context: { ...state, currentLocation: "人民广场" },
         contextSources: { ...stateSources, disruption: "unset" },
@@ -148,7 +216,7 @@ test("仅保存行程保持原有清理范围和 flowStage", async ({ page }) =>
     rawInput: "保留城市博物馆安排",
     parsedInput: {
       ...parsedInput("保留城市博物馆安排"),
-      existingPlans: [{ id: event.id, name: event.name, startTime: event.startTime, endTime: event.endTime, durationMinutes: 60, location: event.location, locked: true, source: "user" }],
+      activityFacts: [museumFact],
       disruptions: [],
     },
     conditionalAdvice,
@@ -176,7 +244,7 @@ test("两个标签页基于同一 revision 保存时后提交者冲突", async (
       body: JSON.stringify({
         ...parsedInput("10点去城市博物馆"),
         intent: "create",
-        existingPlans: [{ id: "created", name: "城市博物馆", startTime: "10:00", endTime: "11:00", durationMinutes: 60, location: "城市博物馆", locked: false, source: "user" }],
+        activityFacts: [messageFact("created", "城市博物馆", "10:00", "11:00", "城市博物馆")],
         disruptions: [],
         context: { ...state, currentLocation: "人民广场" },
         contextSources: { ...stateSources, disruption: "unset" },

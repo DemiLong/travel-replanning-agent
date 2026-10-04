@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const sessionKey = "travel-session-real-v3";
+const sessionKey = "travel-session-real-v4";
 const evidenceDirectory = path.resolve("work", "p0-live-evidence");
 const defectEvidenceDirectory = path.resolve("work", "three-defect-live-evidence");
 
@@ -12,22 +12,30 @@ type AssistBody = {
   failure?: { code?: string; stage?: string; retryable?: boolean; traceId?: string };
   missingFact?: { key?: string; question?: string; answerType?: string };
   parsedInput?: {
-    existingPlans?: Array<{ id?: string; name?: string; startTime?: string; endTime?: string | null; durationSource?: string; location?: string; locked?: boolean }>;
-    activityMentions?: Array<{ id?: string; name?: string; startTime?: string | null; location?: string | null; role?: string }>;
+    activityFacts?: ActivityBody[];
   };
   confirmedDraft?: {
-    existingPlans?: Array<{ id?: string; name?: string; startTime?: string; endTime?: string | null; durationSource?: string; location?: string; locked?: boolean }>;
-    activityMentions?: Array<{ id?: string; name?: string; startTime?: string | null; location?: string | null; role?: string }>;
+    activityFacts?: ActivityBody[];
   };
   base?: { revision?: number; itinerary?: Array<{ id?: string; placeId?: string; name?: string; startTime?: string; endTime?: string; durationSource?: string; locked?: boolean }> };
   result?: { ok?: boolean; model?: string; plan?: { events?: Array<{ id?: string; name?: string; startTime?: string }> } };
 };
 
+type ActivityBody = {
+  id?: string;
+  name?: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  durationSource?: string;
+  placeQuery?: string | null;
+  role?: string;
+  commitment?: string;
+};
+
 type ParseBody = {
   parser?: string;
   parserModel?: string | null;
-  existingPlans?: Array<{ id?: string; name?: string; startTime?: string; location?: string }>;
-  activityMentions?: Array<{ id?: string; name?: string; role?: string; startTime?: string | null; location?: string | null }>;
+  activityFacts?: ActivityBody[];
   disruptions?: Array<{ kind?: string; label?: string }>;
   question?: string | null;
 };
@@ -85,14 +93,10 @@ function responseSummary(body: AssistBody) {
     failure: body.failure,
     message: body.message,
     blocker: body.missingFact,
-    parsedActivities: [
-      ...(body.parsedInput?.existingPlans ?? []),
-      ...(body.parsedInput?.activityMentions ?? []),
-    ].map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, location: item.location, role: "role" in item ? item.role : "existing_plan" })),
-    draftActivities: [
-      ...(body.confirmedDraft?.existingPlans ?? []),
-      ...(body.confirmedDraft?.activityMentions ?? []),
-    ].map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, location: item.location })),
+    parsedActivities: (body.parsedInput?.activityFacts ?? [])
+      .map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, location: item.placeQuery, role: item.role })),
+    draftActivities: (body.confirmedDraft?.activityFacts ?? [])
+      .map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, location: item.placeQuery })),
     baseRevision: body.base?.revision,
     baseActivities: body.base?.itinerary?.map((item) => ({ id: item.id, name: item.name, startTime: item.startTime, locked: item.locked })),
     planner: body.result ? { ok: body.result.ok, model: body.result.model, eventCount: body.result.plan?.events?.length ?? 0 } : undefined,
@@ -198,10 +202,7 @@ test("P0-01 真实原句识别并保留三项活动", async ({ page }) => {
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   const first = await assistRequest(page, async () => page.getByRole("button", { name: /帮我重新安排今天/ }).click());
   console.log("P0-01 first response", JSON.stringify(responseSummary(first)));
-  const activities = [
-    ...(first.confirmedDraft?.existingPlans ?? []),
-    ...(first.confirmedDraft?.activityMentions ?? []),
-  ];
+  const activities = first.confirmedDraft?.activityFacts ?? [];
   expect(activities).toHaveLength(3);
   expect(activities.map((item) => item.startTime)).toEqual(["15:00", "18:00", "20:00"]);
   const bodies = await continueHomeFlow(page, first);
@@ -218,10 +219,7 @@ test("P0-01 第二次独立真实运行仍保留三项活动", async ({ page }) 
   const rawText = "现在下雨了，我想3点去印暨小馆喝咖啡的，然后6点去吃金鹏老友粉，晚上8点去看小蛮腰，还来得及全部做这些事吗？";
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   const first = await assistRequest(page, async () => page.getByRole("button", { name: /帮我重新安排今天/ }).click());
-  const activities = [
-    ...(first.confirmedDraft?.existingPlans ?? []),
-    ...(first.confirmedDraft?.activityMentions ?? []),
-  ];
+  const activities = first.confirmedDraft?.activityFacts ?? [];
   expect(activities).toHaveLength(3);
   expect(activities.map((item) => item.startTime)).toEqual(["15:00", "18:00", "20:00"]);
   const bodies = await continueHomeFlow(page, first);
@@ -268,20 +266,11 @@ test("P0-04 空行程的酒店地点答案只归属酒店活动", async ({ page 
   const rawText = "现在下雨了，我原定15点回酒店，18点去上海国金中心，请帮我调整。";
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   const first = await assistRequest(page, async () => page.getByRole("button", { name: /帮我重新安排今天/ }).click());
-  const initialActivities = [
-    ...(first.parsedInput?.existingPlans ?? []),
-    ...(first.parsedInput?.activityMentions ?? []),
-  ];
+  const initialActivities = first.parsedInput?.activityFacts ?? [];
   expect(initialActivities).toHaveLength(2);
-  const initialIds = [
-    ...(first.confirmedDraft?.existingPlans ?? []),
-    ...(first.confirmedDraft?.activityMentions ?? []),
-  ].map((item) => item.id);
+  const initialIds = (first.confirmedDraft?.activityFacts ?? []).map((item) => item.id);
   const bodies = await continueHomeFlow(page, first);
-  const allActivities = bodies.flatMap((body) => [
-    ...(body.parsedInput?.existingPlans ?? []),
-    ...(body.parsedInput?.activityMentions ?? []),
-  ]);
+  const allActivities = bodies.flatMap((body) => body.parsedInput?.activityFacts ?? []);
   const hotelActivity = [...allActivities].reverse().find((item) => /酒店/.test(item.name ?? ""));
   const financeActivity = [...allActivities].reverse().find((item) => /国金|金融中心/.test(item.name ?? ""));
   await saveEvidence("04-hotel-location-answer", page, {
@@ -293,15 +282,12 @@ test("P0-04 空行程的酒店地点答案只归属酒店活动", async ({ page 
   });
   const expectedIds = [...initialIds].sort();
   expect(bodies.slice(1).every((body) => {
-    const ids = [
-      ...(body.parsedInput?.existingPlans ?? []),
-      ...(body.parsedInput?.activityMentions ?? []),
-    ].map((item) => item.id).sort();
+    const ids = (body.parsedInput?.activityFacts ?? []).map((item) => item.id).sort();
     return ids.length === 0 || JSON.stringify(ids) === JSON.stringify(expectedIds);
   })).toBeTruthy();
-  expect(hotelActivity?.location).toMatch(/上海和平饭店|和平饭店|酒店/);
+  expect(hotelActivity?.placeQuery).toMatch(/上海和平饭店|和平饭店|酒店/);
   expect(financeActivity?.startTime).toBe("18:00");
-  expect(financeActivity?.location).toMatch(/上海国金中心/);
+  expect(financeActivity?.placeQuery).toMatch(/上海国金中心/);
   expect(bodies.at(-1)?.message ?? "").not.toMatch(/没有对应|JSON|Zod|SyntaxError/i);
 });
 
@@ -310,21 +296,12 @@ test("P0-05 空行程活动缺时间时答案可定向更新且 ID 稳定", asyn
   const rawText = "我今天原定去上海国金中心，再去外滩，现在下雨了，帮我调整。";
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   const first = await assistRequest(page, async () => page.getByRole("button", { name: /帮我重新安排今天/ }).click());
-  const initialActivities = [
-    ...(first.parsedInput?.existingPlans ?? []),
-    ...(first.parsedInput?.activityMentions ?? []),
-  ];
+  const initialActivities = first.parsedInput?.activityFacts ?? [];
   expect(initialActivities).toHaveLength(2);
-  const initialIds = [
-    ...(first.confirmedDraft?.existingPlans ?? []),
-    ...(first.confirmedDraft?.activityMentions ?? []),
-  ].map((item) => item.id);
+  const initialIds = (first.confirmedDraft?.activityFacts ?? []).map((item) => item.id);
   const bodies = await continueHomeFlow(page, first);
   const askedTime = bodies.some((body) => /几点|时间/.test(body.missingFact?.question ?? ""));
-  const finalParsed = [
-    ...(bodies.at(-1)?.parsedInput?.existingPlans ?? []),
-    ...(bodies.at(-1)?.parsedInput?.activityMentions ?? []),
-  ];
+  const finalParsed = bodies.at(-1)?.parsedInput?.activityFacts ?? [];
   await saveEvidence("05-missing-time-answer", page, {
     category: "真实浏览器/真实后端/真实 DeepSeek 与按需高德",
     input: rawText,
@@ -356,8 +333,7 @@ test("P0-06 已有活动的取消问题保留原活动身份且接受前不改�
   const bodies = await continueHomeFlow(page, first);
   const unchanged = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   const handledActivities = [
-    ...(first.parsedInput?.existingPlans ?? []),
-    ...(first.parsedInput?.activityMentions ?? []),
+    ...(first.parsedInput?.activityFacts ?? []),
     ...(first.base?.itinerary ?? []),
   ];
   await saveEvidence("06-cancel-existing-activity", page, {
@@ -379,10 +355,7 @@ test("P0-07 真正考虑中的互斥选项不会自动变成两项确定行程",
   const rawText = "现在下雨了，我在考虑15点去上海博物馆东馆还是上海国金中心，还没决定。";
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   const first = await assistRequest(page, async () => page.getByRole("button", { name: /帮我重新安排今天/ }).click());
-  const parsed = [
-    ...(first.parsedInput?.existingPlans ?? []).map((item) => ({ ...item, role: "existing_plan" })),
-    ...(first.parsedInput?.activityMentions ?? []),
-  ];
+  const parsed = first.parsedInput?.activityFacts ?? [];
   await saveEvidence("07-considering-options", page, {
     category: "真实浏览器/真实后端/真实 DeepSeek",
     input: rawText,
@@ -478,7 +451,7 @@ test("DEFECT-A 真实固定预约重申后保留时长与来源", async ({ page 
   expect(suppliedCurrentLocation).toBeTruthy();
   if (current.status === "READY") await page.waitForURL(/\/result$/, { timeout: 20_000 });
   const drafts = bodies
-    .map((body) => body.confirmedDraft?.existingPlans?.find((item) => item.id === original.id))
+    .map((body) => body.confirmedDraft?.activityFacts?.find((item) => item.id === original.id))
     .filter((item): item is NonNullable<typeof item> => item !== undefined);
   expect(drafts).toHaveLength(bodies.filter((body) => body.status === "NEEDS_INPUT").length);
   const unchanged = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
@@ -493,7 +466,7 @@ test("DEFECT-A 真实固定预约重申后保留时长与来源", async ({ page 
   });
   for (const item of drafts) {
     expect(item).toBeTruthy();
-    expect([item?.startTime, item?.endTime, item?.durationSource, item?.locked]).toEqual(["18:00", "19:00", "user", true]);
+    expect([item?.startTime, item?.endTime, item?.durationSource, item?.commitment]).toEqual(["18:00", "19:00", "user", "fixed"]);
   }
   expect(unchanged.snapshot.revision).toBe(1);
   expect([unchanged.snapshot.itinerary[0].id, unchanged.snapshot.itinerary[0].endTime, unchanged.snapshot.itinerary[0].durationSource]).toEqual([original.id, "19:00", "user"]);
@@ -504,32 +477,33 @@ const semanticCases = [
     id: "B1",
     input: "现在下雨了，我想3点去印暨小馆喝咖啡的，然后6点去吃金鹏老友粉，晚上8点去看小蛮腰，还来得及全部做这些事吗？",
     assert: (body: ParseBody) => {
-      expect(body.existingPlans?.map((item) => item.startTime)).toEqual(["15:00", "18:00", "20:00"]);
-      expect(body.activityMentions ?? []).toHaveLength(0);
+      expect(body.activityFacts?.map((item) => item.startTime)).toEqual(["15:00", "18:00", "20:00"]);
+      expect(body.activityFacts?.every((item) => item.role === "existing_plan")).toBeTruthy();
     },
   },
   {
     id: "B2",
     input: "我还不确定是否去，正在考虑15点去上海博物馆东馆，然后18点去上海国金中心，来得及吗？",
     assert: (body: ParseBody) => {
-      expect(body.existingPlans ?? []).toHaveLength(0);
-      expect(body.activityMentions?.map((item) => item.role)).toEqual(["considering", "considering"]);
+      expect(body.activityFacts?.map((item) => item.role)).toEqual(["considering", "considering"]);
     },
   },
   {
     id: "B3",
     input: "我原定15点去上海博物馆东馆、18点去上海国金中心，但现在不确定赶不赶得上。",
     assert: (body: ParseBody) => {
-      expect(body.existingPlans?.map((item) => item.startTime)).toEqual(["15:00", "18:00"]);
-      expect(body.activityMentions ?? []).toHaveLength(0);
+      expect(body.activityFacts?.map((item) => item.startTime)).toEqual(["15:00", "18:00"]);
+      expect(body.activityFacts?.every((item) => item.role === "existing_plan")).toBeTruthy();
     },
   },
   {
     id: "B6",
     input: "已确定15点去上海博物馆东馆，晚上还在考虑18点去上海国金中心，全部来得及吗？",
     assert: (body: ParseBody) => {
-      expect(body.existingPlans?.map((item) => item.startTime)).toEqual(["15:00"]);
-      expect(body.activityMentions?.map((item) => [item.role, item.startTime])).toEqual([["considering", "18:00"]]);
+      expect(body.activityFacts?.map((item) => [item.role, item.startTime])).toEqual([
+        ["existing_plan", "15:00"],
+        ["considering", "18:00"],
+      ]);
     },
   },
 ] as const;
@@ -544,8 +518,7 @@ for (const semanticCase of semanticCases) {
         httpStatus: response.status,
         parser: response.body?.parser,
         parserModel: response.body?.parserModel,
-        existingPlans: response.body?.existingPlans,
-        activityMentions: response.body?.activityMentions,
+        activityFacts: response.body?.activityFacts,
         disruptions: response.body?.disruptions,
         question: response.body?.question,
       });

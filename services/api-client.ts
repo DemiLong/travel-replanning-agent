@@ -26,6 +26,13 @@ function abortIfNeeded(signal?: AbortSignal) {
 }
 
 function client() {
+  const testEnvironment = globalThis as typeof globalThis & {
+    __COVEREDYOU_DISABLE_AUTH_FOR_TESTS__?: boolean;
+  };
+  if (testEnvironment.__COVEREDYOU_DISABLE_AUTH_FOR_TESTS__ === true) {
+    browserClient = null;
+    return browserClient;
+  }
   if (browserClient !== undefined) return browserClient;
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();

@@ -1,4 +1,4 @@
-import { WorldContextService } from "../services/world/world-context-service";
+import { validateRealInput, WorldContextService } from "../services/world/world-context-service";
 import { buildRealContext } from "./real-context-builder";
 import { CandidateOutputError, DeepSeekPlanner, materializeCandidate, type CandidatePlanner } from "../services/deepseek-planner";
 import { UnknownDurationConflict } from "../services/deepseek-planner";
@@ -24,7 +24,7 @@ function collectConflicts(violations: Violation[]) {
 function resolutionOptions(context: ReturnType<typeof buildRealContext>, conflicts: PlanConflict[]): ResolutionOption[] {
   const options: ResolutionOption[] = [];
   const addRemove = (eventId: string, requiresConfirmation: boolean) => {
-    const event = context.remainingEvents.find(item => item.id === eventId);
+    const event = context.remainingActivityFacts.find(item => item.id === eventId);
     if (!event || options.some(option => option.id === `remove-${event.id}`)) return;
     options.push({
       id: `remove-${event.id}`,
@@ -35,8 +35,8 @@ function resolutionOptions(context: ReturnType<typeof buildRealContext>, conflic
     });
   };
   for (const conflict of conflicts) {
-    const event = context.remainingEvents.find(item => item.id === conflict.eventId);
-    const anchor = conflict.nextAnchorEventId ? context.remainingEvents.find(item => item.id === conflict.nextAnchorEventId) : undefined;
+    const event = context.remainingActivityFacts.find(item => item.id === conflict.eventId);
+    const anchor = conflict.nextAnchorEventId ? context.remainingActivityFacts.find(item => item.id === conflict.nextAnchorEventId) : undefined;
     if (conflict.kind === "unknown_duration_window" && event) {
       if (event.durationSource === "unknown" && (conflict.availableMinutes ?? 0) >= MIN_SUGGESTED_DURATION) {
         options.push({
@@ -49,9 +49,9 @@ function resolutionOptions(context: ReturnType<typeof buildRealContext>, conflic
           requiresConfirmation: false,
         });
       } else {
-        addRemove(event.id, event.locked);
-        if (anchor?.locked) addRemove(anchor.id, true);
-        if (anchor?.locked) options.push({ id: `edit-${anchor.id}`, label: `回到编辑页重新确认${anchor.name}的固定时间`, action: "edit_locked_arrangement", eventId: anchor.id, requiresConfirmation: false });
+        addRemove(event.id, event.commitment !== "flexible");
+        if (anchor && anchor.commitment !== "flexible") addRemove(anchor.id, true);
+        if (anchor && anchor.commitment !== "flexible") options.push({ id: `edit-${anchor.id}`, label: `回到编辑页重新确认${anchor.name}的固定时间`, action: "edit_locked_arrangement", eventId: anchor.id, requiresConfirmation: false });
       }
     }
     if (conflict.kind === "locked_schedule_conflict") {
@@ -66,7 +66,8 @@ function resolutionOptions(context: ReturnType<typeof buildRealContext>, conflic
 export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSeekPlanner(),worldService:Pick<WorldContextService,"ground">=new WorldContextService(),impactAnalysis?:ImpactAnalysis,signal?:AbortSignal,execution?:RequestExecution):Promise<AgentResult|{world:RealWorldContext;message:string}>{
   const world=await worldService.ground(raw, signal);
   if(world.status!=="ready")return {world,message:"真实世界数据尚未完整，请确认地点或补充必要信息。"};
-  const context=buildRealContext(raw,world,impactAnalysis),attempts:AgentResult["attempts"]=[];
+  const input=validateRealInput(raw);
+  const context=buildRealContext(input,world,impactAnalysis),attempts:AgentResult["attempts"]=[];
   let feedback:Violation[]=[],comparisons:NonNullable<AgentResult["candidateComparisons"]>=[],candidatePlans:NonNullable<AgentResult["candidatePlans"]>=[];
   for(let attempt=0;attempt<MAX_REPLAN_ATTEMPTS;attempt++){
     const started=Date.now();feedback=attempt?feedback:[];
@@ -87,7 +88,7 @@ export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSe
       feedback=[];comparisons=[];candidatePlans=[];
       for(const candidate of candidates){
         try{
-          const evaluated=()=>{const plan=materializeCandidate(context,candidate);return {plan,violations:[...validatePlan(context,plan),...validatePlanExplanation(context,plan)]};};
+          const evaluated=()=>{const plan=materializeCandidate(context,candidate,input.snapshot);return {plan,violations:[...validatePlan(context,plan),...validatePlanExplanation(context,plan)]};};
           const {plan,violations}=execution?execution.measureSync("VALIDATOR",evaluated):evaluated();
           comparisons.push({title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,conflicts:violations.map(v=>v.message)});
           candidatePlans.push({id:crypto.randomUUID(),title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,plan,conflicts:violations.flatMap(v=>v.conflict?[v.conflict]:[])});

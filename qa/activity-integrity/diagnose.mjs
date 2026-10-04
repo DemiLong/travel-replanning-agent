@@ -64,9 +64,9 @@ for (const item of cases.filter(value => !selectedCase || value.id === selectedC
       parse: async () => parsed,
       ground: async (input, signal) => {
         record.stages.push({ stage: "planningRequest", value: {
-          originalActivityIds: input.request.originalActivityIds,
-          originals: (input.request.originalActivityIds ?? []).map(id => draft.activityFacts.find(fact => fact.id === id)).filter(Boolean).map(({ id, name, sourceText }) => ({ id, name, sourceText })),
-          unscheduledOriginals: summarizeActivities(input.request.unscheduledOriginals ?? []),
+          activityFactIds: input.request.activityFacts.map(fact=>fact.id),
+          originals: input.request.activityFacts.map(({ id, name, sourceText }) => ({ id, name, sourceText })),
+          unscheduledFacts: summarizeActivities(input.request.activityFacts.filter(fact=>fact.startTime===null)),
           currentLocation: input.request.currentState.currentLocation,
           allowedTravelModes: input.request.worldOptions?.allowedTravelModes ?? null,
         } });

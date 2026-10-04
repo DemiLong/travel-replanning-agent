@@ -1,7 +1,20 @@
 "use client";
 
 import { LockKeyhole, MapPin } from "lucide-react";
-import type { ItineraryEvent, ReplanningRequest } from "@/types";
+import type { ItineraryEvent, ProtectionPolicy, ReplanningRequest } from "@/types";
+
+type TimelineActivity = {
+  id: string;
+  name: string;
+  startTime: string;
+  endTime: string | null;
+  durationSource: "user" | "suggested" | "unknown";
+  location: string;
+  locked: boolean;
+  travelMode?: "WALKING" | "TRANSIT" | "DRIVING";
+  travelTimeFromPrevious?: number | null;
+  protectionPolicy?: ProtectionPolicy;
+};
 
 export const reasonLabels: Record<ReplanningRequest["reason"], string> = {
   weather: "下雨或天气变化",
@@ -66,7 +79,7 @@ export function Loading({ error }: { error?: string }) {
   );
 }
 
-export function Timeline({ events }: { events: ItineraryEvent[] }) {
+export function Timeline({ events }: { events: TimelineActivity[] }) {
   if (!events.length)
     return <p className="muted">这里暂时没有需要执行的安排。</p>;
   return (

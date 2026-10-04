@@ -8,6 +8,12 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const localBrowsers = path.join(projectRoot, ".playwright-browsers");
 
 const environment = { ...process.env };
+const playwrightArguments = process.argv.slice(2);
+const usesLiveConfig = playwrightArguments.some(argument => argument.endsWith("playwright.live.config.ts"));
+if (!usesLiveConfig && environment.COVEREDYOU_E2E_AUTH_ISOLATED !== "1") {
+  console.error("默认浏览器回归必须通过 npm run test:e2e 启动，以隔离真实认证服务。");
+  process.exit(1);
+}
 if (!environment.PLAYWRIGHT_BROWSERS_PATH && existsSync(localBrowsers)) {
   environment.PLAYWRIGHT_BROWSERS_PATH = localBrowsers;
 }
@@ -20,7 +26,7 @@ const playwrightCli = path.join(
   "cli.js",
 );
 
-const child = spawn(process.execPath, [playwrightCli, "test", ...process.argv.slice(2)], {
+const child = spawn(process.execPath, [playwrightCli, "test", ...playwrightArguments], {
   cwd: projectRoot,
   env: environment,
   stdio: "inherit",

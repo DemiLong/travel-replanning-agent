@@ -16,17 +16,19 @@ const {CoordinateService}=require("../work/eval-build/services/world/coordinate-
 const {replanReal}=require("../work/eval-build/agents/real-replanning-agent.js");
 const {validatePlan}=require("../work/eval-build/validators/index.js");
 const {buildRealContext}=require("../work/eval-build/agents/real-context-builder.js");
+const {snapshotActivityFacts}=require("../work/eval-build/services/activity-facts.js");
+const {protectionPolicyForActivity}=require("../work/eval-build/services/protection-policy.js");
 try{
   const snapshot=createStarterSnapshot();snapshot.trip.destination=process.argv.includes("--unconfirmed-city")?"待确认城市":"北京";
   const parsed=await new DeepSeekSemanticParser().parse(snapshot,regressionText);
-  const activities=[...parsed.existingPlans,...parsed.activityMentions];
+  const activities=parsed.activityFacts;
   assert.equal(parsed.context.currentTime,"11:46");
   assert(activities.some(a=>a.name.includes("故宫")&&a.startTime==="10:00"));
   assert(activities.some(a=>a.startTime==="15:00"));
-  assert(activities.some(a=>a.startTime==="17:00"&&(a.locked===true||a.locked==="yes")));
+  assert(activities.some(a=>a.startTime==="17:00"&&a.commitment==="fixed"));
   assert.equal(parsed.context.weather,undefined);assert.equal(parsed.context.energyLevel,undefined);
   assert(parsed.parseWarnings.length||parsed.missingFacts.length);
-  const report={semantic:{model:parsed.parserModel,currentTime:parsed.context.currentTime,activities:activities.map(a=>({name:a.name,time:a.startTime,locked:a.locked})),questions:parsed.parseWarnings}};
+  const report={semantic:{model:parsed.parserModel,currentTime:parsed.context.currentTime,activities:activities.map(a=>({name:a.name,time:a.startTime,commitment:a.commitment})),questions:parsed.parseWarnings}};
   console.log("PASS actual DeepSeek complex semantic regression",JSON.stringify(report.semantic));
   if(!process.argv.includes("--semantic-only")){
     const places=new AmapPlacesService(),selectedPois={};
@@ -34,9 +36,9 @@ try{
     const venues=[{id:"museum",name:"故宫博物院",start:"10:00",end:"12:00",locked:false},{id:"hotel",name:"北京饭店",start:"15:00",end:"15:15",locked:true},{id:"booking",name:"天坛公园",start:"17:00",end:"18:00",locked:true}];
     const locate=async(field,name)=>{const response=await places.search(name,"北京");const match=response.candidates.find(p=>p.name===name);assert(match,`TEST venue ${name} requires a matching returned POI`);selectedPois[field]=match.poiId;return match;};
     const origin=await locate("currentLocation","天安门广场");
-    for(const v of venues){await locate(v.id,v.name);snapshot.itinerary.push({id:v.id,placeId:v.id,name:v.name,category:"user activity",startTime:v.start,endTime:v.end,location:v.name,status:v.locked?"locked":"planned",locked:v.locked,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"测试中明确补充并确认",constraint:v.locked?"固定预约":"原安排"});}
+    for(const v of venues){await locate(v.id,v.name);const durationMinutes=Number(v.end.slice(0,2))*60+Number(v.end.slice(3))-Number(v.start.slice(0,2))*60-Number(v.start.slice(3));const protectionPolicy=protectionPolicyForActivity({name:v.name,location:v.name,sourceText:v.name,startTime:v.start,endTime:v.end,durationMinutes,commitment:v.locked?"fixed":"flexible"});snapshot.itinerary.push({id:v.id,placeId:v.id,name:v.name,category:"user activity",startTime:v.start,endTime:v.end,durationSource:"user",location:v.name,status:v.locked?"locked":"planned",locked:v.locked,protectionPolicy,indoorOutdoor:"mixed",openingTime:null,closingTime:null,travelTimeFromPrevious:null,reason:"测试中明确补充并确认",constraint:v.locked?"固定预约":"原安排"});}
     snapshot.state={...snapshot.state,currentTime:"11:46",currentLocation:"天安门广场"};snapshot.stateSources={...snapshot.stateSources,currentTime:"user",currentLocation:"user",disruption:"user"};
-    const input={snapshot,mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()},request:{reason:"late",freeText:regressionText+" 测试补充：酒店为北京饭店，17 点参观天坛公园；故宫预计停留 120 分钟，酒店集合 15 分钟，天坛参观 60 分钟。保留两项固定预约。",currentState:snapshot.state,stateSources:snapshot.stateSources,closedPlaceIds:[],variation:0,worldOptions:{travelMode:"WALKING",selectedPois}}};
+    const input={snapshot,mode:"live",confirmation:{status:"confirmed",confirmedAt:new Date().toISOString()},request:{reason:"late",freeText:regressionText+" 测试补充：酒店为北京饭店，17 点参观天坛公园；故宫预计停留 120 分钟，酒店集合 15 分钟，天坛参观 60 分钟。保留两项固定预约。",currentState:snapshot.state,stateSources:snapshot.stateSources,closedPlaceIds:[],variation:0,activityFacts:snapshotActivityFacts(snapshot),worldOptions:{travelMode:"WALKING",selectedPois}}};
     const world=await new WorldContextService().ground(input);assert.equal(world.status,"ready");assert.equal(world.weather.status,"not_requested");assert.equal(world.resolvedPlaces.length,3);assert(world.routes.every(r=>r.source==="amap"));
     const converted=await new CoordinateService().toGCJ02({longitude:116.4,latitude:39.9,coordinateSystem:"WGS84"});assert.equal(converted.coordinateSystem,"GCJ02");assert.notEqual(converted.longitude,116.4);
     const weather=await new AmapWeatherService().weather(origin.adcode||(await places.reverse(origin)).adcode);assert.equal(weather.status,"available");

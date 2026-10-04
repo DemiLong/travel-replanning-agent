@@ -23,16 +23,16 @@ export function decisionTrace(
     ...(context.state.weather ? [{ field: "天气", value: context.state.weather, source: context.stateSources.weather }] : []),
     ...(context.state.energyLevel ? [{ field: "体力状态", value: context.state.energyLevel, source: context.stateSources.energyLevel }] : []),
     ...(context.disruption.freeText.trim() ? [{ field: "用户报告的变化", value: context.disruption.freeText.trim(), source: context.stateSources.disruption }] : []),
-    ...context.lockedEvents.map((event) => ({ field: "固定安排", value: `${event.startTime} ${event.name}`, source: "user" as const })),
+    ...context.protectedActivityFacts.map((fact) => ({ field: "固定安排", value: `${fact.startTime ?? "时间待安排"} ${fact.name}`, source: "user" as const })),
     ...(context.removedLockedIds ?? []).map((id) => ({ field: "用户明确删除的固定安排", value: id, source: "user" as const })),
   ];
   const decisions: NonNullable<AgentResult["decisionTrace"]>["decisions"] = plan ? [
     ...(context.removedLockedIds ?? []).map((id) => ({ eventId: id, decision: "按用户明确指令移除固定安排", reason: "删除动作来自用户确认，不是合并时静默丢失。", evidence: ["用户在确认界面明确确认删除。"] })),
-    ...context.lockedEvents.map((event) => ({ eventId: event.id, decision: `保留 ${event.name}`, reason: protectionSummary(event), evidence: plan.events.some((next) => next.id === event.id && next.startTime === event.startTime && next.location === event.location) ? [`新行程保留在 ${event.startTime}，地点为 ${event.location}。`] : ["受保护字段未被完整保留。"] })),
+    ...context.protectedActivityFacts.map((fact) => ({ eventId: fact.id, decision: `保留 ${fact.name}`, reason: protectionSummary(fact), evidence: plan.events.some((next) => next.id === fact.id && next.startTime === fact.startTime && next.location === fact.placeQuery) ? [`新行程保留在 ${fact.startTime}，地点为 ${fact.placeQuery}。`] : ["受保护字段未被完整保留。"] })),
     ...plan.removedEvents.map((change) => ({ eventId: change.eventId, decision: `移除 ${change.name}`, reason: change.reason, evidence: ["该活动未出现在新的可执行行程中。", `约束：${change.constraint}。`] })),
     ...plan.movedEvents.map((change) => ({ eventId: change.eventId, decision: `建议改到 ${change.suggestedDate} ${change.suggestedStart}`, reason: change.reason, evidence: [change.note, `约束：${change.constraint}。`] })),
-    ...plan.events.filter((event) => context.existingItinerary.some((old) => old.id === event.id && !old.locked && (old.startTime !== event.startTime || old.endTime !== event.endTime))).map((event) => ({ eventId: event.id, decision: `调整 ${event.name} 到 ${event.startTime}–${event.endTime}`, reason: event.reason, evidence: [`输入变化：${context.disruption.freeText}`, `路线校验：${violations.some((item) => item.code === "travel_time" && item.eventId === event.id) ? "未通过" : "通过"}`] })),
-    ...plan.events.filter((event) => !context.existingItinerary.some((old) => old.id === event.id)).map((event) => ({ eventId: event.id, decision: `新增 ${event.name}`, reason: event.reason, evidence: [`安排在 ${event.startTime}–${event.endTime}。`, event.constraint] })),
+    ...plan.events.filter((event) => context.activityFacts.some((fact) => fact.id === event.id && fact.commitment === "flexible" && (fact.startTime !== event.startTime || fact.endTime !== event.endTime))).map((event) => ({ eventId: event.id, decision: `调整 ${event.name} 到 ${event.startTime}–${event.endTime}`, reason: event.reason, evidence: [`输入变化：${context.disruption.freeText}`, `路线校验：${violations.some((item) => item.code === "travel_time" && item.eventId === event.id) ? "未通过" : "通过"}`] })),
+    ...plan.events.filter((event) => !context.activityFacts.some((fact) => fact.id === event.id)).map((event) => ({ eventId: event.id, decision: `新增 ${event.name}`, reason: event.reason, evidence: [`安排在 ${event.startTime}–${event.endTime}。`, event.constraint] })),
   ] : [];
   const validationEvidence: NonNullable<AgentResult["decisionTrace"]>["validationEvidence"] = validationChecks.map(([code, check]) => {
     const failures = violations.filter((item) => item.code === code);

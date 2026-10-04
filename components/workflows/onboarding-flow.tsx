@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRight, Trash2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { mergePlans } from "@/services/itinerary-domain";
+import { eventsFromActivityFacts } from "@/services/itinerary-domain";
+import { protectionPolicyForActivity } from "@/services/protection-policy";
+import { minutes } from "@/lib/time";
 import {
   commitSnapshot,
   createItineraryDraft,
@@ -20,6 +22,8 @@ import {
   SnapshotSchema,
   isRawInputWithinLimit,
   rawInputRemaining,
+  ActivityFactSchema,
+  type ActivityFactDraft,
   type ItineraryDraft,
   type ParsedUserInput,
   type Snapshot,
@@ -82,7 +86,7 @@ export function OnboardingFlow() {
   const activeSession = session;
   const activeDraft = draft;
   const raw = activeDraft.rawInput;
-  const items = activeDraft.items;
+  const items = activeDraft.activityFacts;
 
   function persistDraft(
     nextDraft: ItineraryDraft,
@@ -95,13 +99,20 @@ export function OnboardingFlow() {
 
   function updateItem(
     id: string,
-    patch: Partial<ItineraryDraft["items"][number]>,
+    patch: Partial<ActivityFactDraft>,
   ) {
     persistDraft({
       ...activeDraft,
-      items: activeDraft.items.map((item) =>
-        item.id === id ? { ...item, ...patch } : item,
-      ),
+      activityFacts: activeDraft.activityFacts.map((item) => {
+        if(item.id!==id)return item;
+        const next={...item,...patch};
+        if(patch.startTime!==undefined||patch.endTime!==undefined){
+          const duration=next.startTime&&next.endTime?minutes(next.endTime)-minutes(next.startTime):0;
+          next.durationMinutes=duration>0?duration:null;
+          next.durationSource=next.endTime?"user":"unknown";
+        }
+        return {...next,protectionPolicy:protectionPolicyForActivity({name:next.name,location:next.placeQuery,sourceText:next.sourceText??"",startTime:next.startTime,endTime:next.endTime,durationMinutes:next.durationMinutes,commitment:next.commitment})};
+      }),
     });
   }
 
@@ -130,8 +141,8 @@ export function OnboardingFlow() {
         activeDraft,
       );
       const parsed = await parseWithModel(editableSnapshot, raw);
-      persistDraft({ ...activeDraft, items: parsed.existingPlans }, parsed);
-      if (parsed.activityMentions.length) window.location.assign("/rescue");
+      persistDraft({ ...activeDraft, activityFacts: parsed.activityFacts }, parsed);
+      if (parsed.activityFacts.some(fact=>fact.role!=="existing_plan")) window.location.assign("/rescue");
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -153,7 +164,7 @@ export function OnboardingFlow() {
         throw new Error("请填写当前地点。");
       if (items.some((item) => !item.name.trim()))
         throw new Error("请检查活动名称。");
-      if (items.some((item) => !item.startTime))
+      if (items.some((item) => !item.startTime || !item.placeQuery?.trim()))
         throw new Error("请检查活动开始时间。");
       const latest = loadSession();
       if (latest.snapshot.revision !== activeDraft.baseRevision)
@@ -165,10 +176,10 @@ export function OnboardingFlow() {
       const parsed = ParsedUserInputSchema.parse({
         rawText: raw,
         intent: "create",
-        existingPlans: items,
+        activityFacts: items.map(item=>ActivityFactSchema.parse({...item,role:"existing_plan"})),
         disruptions: [],
         constraints: items
-          .filter((item) => item.locked)
+          .filter((item) => item.commitment !== "flexible")
           .map((item) => ({
             kind: "keep",
             value: `${item.startTime} ${item.name}`,
@@ -182,7 +193,7 @@ export function OnboardingFlow() {
       });
       const next = SnapshotSchema.parse({
         ...editableSnapshot,
-        itinerary: mergePlans({ ...editableSnapshot, itinerary: [] }, parsed),
+        itinerary: eventsFromActivityFacts({ ...editableSnapshot, itinerary: [] }, parsed.activityFacts),
         revision: activeDraft.baseRevision + 1,
       });
       commitSnapshot(next, activeDraft.baseRevision);
@@ -330,7 +341,7 @@ export function OnboardingFlow() {
                       onClick={() =>
                         persistDraft({
                           ...activeDraft,
-                          items: activeDraft.items.filter(
+                          activityFacts: activeDraft.activityFacts.filter(
                             (candidate) => candidate.id !== item.id,
                           ),
                         })
@@ -358,9 +369,9 @@ export function OnboardingFlow() {
                         id={`start-${item.id}`}
                         type="time"
                         required
-                        value={item.startTime}
+                        value={item.startTime ?? ""}
                         onChange={(event) =>
-                          updateItem(item.id, { startTime: event.target.value })
+                          updateItem(item.id, { startTime: event.target.value||null,startTimeSource:event.target.value?"user":"not_provided" })
                         }
                       />
                     </div>
@@ -373,6 +384,7 @@ export function OnboardingFlow() {
                         onChange={(event) =>
                           updateItem(item.id, {
                             endTime: event.target.value || null,
+                            durationSource:event.target.value?"user":"unknown",
                           })
                         }
                       />
@@ -383,19 +395,18 @@ export function OnboardingFlow() {
                         id={`location-${item.id}`}
                         required
                         maxLength={160}
-                        value={item.location}
+                        value={item.placeQuery ?? ""}
                         onChange={(event) =>
-                          updateItem(item.id, { location: event.target.value })
+                          updateItem(item.id, { placeQuery: event.target.value })
                         }
                       />
                     </div>
                     <label className="interest fixed-plan">
                       <Checkbox
-                        checked={item.locked}
+                        checked={item.commitment !== "flexible"}
                         onCheckedChange={(checked) =>
                           updateItem(item.id, {
-                            locked: Boolean(checked),
-                            ...(checked ? {} : { protectionPolicy: undefined }),
+                            commitment: checked?"fixed":"flexible",
                           })
                         }
                       />

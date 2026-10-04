@@ -1,6 +1,8 @@
 "use client";
 
-export const realSessionKey = "travel-session-real-v3";
+export const realSessionKey = "travel-session-real-v4";
+export const legacyRealSessionV3Key = "travel-session-real-v3";
+export const legacyRealSessionV3BackupKey = "travel-session-real-v3-backup";
 export const legacyRealSessionKey = "travel-session-real-v2";
 export const legacyRealSessionBackupKey = "travel-session-real-v2-backup";
 export const legacySnapshotKey = "travel-snapshot-user";

@@ -1,10 +1,7 @@
 import type { AgentContext, ProposedPlan, Violation } from "../types";
 
 function originals(context: AgentContext) {
-  const items = [...context.remainingEvents.map(event => ({ id: event.id, name: event.name, place: event.location })),
-    ...(context.unscheduledOriginals ?? []).map(fact => ({ id: fact.id, name: fact.name, place: fact.placeQuery ?? "" }))];
-  const ids = new Set(context.originalActivityIds ?? items.map(item => item.id));
-  return items.filter(item => ids.has(item.id));
+  return context.remainingActivityFacts.map(fact => ({ id: fact.id, name: fact.name, place: fact.placeQuery ?? "" }));
 }
 
 export function summarizeVerifiedPlan(context: AgentContext, plan: ProposedPlan) {

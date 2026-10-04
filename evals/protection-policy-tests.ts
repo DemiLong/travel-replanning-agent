@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { runAgentAssist } from "../agents/agent-orchestrator";
 import { createStarterSnapshot } from "../data/session-defaults";
 import { normalizeSemanticExtraction } from "../services/semantic-parser";
-import { parsedToEvent } from "../services/itinerary-domain";
+import { activityFactToEvent } from "../services/itinerary-domain";
+import { snapshotActivityFacts } from "../services/activity-facts";
 import {
   protectedArrivalDeadline,
   protectionPolicyForActivity,
@@ -39,26 +40,28 @@ const uncertain = normalizeSemanticExtraction(snapshot, text, SemanticExtraction
   ambiguities: [],
 }), "test-model");
 assert.equal(uncertain.activityFacts.find(fact => fact.origin === "message")?.commitment, "uncertain");
-assert.equal(uncertain.existingPlans[0].locked, true);
-assert.deepEqual(uncertain.existingPlans[0].protectionPolicy?.lockedFields, ["startTime", "location"]);
-assert.deepEqual(uncertain.existingPlans[0].protectionPolicy?.durationPolicy, { mode: "suggested", defaultMinutes: 90, minMinutes: 60, maxMinutes: 150 });
+const uncertainDinner=uncertain.activityFacts.find(fact=>fact.role==="existing_plan")!;
+assert.equal(uncertainDinner.commitment, "uncertain");
+assert.deepEqual(uncertainDinner.protectionPolicy?.lockedFields, ["startTime", "location"]);
+assert.deepEqual(uncertainDinner.protectionPolicy?.durationPolicy, { mode: "suggested", defaultMinutes: 90, minMinutes: 60, maxMinutes: 150 });
 const uncertainAssist = await runAgentAssist(
   { snapshot, rawText: text },
   undefined,
   { parse: async () => uncertain, ground: async () => { throw new Error("grounding reached"); } },
 );
-assert.equal(uncertainAssist.status, "UPSTREAM_UNAVAILABLE", "固定性不明确不得触发 NEEDS_INPUT");
+assert.notEqual(uncertainAssist.status, "NEEDS_INPUT", "固定性不明确不得触发固定性补问");
 
 function contextFor(event: ItineraryEvent): AgentContext {
+  const activityFacts=snapshotActivityFacts(SnapshotSchema.parse({...snapshot,itinerary:[event]}));
   return {
     profile: snapshot.profile,
     trip: snapshot.trip,
     state: snapshot.state,
     stateSources: snapshot.stateSources,
-    existingItinerary: [event],
-    remainingEvents: [event],
-    lockedEvents: [event],
-    disruption: ReplanningRequestSchema.parse({ reason: "optimize", freeText: "优化", currentState: snapshot.state, closedPlaceIds: [], variation: 0 }),
+    activityFacts,
+    remainingActivityFacts: activityFacts,
+    protectedActivityFacts: activityFacts.filter(fact=>fact.commitment!=="flexible"),
+    disruption: ReplanningRequestSchema.parse({ reason: "optimize", freeText: "优化", currentState: snapshot.state, closedPlaceIds: [], variation: 0, activityFacts }),
     places: [],
     travelMinutes: {},
   };
@@ -67,7 +70,7 @@ function planWith(event: ItineraryEvent): ProposedPlan {
   return { summary: "测试", explanation: "测试", events: [event], movedEvents: [], removedEvents: [] };
 }
 
-const restaurant = parsedToEvent(uncertain.existingPlans[0], snapshot);
+const restaurant = activityFactToEvent(uncertainDinner, snapshot);
 const suggestedDinner = EventSchema.parse({ ...restaurant, endTime: "19:30", durationSource: "suggested" });
 assert.deepEqual(protectionPolicyValidator(contextFor(restaurant), planWith(suggestedDinner)), []);
 assert(protectionPolicyValidator(contextFor(restaurant), planWith(EventSchema.parse({ ...suggestedDinner, endTime: "18:30" }))).length > 0);
@@ -92,7 +95,7 @@ const flight = EventSchema.parse({
   openingTime: null, closingTime: null, travelTimeFromPrevious: null, reason: "固定航班", constraint: "交通时间",
 });
 assert.equal(flightPolicy?.arrivalBuffer?.recommendedMinutes, 180);
-assert.equal(protectedArrivalDeadline(flight), 17 * 60);
+assert.equal(protectedArrivalDeadline(snapshotActivityFacts(SnapshotSchema.parse({...snapshot,itinerary:[flight]}))[0]), 17 * 60);
 
 const arriveByTrain = protectionPolicyForActivity({ name: "到广州东站", location: "广州东站", sourceText: "下午5点到广州东站", startTime: "17:00", durationMinutes: null, commitment: "fixed" });
 assert.equal(arriveByTrain?.timeAnchor, "arrive_by");

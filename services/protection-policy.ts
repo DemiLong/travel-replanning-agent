@@ -1,7 +1,7 @@
 import { minutes } from "../lib/time";
 import {
   ProtectionPolicySchema,
-  type ItineraryEvent,
+  type ActivityFact,
   type ProtectionPolicy,
 } from "../types";
 
@@ -199,42 +199,17 @@ export function protectionPolicyForActivity(input: PolicyInput): ProtectionPolic
   });
 }
 
-export function legacyProtectionPolicy(event: ItineraryEvent): ProtectionPolicy | undefined {
-  if (!event.locked) return undefined;
-  const duration = Math.max(0, minutes(event.endTime) - minutes(event.startTime));
-  return ProtectionPolicySchema.parse({
-    source: "legacy",
-    kind: "generic",
-    lockedFields: ["name", "startTime", "endTime", "duration", "location"],
-    timeAnchor: "starts_at",
-    durationPolicy: {
-      mode: event.durationSource === "unknown" ? "unknown" : "fixed",
-      defaultMinutes: event.durationSource === "unknown" ? null : duration,
-      minMinutes: event.durationSource === "unknown" ? null : duration,
-      maxMinutes: event.durationSource === "unknown" ? null : duration,
-    },
-    allowedStartTimes: [event.startTime],
-    locationGranularity: "venue",
-    transportKind: null,
-    arrivalBuffer: null,
-    locationNote: null,
-  });
-}
-
-export function effectiveProtectionPolicy(event: ItineraryEvent) {
-  return event.protectionPolicy ?? legacyProtectionPolicy(event);
-}
-
-export function protectedArrivalDeadline(event: ItineraryEvent) {
-  const policy = effectiveProtectionPolicy(event);
+export function protectedArrivalDeadline(fact: ActivityFact) {
+  if (!fact.startTime) return 0;
+  const policy = fact.protectionPolicy;
   const buffer = policy?.timeAnchor === "departs_at"
     ? policy.arrivalBuffer?.recommendedMinutes ?? 0
     : 0;
-  return Math.max(0, minutes(event.startTime) - buffer);
+  return Math.max(0, minutes(fact.startTime) - buffer);
 }
 
-export function protectionSummary(event: ItineraryEvent) {
-  const policy = effectiveProtectionPolicy(event);
+export function protectionSummary(fact: ActivityFact) {
+  const policy = fact.protectionPolicy;
   if (!policy) return "非固定安排";
   if (policy.kind === "restaurant_reservation") return "保护预约开始时间和餐厅地点；用餐结束时间是系统建议。";
   if (policy.kind === "ticketed_event") return "票务活动的已提取时间、地点和活动身份全部保护。";

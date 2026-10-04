@@ -19,6 +19,8 @@ import {
 import { RealWorldContextSchema, type RealWorldContext } from "../types/world";
 import { genericLocation } from "../services/world/context-resolution";
 import { validatePlan } from "../validators";
+import { protectionPolicyForActivity } from "../services/protection-policy";
+import { snapshotActivityFacts } from "../services/activity-facts";
 
 function snapshot(): Snapshot {
   const base = createStarterSnapshot();
@@ -33,6 +35,7 @@ function snapshot(): Snapshot {
     location: "城市博物馆",
     status: "locked",
     locked: true,
+    protectionPolicy: protectionPolicyForActivity({name:"城市博物馆",location:"城市博物馆",sourceText:"10点固定预约城市博物馆",startTime:"10:00",endTime:"11:00",durationMinutes:60,commitment:"fixed"}),
     indoorOutdoor: "mixed",
     openingTime: null,
     closingTime: null,
@@ -55,8 +58,7 @@ function parsed(rawText = "下雨了，把今天的行程调整一下"): ParsedU
   return ParsedUserInputSchema.parse({
     rawText,
     intent: "rescue",
-    existingPlans: [],
-    activityMentions: [],
+    activityFacts: [],
     disruptions: [{ kind: "weather", label: "下雨", source: "user" }],
     constraints: [],
     context: base.state,
@@ -69,6 +71,16 @@ function parsed(rawText = "下雨了，把今天的行程调整一下"): ParsedU
     parseWarnings: [],
     worldOptions: { selectedPois: {}, travelMode: "TRANSIT", allowedTravelModes: ["TRANSIT"] },
   });
+}
+
+function messageFact(value:{id:string;name:string;startTime:string|null;endTime:string|null;durationMinutes:number|null;location:string|null;locked:boolean|"yes"|"no";sourceText?:string;role?:"existing_plan"|"considering"|"reference"|"uncertain"}){
+  const commitment=value.locked===true||value.locked==="yes"?"fixed" as const:"flexible" as const;
+  const sourceText=value.sourceText??value.name;
+  return {
+    id:value.id,placeId:`custom-${value.id}`,origin:"message" as const,snapshotEventId:null,role:value.role??"existing_plan",progress:"not_started" as const,
+    name:value.name,startTime:value.startTime,endTime:value.endTime,durationMinutes:value.durationMinutes,startTimeSource:value.startTime?"user" as const:"not_provided" as const,durationSource:value.endTime||value.durationMinutes?"user" as const:"unknown" as const,
+    placeQuery:value.location,commitment,sourceText,protectionPolicy:protectionPolicyForActivity({name:value.name,location:value.location,sourceText,startTime:value.startTime,endTime:value.endTime,durationMinutes:value.durationMinutes,commitment}),
+  };
 }
 
 function poi(id: string, name: string, longitude: number) {
@@ -111,6 +123,7 @@ function world(status: "ready" | "needs_input" | "unavailable" = "ready"): RealW
 }
 
 function input(base = snapshot()) {
+  const activityFacts=snapshotActivityFacts(base);
   return {
     snapshot: base,
     request: ReplanningRequestSchema.parse({
@@ -121,6 +134,7 @@ function input(base = snapshot()) {
       variation: 0,
       stateSources: base.stateSources,
       worldOptions: { selectedPois: {}, travelMode: "TRANSIT", allowedTravelModes: ["TRANSIT"] },
+      activityFacts,
     }),
     mode: "live" as const,
     confirmation: { status: "confirmed" as const, confirmedAt: new Date().toISOString() },
@@ -139,7 +153,7 @@ async function main() {
   Object.assign(old.itinerary[0], { [removedEventField]: 100 });
   const migrated = migrateV2SessionValue({ schemaVersion: 2, rawInput: "保留的原文", snapshot: old });
   assert(migrated);
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.equal(migrated.snapshot.revision, 7);
   assert.equal(migrated.snapshot.itinerary[0].locked, true);
   assert.equal(migrated.snapshot.trip.startDate, migrated.snapshot.trip.endDate);
@@ -184,7 +198,7 @@ async function main() {
     {
       parse: async () => ParsedUserInputSchema.parse({
         ...parsed("下雨了，18点去上海国金中心的预约请保留。"),
-        existingPlans: [{ id: "restated-ifc", name: "上海国金中心", startTime: "18:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: true, source: "user" }],
+        activityFacts: [messageFact({ id: "restated-ifc", name: "上海国金中心", startTime: "18:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: true })],
       }),
       ground: async () => world("needs_input"),
     },
@@ -192,7 +206,7 @@ async function main() {
   assert.equal(restatedFixed.status, "NEEDS_INPUT");
   if (restatedFixed.status !== "NEEDS_INPUT") throw new Error("expected A1 location follow-up");
   assert.deepEqual(
-    restatedFixed.confirmedDraft.existingPlans.map((item) => [item.id, item.placeId, item.startTime, item.endTime, item.durationMinutes]),
+    restatedFixed.confirmedDraft.activityFacts.map((item) => [item.id, item.placeId, item.startTime, item.endTime, item.durationMinutes]),
     [["saved-fixed-ifc", "saved-fixed-ifc-poi", "18:00", "19:00", 60]],
   );
   let capturedRestatedFixed: unknown;
@@ -220,6 +234,7 @@ async function main() {
       id: "saved-ordinary-ifc",
       placeId: "saved-ordinary-ifc-poi",
       locked: false,
+      protectionPolicy:undefined,
       status: "planned",
     })],
   });
@@ -230,7 +245,7 @@ async function main() {
     {
       parse: async () => ParsedUserInputSchema.parse({
         ...parsed("下雨了，原定18点去上海国金中心，请调整。"),
-        existingPlans: [{ id: "ordinary-restatement", name: "上海国金中心", startTime: "18:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: false, source: "user" }],
+        activityFacts: [messageFact({ id: "ordinary-restatement", name: "上海国金中心", startTime: "18:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: false })],
       }),
       ground: async (raw) => { capturedOrdinaryDuration = raw; return world("unavailable"); },
     },
@@ -249,7 +264,7 @@ async function main() {
       {
         parse: async () => ParsedUserInputSchema.parse({
           ...parsed("下雨了，固定预约改到18点半结束。"),
-          existingPlans: [{ id: "saved-fixed-ifc", name: "上海国金中心", startTime: "18:00", endTime: "18:30", durationMinutes: 30, location: "上海国金中心", locked: true, source: "user" }],
+          activityFacts: [messageFact({ id: "saved-fixed-ifc", name: "上海国金中心", startTime: "18:00", endTime: "18:30", durationMinutes: 30, location: "上海国金中心", locked: true })],
           disruptions: [{ kind: "changed_mind", label: "修改固定预约", source: "user" }],
         }),
       },
@@ -275,7 +290,7 @@ async function main() {
       context: sourceBase.state,
       contextSources: sourceBase.stateSources,
     }));
-    assert.equal(sourceDraft.existingPlans[0].durationSource, durationSource);
+    assert.equal(sourceDraft.activityFacts[0].durationSource, durationSource);
     let capturedSourceRoundTrip: unknown;
     const sourceResult = await runAgentAssist(
       { snapshot: sourceBase, confirmedDraft: sourceDraft, resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] } },
@@ -298,6 +313,7 @@ async function main() {
       name: locked ? "固定晚餐" : "普通晚餐",
       location: locked ? "固定晚餐地点" : "普通晚餐地点",
       locked,
+      protectionPolicy:locked?snapshot().itinerary[0].protectionPolicy:undefined,
       status: locked ? "locked" : "planned",
       constraint: locked ? "固定预约" : "原计划",
     });
@@ -306,13 +322,13 @@ async function main() {
       { snapshot: base, rawText: "下雨了，请调整今天剩下的安排" },
       undefined,
       {
-        parse: async () => ParsedUserInputSchema.parse({ ...parsed("下雨了，请调整今天剩下的安排"), existingPlans: [] }),
+        parse: async () => ParsedUserInputSchema.parse({ ...parsed("下雨了，请调整今天剩下的安排"), activityFacts: [] }),
         ground: async () => world("needs_input"),
       },
     );
     assert.equal(first.status, "NEEDS_INPUT");
     if (first.status !== "NEEDS_INPUT") throw new Error("expected first follow-up");
-    assert.deepEqual(first.confirmedDraft.existingPlans.map((item) => item.id), [event.id]);
+    assert.deepEqual(first.confirmedDraft.activityFacts.map((item) => item.id), [event.id]);
     let capturedRoundTrip: unknown;
     const second = await runAgentAssist(
       {
@@ -343,6 +359,7 @@ async function main() {
       placeId: "saved-museum-poi",
       name: "美术馆",
       locked: false,
+      protectionPolicy:undefined,
       status: "planned",
     })],
   });
@@ -352,32 +369,19 @@ async function main() {
     {
       parse: async () => ParsedUserInputSchema.parse({
         ...parsed("下雨了，我原本10点去美术馆，请调整"),
-        activityMentions: [{ id: "mention-saved-museum", role: "existing_plan", name: "去美术馆", startTime: "10:00", endTime: null, durationMinutes: null, location: null, locked: "no", sourceText: "原本10点去美术馆" }],
+        activityFacts: [messageFact({ id: "mention-saved-museum", role: "existing_plan", name: "去美术馆", startTime: "10:00", endTime: null, durationMinutes: null, location: null, locked: "no", sourceText: "原本10点去美术馆" })],
       }),
       ground: async () => world("needs_input"),
     },
   );
   assert.equal(savedMention.status, "NEEDS_INPUT");
   if (savedMention.status !== "NEEDS_INPUT") throw new Error("expected saved activity follow-up");
-  assert.deepEqual(savedMention.confirmedDraft.existingPlans.map((item) => item.id), ["saved-museum"]);
-  assert.equal(savedMention.confirmedDraft.activityMentions.length, 0, "同一时间且规范名相同的已存活动不应重复补问");
+  assert.deepEqual(savedMention.confirmedDraft.activityFacts.map((item) => item.id), ["saved-museum"]);
 
   const emptyBase = SnapshotSchema.parse({ ...snapshot(), itinerary: [], revision: 0 });
   const incompleteActivity = (overrides: Record<string, unknown>) => ParsedUserInputSchema.parse({
     ...parsed("现在下雨了，我原定回酒店，请帮我调整"),
-    existingPlans: [],
-    activityMentions: [{
-      id: "mention-hotel",
-      role: "existing_plan",
-      name: "回酒店",
-      startTime: "15:00",
-      endTime: null,
-      durationMinutes: null,
-      location: null,
-      locked: "no",
-      sourceText: "我原定回酒店",
-      ...overrides,
-    }],
+    activityFacts: [messageFact({id:"mention-hotel",role:"existing_plan",name:"回酒店",startTime:"15:00",endTime:null,durationMinutes:null,location:null,locked:"no",sourceText:"我原定回酒店",...overrides} as Parameters<typeof messageFact>[0])],
   });
   let incompleteGroundCalls = 0;
   const missingLocation = await runAgentAssist(
@@ -392,7 +396,7 @@ async function main() {
   assert.equal(incompleteGroundCalls, 0, "活动自身字段缺失时不应提前调用地图服务");
   if (missingLocation.status !== "NEEDS_INPUT") throw new Error("expected missing location");
   assert.equal(missingLocation.missingFact.key, "activity:mention-hotel:location");
-  assert.equal(missingLocation.confirmedDraft.activityMentions[0].id, "mention-hotel");
+  assert.equal(missingLocation.confirmedDraft.activityFacts[0].id, "mention-hotel");
   let capturedPromotedLocation: unknown;
   const locationAnswered = await runAgentAssist(
     {
@@ -405,9 +409,9 @@ async function main() {
     { ground: async (raw) => { capturedPromotedLocation = raw; return world("unavailable"); } },
   );
   assert.equal(locationAnswered.status, "UPSTREAM_UNAVAILABLE");
-  const promotedLocationSnapshot = (capturedPromotedLocation as ReturnType<typeof input>).snapshot;
+  const promotedLocationFacts = (capturedPromotedLocation as ReturnType<typeof input>).request.activityFacts;
   assert.deepEqual(
-    promotedLocationSnapshot.itinerary.map((item) => [item.id, item.location]),
+    promotedLocationFacts.map((item) => [item.id, item.placeQuery]),
     [["mention-hotel", "上海和平饭店"]],
   );
 
@@ -419,15 +423,15 @@ async function main() {
     {
       parse: async () => ParsedUserInputSchema.parse({
         ...parsed(hotelMeetingText),
-        existingPlans: [{ id: "hotel-meeting", name: "酒店集合", startTime: "15:00", endTime: "16:00", durationMinutes: 60, location: "", locked: true, source: "user" }],
+        activityFacts: [messageFact({ id: "hotel-meeting", name: "酒店集合", startTime: "15:00", endTime: "16:00", durationMinutes: 60, location: null, locked: true })],
       }),
       ground: async () => { hotelMeetingGroundCalls += 1; return world(); },
     },
   );
   assert.equal(missingExistingPlanLocation.status, "NEEDS_INPUT");
-  assert.equal(hotelMeetingGroundCalls, 0, "existingPlans 地点为空时应先补问，不应提前调用地图服务");
+  assert.equal(hotelMeetingGroundCalls, 0, "activityFacts 地点为空时应先补问，不应提前调用地图服务");
   if (missingExistingPlanLocation.status !== "NEEDS_INPUT") throw new Error("expected existing plan location follow-up");
-  assert.equal(missingExistingPlanLocation.missingFact.key, "activity:event-hotel-meeting:location");
+  assert.equal(missingExistingPlanLocation.missingFact.key, "activity:hotel-meeting:location");
   let capturedHotelMeeting: unknown;
   const answeredExistingPlanLocation = await runAgentAssist(
     {
@@ -440,16 +444,16 @@ async function main() {
     { ground: async (raw) => { capturedHotelMeeting = raw; return world("unavailable"); } },
   );
   assert.equal(answeredExistingPlanLocation.status, "UPSTREAM_UNAVAILABLE");
-  const hotelMeetingSnapshot = (capturedHotelMeeting as ReturnType<typeof input>).snapshot;
+  const hotelMeetingFacts = (capturedHotelMeeting as ReturnType<typeof input>).request.activityFacts;
   assert.deepEqual(
-    hotelMeetingSnapshot.itinerary.map((item) => [item.id, item.location, item.startTime, item.endTime, item.locked]),
-    [["event-hotel-meeting", "上海和平饭店", "15:00", "16:00", true]],
+    hotelMeetingFacts.map((item) => [item.id, item.placeQuery, item.startTime, item.endTime, item.commitment]),
+    [["hotel-meeting", "上海和平饭店", "15:00", "16:00", "fixed"]],
   );
 
   const vagueHotelBase = SnapshotSchema.parse({
     ...snapshot(),
     itinerary: [
-      EventSchema.parse({ ...snapshot().itinerary[0], id: "hotel-stop", placeId: "hotel-place", name: "酒店集合", startTime: "15:00", endTime: "16:00", location: "酒店", locked: false, status: "planned" }),
+      EventSchema.parse({ ...snapshot().itinerary[0], id: "hotel-stop", placeId: "hotel-place", name: "酒店集合", startTime: "15:00", endTime: "16:00", location: "酒店", locked: false, protectionPolicy:undefined, status: "planned" }),
       EventSchema.parse({ ...snapshot().itinerary[0], id: "dinner-stop", placeId: "dinner-place", name: "晚餐", startTime: "18:00", endTime: "19:00", location: "上海餐厅", locked: true, status: "locked" }),
     ],
   });
@@ -478,9 +482,9 @@ async function main() {
     { ground: async (raw) => { capturedMappedHotel = raw; return world("unavailable"); } },
   );
   assert.equal(answeredMappedWorldQuestion.status, "UPSTREAM_UNAVAILABLE");
-  const mappedHotelSnapshot = (capturedMappedHotel as ReturnType<typeof input>).snapshot;
+  const mappedHotelFacts = (capturedMappedHotel as ReturnType<typeof input>).request.activityFacts;
   assert.deepEqual(
-    mappedHotelSnapshot.itinerary.map((item) => [item.id, item.location, item.startTime, item.locked]),
+    mappedHotelFacts.map((item) => [item.id, item.placeQuery, item.startTime, item.commitment !== "flexible"]),
     [
       ["hotel-stop", "上海和平饭店", "15:00", false],
       ["dinner-stop", "上海餐厅", "18:00", true],
@@ -512,34 +516,18 @@ async function main() {
     assert.match(unsafeResult.message, /无法安全对应到唯一活动/);
   }
 
+  let capturedNullTime:unknown;
   const missingTime = await runAgentAssist(
     { snapshot: emptyBase, rawText: "现在下雨了，我原定去外滩，请帮我调整" },
     undefined,
     {
       parse: async () => incompleteActivity({ id: "mention-bund", name: "去外滩", startTime: null, location: "上海外滩", sourceText: "我原定去外滩" }),
-      ground: async () => { throw new Error("活动时间补齐前不应调用地图服务"); },
+      ground: async (raw) => {capturedNullTime=raw;return world("unavailable");},
     },
   );
-  assert.equal(missingTime.status, "NEEDS_INPUT");
-  if (missingTime.status !== "NEEDS_INPUT") throw new Error("expected missing time");
-  assert.equal(missingTime.missingFact.key, "activity:mention-bund:startTime");
-  let capturedPromotedTime: unknown;
-  const timeAnswered = await runAgentAssist(
-    {
-      snapshot: emptyBase,
-      confirmedDraft: missingTime.confirmedDraft,
-      answer: { kind: "time", field: missingTime.missingFact.key, value: "18:00" },
-      resolutionState: missingTime.resolutionState,
-    },
-    undefined,
-    { ground: async (raw) => { capturedPromotedTime = raw; return world("unavailable"); } },
-  );
-  assert.equal(timeAnswered.status, "UPSTREAM_UNAVAILABLE");
-  const promotedTimeSnapshot = (capturedPromotedTime as ReturnType<typeof input>).snapshot;
-  assert.deepEqual(
-    promotedTimeSnapshot.itinerary.map((item) => [item.id, item.startTime, item.location]),
-    [["mention-bund", "18:00", "上海外滩"]],
-  );
+  assert.equal(missingTime.status, "UPSTREAM_UNAVAILABLE");
+  const nullTimeFacts = (capturedNullTime as ReturnType<typeof input>).request.activityFacts;
+  assert.deepEqual(nullTimeFacts.map((item) => [item.id, item.startTime, item.placeQuery]),[["mention-bund", null, "上海外滩"]]);
 
   let capturedNewPlan: unknown;
   const newPlanResult = await runAgentAssist(
@@ -548,15 +536,15 @@ async function main() {
     {
       parse: async () => ParsedUserInputSchema.parse({
         ...parsed("现在下雨了，我原定15点去上海国金中心，请帮我调整"),
-        existingPlans: [{ id: "new-ifc", name: "上海国金中心", startTime: "15:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: false, source: "user" }],
+        activityFacts: [messageFact({ id: "new-ifc", name: "上海国金中心", startTime: "15:00", endTime: null, durationMinutes: null, location: "上海国金中心", locked: false })],
       }),
       ground: async (raw) => { capturedNewPlan = raw; return world("unavailable"); },
     },
   );
-  assert.equal(newPlanResult.status, "UPSTREAM_UNAVAILABLE");
+  assert.equal(newPlanResult.status, "UPSTREAM_UNAVAILABLE",JSON.stringify(newPlanResult));
   assert.deepEqual(
-    (capturedNewPlan as ReturnType<typeof input>).snapshot.itinerary.map((item) => [item.name, item.endTime, item.durationSource]),
-    [["上海国金中心", "15:00", "unknown"]],
+    (capturedNewPlan as ReturnType<typeof input>).request.activityFacts.map((item) => [item.name, item.endTime, item.durationSource]),
+    [["上海国金中心", null, "unknown"]],
   );
 
   const invalidParserResult = await runAgentAssist(
@@ -606,7 +594,7 @@ async function main() {
     }),
     "test-model",
   );
-  assert.equal(plannedQuestion.existingPlans.length, 1);
+  assert.equal(plannedQuestion.activityFacts.filter(fact=>fact.role==="existing_plan").length, 1);
   assert.equal(plannedQuestion.disruptions[0].kind, "changed_mind");
   const cancelQuestionText = "原定18点去B，现在下雨，要不要取消B？";
   const cancelQuestion = normalizeSemanticExtraction(
@@ -623,7 +611,7 @@ async function main() {
     }),
     "test-model",
   );
-  assert.equal(cancelQuestion.existingPlans.length, 1);
+  assert.equal(cancelQuestion.activityFacts.filter(fact=>fact.role==="existing_plan").length, 1);
   assert(cancelQuestion.disruptions.some((item) => item.kind === "changed_mind"));
   const consideringText = "我在考虑15点去上海博物馆东馆还是上海国金中心，还没决定";
   const considering = normalizeSemanticExtraction(
@@ -643,8 +631,8 @@ async function main() {
     }),
     "test-model",
   );
-  assert.equal(considering.existingPlans.length, 0);
-  assert.equal(considering.activityMentions.filter((item) => item.role === "considering").length, 2);
+  assert.equal(considering.activityFacts.filter(fact=>fact.role==="existing_plan").length, 0);
+  assert.equal(considering.activityFacts.filter((item) => item.role === "considering").length, 2);
   const uncertainSequenceText = "我还不确定是否去，正在考虑15点去A，然后18点去B，来得及吗？";
   const uncertainSequence = normalizeSemanticExtraction(
     emptyBase,
@@ -663,8 +651,8 @@ async function main() {
     }),
     "test-model",
   );
-  assert.equal(uncertainSequence.existingPlans.length, 0, "B2 明确考虑中的活动不能被规范化代码升级为原计划");
-  assert.equal(uncertainSequence.activityMentions.filter((item) => item.role === "considering").length, 2);
+  assert.equal(uncertainSequence.activityFacts.filter(fact=>fact.role==="existing_plan").length, 0, "B2 明确考虑中的活动不能被规范化代码升级为原计划");
+  assert.equal(uncertainSequence.activityFacts.filter((item) => item.role === "considering").length, 2);
   const originalButFeasibilityUncertainText = "我原定15点去A、18点去B，但现在不确定赶不赶得上";
   const originalButFeasibilityUncertain = normalizeSemanticExtraction(
     emptyBase,
@@ -683,7 +671,7 @@ async function main() {
     }),
     "test-model",
   );
-  assert.deepEqual(originalButFeasibilityUncertain.existingPlans.map((item) => item.startTime), ["15:00", "18:00"]);
+  assert.deepEqual(originalButFeasibilityUncertain.activityFacts.filter(fact=>fact.role==="existing_plan").map((item) => item.startTime), ["15:00", "18:00"]);
   const mixedDecisionText = "已确定15点去A，晚上还在考虑18点去B，全部来得及吗？";
   const mixedDecision = normalizeSemanticExtraction(
     emptyBase,
@@ -702,10 +690,10 @@ async function main() {
     }),
     "test-model",
   );
-  assert.deepEqual(mixedDecision.existingPlans.map((item) => item.startTime), ["15:00"]);
-  assert.equal(mixedDecision.existingPlans[0]?.location, "", "B6 模型已明确为 existing_plan 时，缺地点只触发补充，不应把它降级成未决活动");
+  assert.deepEqual(mixedDecision.activityFacts.filter(fact=>fact.role==="existing_plan").map((item) => item.startTime), ["15:00"]);
+  assert.equal(mixedDecision.activityFacts.find(fact=>fact.role==="existing_plan")?.placeQuery, null, "B6 模型已明确为 existing_plan 时，缺地点只触发补充，不应把它降级成未决活动");
   assert(mixedDecision.missingFacts.includes("activityDetails"));
-  assert.deepEqual(mixedDecision.activityMentions.map((item) => [item.role, item.startTime]), [["considering", "18:00"]]);
+  assert.deepEqual(mixedDecision.activityFacts.filter(fact=>fact.role!=="existing_plan").map((item) => [item.role, item.startTime]), [["considering", "18:00"]]);
   const feasibilitySequenceText = "现在下雨了，我想3点去A，然后6点去B，晚上8点去C，还来得及全部做这些事吗？";
   const feasibilitySequence = normalizeSemanticExtraction(
     emptyBase,
@@ -725,7 +713,7 @@ async function main() {
     }),
     "test-model",
   );
-  assert.deepEqual(feasibilitySequence.existingPlans.map((item) => item.startTime), ["15:00", "18:00", "20:00"]);
+  assert.deepEqual(feasibilitySequence.activityFacts.filter(fact=>fact.role==="existing_plan").map((item) => item.startTime), ["15:00", "18:00", "20:00"]);
   assert(SEMANTIC_PARSER_PROMPT.includes("asks whether to keep or cancel an activity that was already planned"));
   assert(SEMANTIC_PARSER_PROMPT.includes("Never promote B"));
 

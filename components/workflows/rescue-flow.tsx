@@ -8,11 +8,13 @@ import { LocationService } from "@/services/world/location-service";
 import {
   confirmParsedInput,
   confirmedDraftFromParsed,
+  eventsFromActivityFacts,
   hydrateParsedPlans,
-  mergePlans,
   normalizeParsed,
 } from "@/services/itinerary-domain";
-import { addMinutesWithinDay } from "@/lib/time";
+import { mergeActivityFacts } from "@/services/activity-facts";
+import { protectionPolicyForActivity } from "@/services/protection-policy";
+import { minutes } from "@/lib/time";
 import {
   commitSnapshot,
   saveFlowDraft,
@@ -30,6 +32,7 @@ import {
   SnapshotSchema,
   isRawInputWithinLimit,
   rawInputRemaining,
+  type ActivityFact,
   type ParsedUserInput,
   type ReplanningRequest,
 } from "@/types";
@@ -80,7 +83,7 @@ export function RescueFlow() {
   useEffect(() => {
     const timeout = window.setTimeout(async () => {
       if (session && !initialized) {
-        const blank=ParsedUserInputSchema.parse({rawText:session.rawInput,destinationDraft:session.snapshot.trip.destination,intent:"rescue",existingPlans:[],disruptions:[],constraints:[],context:session.snapshot.state,contextSources:session.snapshot.stateSources,missingFacts:[],status:"draft",parser:"manual"});
+        const blank=ParsedUserInputSchema.parse({rawText:session.rawInput,destinationDraft:session.snapshot.trip.destination,intent:"rescue",activityFacts:[],disruptions:[],constraints:[],context:session.snapshot.state,contextSources:session.snapshot.stateSources,missingFacts:[],status:"draft",parser:"manual"});
         let initial=blank;
         try {
           initial=session.parsedInput?.parser!=="deterministic_fallback" && session.parsedInput ? session.parsedInput : session.rawInput.trim()?await parseWithModel(session.snapshot,session.rawInput):blank;
@@ -90,7 +93,7 @@ export function RescueFlow() {
           destinationDraft:
             initial.destinationDraft ?? session.snapshot.trip.destination,
         });
-        const matchedClosed = mergePlans(session.snapshot, initial)
+        const matchedClosed = initial.activityFacts
           .filter(
             (event) =>
               initial.disruptions.some((item) => item.kind === "closed") &&
@@ -99,7 +102,7 @@ export function RescueFlow() {
                 .includes(event.name.toLowerCase()) ||
                 initial.rawText
                   .toLowerCase()
-                  .includes(event.location.toLowerCase()) && Boolean(event.location.trim())),
+                  .includes((event.placeQuery??"").toLowerCase()) && Boolean(event.placeQuery?.trim())),
           )
           .map((event) => event.placeId);
         const restoredClosed = initial.closedPlaceIds.length
@@ -114,11 +117,27 @@ export function RescueFlow() {
   }, [session, initialized, setError]);
   const availableEvents = useMemo(() => {
     if (!session || !parsed) return [];
-    return mergePlans(session.snapshot, parsed);
+    return parsed.activityFacts
+      .filter((fact): fact is ActivityFact & { startTime: string; placeQuery: string } =>
+        fact.role === "existing_plan" && Boolean(fact.startTime) && Boolean(fact.placeQuery?.trim()))
+      .map(fact => ({
+        id: fact.id,
+        placeId: fact.placeId,
+        name: fact.name,
+        startTime: fact.startTime,
+        endTime: fact.endTime,
+        durationSource: fact.durationSource,
+        location: fact.placeQuery,
+        locked: fact.commitment !== "flexible",
+        protectionPolicy: fact.protectionPolicy,
+      }))
+      .sort((left, right) => left.startTime.localeCompare(right.startTime));
   }, [session, parsed]);
   if (!session || !parsed) return <Loading error={error} />;
   const activeSession = session;
   const activeParsed = parsed;
+  const existingFacts=activeParsed.activityFacts.filter(fact=>fact.role==="existing_plan");
+  const pendingFacts=activeParsed.activityFacts.filter(fact=>fact.role!=="existing_plan");
 
   function updateParsed(next: ParsedUserInput) {
     const selectedClosed = next.closedPlaceIds ?? closedPlaceIds;
@@ -136,6 +155,20 @@ export function RescueFlow() {
     setSession(saved);
   }
 
+  function updateFact(id:string,patch:Partial<ActivityFact>){
+    const current=activeParsed.activityFacts.find(fact=>fact.id===id);
+    if(!current)return;
+    const next={...current,...patch};
+    if(patch.startTime!==undefined||patch.endTime!==undefined){
+      const duration=next.startTime&&next.endTime?minutes(next.endTime)-minutes(next.startTime):0;
+      next.durationMinutes=duration>0?duration:null;
+      next.durationSource=next.endTime?"user":"unknown";
+    }
+    const selectedPois={...(activeParsed.worldOptions?.selectedPois??{})};
+    if(patch.placeQuery!==undefined&&patch.placeQuery!==current.placeQuery)delete selectedPois[current.placeId];
+    updateParsed({...activeParsed,activityFacts:activeParsed.activityFacts.map(fact=>fact.id===id?{...next,protectionPolicy:protectionPolicyForActivity({name:next.name,location:next.placeQuery,sourceText:next.sourceText??"",startTime:next.startTime,endTime:next.endTime,durationMinutes:next.durationMinutes,commitment:next.commitment})}:fact),worldOptions:activeParsed.worldOptions?{...activeParsed.worldOptions,selectedPois}:undefined});
+  }
+
   function chooseReason(reason: ReplanningRequest["reason"]) {
     const disruptions = [
       ...activeParsed.disruptions.filter((item) => item.kind !== "other"),
@@ -147,7 +180,7 @@ export function RescueFlow() {
     updateParsed({
       ...activeParsed,
       disruptions,
-      intent: activeParsed.existingPlans.length
+      intent: existingFacts.length
         ? "mixed"
         : reason === "optimize"
           ? "optimize"
@@ -170,14 +203,13 @@ export function RescueFlow() {
     setError("");
     try {
       const parsedAddition = await parseWithModel(activeSession.snapshot, extraPlans);
-      if (!parsedAddition.existingPlans.length && !parsedAddition.activityMentions.length) {
+      if (!parsedAddition.activityFacts.length) {
         throw new Error("AI 没有识别到可确认的活动，请补充活动名称和时间。");
       }
       updateParsed({
         ...activeParsed,
         rawText: nextRawText,
-        existingPlans: [...activeParsed.existingPlans, ...parsedAddition.existingPlans],
-        activityMentions: [...activeParsed.activityMentions, ...parsedAddition.activityMentions],
+        activityFacts: mergeActivityFacts(activeParsed.activityFacts,parsedAddition.activityFacts),
         intent: activeParsed.disruptions.length ? "mixed" : "create",
       });
       setExtraPlans("");
@@ -198,36 +230,13 @@ export function RescueFlow() {
   }
 
   function promoteMention(
-    mention: ParsedUserInput["activityMentions"][number],
+    mention: ActivityFact,
   ) {
-    if (!mention.name.trim() || !mention.startTime || !mention.location?.trim()) {
+    if (!mention.name.trim() || !mention.startTime || !mention.placeQuery?.trim()) {
       setError("已保留这项安排，请补充具体地点和开始时间。");
       return;
     }
-    let endTime = mention.endTime;
-    if (!endTime && mention.durationMinutes) {
-      try { endTime = addMinutesWithinDay(mention.startTime, mention.durationMinutes); }
-      catch (cause) { setError(errorText(cause)); return; }
-    }
-    updateParsed({
-      ...activeParsed,
-      existingPlans: [
-        ...activeParsed.existingPlans,
-        {
-          id: `confirmed-${crypto.randomUUID()}`,
-          name: mention.name.trim(),
-          startTime: mention.startTime,
-          endTime,
-          durationMinutes: mention.durationMinutes,
-          location: mention.location.trim(),
-          locked: mention.locked === "yes",
-          source: "user",
-        },
-      ],
-      activityMentions: activeParsed.activityMentions.filter(
-        (item) => item.id !== mention.id,
-      ),
-    });
+    updateFact(mention.id,{name:mention.name.trim(),placeQuery:mention.placeQuery.trim(),role:"existing_plan"});
     setError("");
   }
 
@@ -239,11 +248,15 @@ export function RescueFlow() {
         activeParsed.closedPlaceIds,
       );
       if (
-        activeSession.snapshot.itinerary.length +
-          normalized.existingPlans.length ===
-        0
+        !normalized.activityFacts.some(fact=>fact.role==="existing_plan")
       )
         throw new Error("请先确认至少一项今天已有的安排。");
+      if (
+        normalized.activityFacts
+          .filter(fact=>fact.role==="existing_plan")
+          .some(fact=>!fact.name.trim()||!fact.startTime||!fact.placeQuery?.trim())
+      )
+        throw new Error("已保留这项安排，请补充具体地点和开始时间。");
       const destination = normalized.destinationDraft?.trim();
       if (!destination) throw new Error("请填写所在城市。");
       const next = SnapshotSchema.parse({
@@ -251,7 +264,7 @@ export function RescueFlow() {
         trip: { ...activeSession.snapshot.trip, destination },
         state: { ...activeSession.snapshot.state, ...normalized.context },
         stateSources: normalized.contextSources,
-        itinerary: mergePlans(activeSession.snapshot, normalized),
+        itinerary: eventsFromActivityFacts(activeSession.snapshot, normalized.activityFacts),
         revision: activeSession.snapshot.revision + 1,
       });
       commitSnapshot(next, activeSession.snapshot.revision);
@@ -397,9 +410,9 @@ export function RescueFlow() {
           {availableEvents.length ? (
             <Timeline events={availableEvents} />
           ) : (
-            <p className="muted">{activeParsed.activityMentions.length ? `已识别 ${activeParsed.activityMentions.length} 项待确认安排，请补齐下方缺失信息。` : "请补充今天已有的安排。"}</p>
+            <p className="muted">{pendingFacts.length ? `已识别 ${pendingFacts.length} 项待确认安排，请补齐下方缺失信息。` : "请补充今天已有的安排。"}</p>
           )}
-          {missing.has("existingPlans") && (
+          {missing.has("activityFacts") && (
             <div className="field" style={{ marginTop: 18 }}>
               <label htmlFor="missing-plans">
                 请补充至少一项今天已有的安排
@@ -421,11 +434,11 @@ export function RescueFlow() {
               </button>
             </div>
           )}
-          {activeParsed.existingPlans.length > 0 && (
+          {existingFacts.length > 0 && (
             <details className="advanced-details" style={{ marginTop: 18 }}>
               <summary>修改从文本中识别的安排</summary>
               <div className="stop-list" style={{ marginTop: 16 }}>
-                {activeParsed.existingPlans.map((item, index) => (
+                {existingFacts.map((item, index) => (
                   <div className="stop-editor" key={item.id}>
                     <div className="stop-editor-heading">
                       <b>识别结果 {index + 1}</b>
@@ -435,12 +448,11 @@ export function RescueFlow() {
                         aria-label={`删除识别结果 ${index + 1}`}
                         onClick={() =>
                           (() => {
-                            const lockedEvent = activeSession.snapshot.itinerary.find((event) => event.id === item.id);
-                            if (lockedEvent?.locked && !window.confirm("这是一项固定安排。确定要删除吗？")) return;
-                            if (lockedEvent?.locked) setRemovedLockedIds((current) => [...new Set([...current, lockedEvent.id])]);
+                            if (item.commitment !== "flexible" && !window.confirm("这是一项固定安排。确定要删除吗？")) return;
+                            if (item.commitment !== "flexible") setRemovedLockedIds((current) => [...new Set([...current, item.id])]);
                             updateParsed({
                               ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.filter((candidate) => candidate.id !== item.id),
+                              activityFacts: activeParsed.activityFacts.filter((candidate) => candidate.id !== item.id),
                             });
                           })()
                         }
@@ -455,15 +467,7 @@ export function RescueFlow() {
                           id={`confirm-name-${item.id}`}
                           value={item.name}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.map(
-                                (candidate) =>
-                                  candidate.id === item.id
-                                    ? { ...candidate, name: event.target.value }
-                                    : candidate,
-                              ),
-                            })
+                            updateFact(item.id,{name:event.target.value})
                           }
                         />
                       </div>
@@ -472,20 +476,9 @@ export function RescueFlow() {
                         <input
                           id={`confirm-start-${item.id}`}
                           type="time"
-                          value={item.startTime}
+                          value={item.startTime ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.map(
-                                (candidate) =>
-                                  candidate.id === item.id
-                                    ? {
-                                        ...candidate,
-                                        startTime: event.target.value,
-                                      }
-                                    : candidate,
-                              ),
-                            })
+                            updateFact(item.id,{startTime:event.target.value||null,startTimeSource:event.target.value?"user":"not_provided"})
                           }
                         />
                       </div>
@@ -496,18 +489,7 @@ export function RescueFlow() {
                           type="time"
                           value={item.endTime ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.map(
-                                (candidate) =>
-                                  candidate.id === item.id
-                                    ? {
-                                        ...candidate,
-                                        endTime: event.target.value,
-                                      }
-                                    : candidate,
-                              ),
-                            })
+                            updateFact(item.id,{endTime:event.target.value||null,durationSource:event.target.value?"user":"unknown"})
                           }
                         />
                       </div>
@@ -517,36 +499,17 @@ export function RescueFlow() {
                         </label>
                         <input
                           id={`confirm-location-${item.id}`}
-                          value={item.location}
+                          value={item.placeQuery ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.map(
-                                (candidate) =>
-                                  candidate.id === item.id
-                                    ? {
-                                        ...candidate,
-                                        location: event.target.value,
-                                      }
-                                    : candidate,
-                              ),
-                            })
+                            updateFact(item.id,{placeQuery:event.target.value||null})
                           }
                         />
                       </div>
                       <label className="interest fixed-plan">
                         <Checkbox
-                          checked={item.locked}
+                          checked={item.commitment !== "flexible"}
                           onCheckedChange={(checked) =>
-                            updateParsed({
-                              ...activeParsed,
-                              existingPlans: activeParsed.existingPlans.map(
-                                (candidate) =>
-                                  candidate.id === item.id
-                                    ? { ...candidate, locked: Boolean(checked) }
-                                    : candidate,
-                              ),
-                            })
+                            updateFact(item.id,{commitment:checked?"fixed":"flexible"})
                           }
                         />
                         固定时间或预约
@@ -557,18 +520,18 @@ export function RescueFlow() {
               </div>
             </details>
           )}
-          {activeParsed.activityMentions.length > 0 && (
+          {pendingFacts.length > 0 && (
             <div style={{ marginTop: 24 }}>
               <h2>需要你确认的活动提及</h2>
               <p className="muted">
                 这些内容的角色或时间还不完整，所以没有自动写入行程。
               </p>
               <div className="stop-list" style={{ marginTop: 16 }}>
-                {activeParsed.activityMentions.map((mention, index) => (
+                {pendingFacts.map((mention, index) => (
                   <div className="stop-editor" key={mention.id}>
                     <div className="stop-editor-heading">
                       <b>待确认 {index + 1} · {mention.sourceText}</b>
-                      <span>{mention.locked==="yes"?"固定预约":"待确认"}</span>
+                      <span>{mention.commitment!=="flexible"?"固定预约":"待确认"}</span>
                       <button
                         type="button"
                         className="icon-button"
@@ -576,7 +539,7 @@ export function RescueFlow() {
                         onClick={() =>
                           updateParsed({
                             ...activeParsed,
-                            activityMentions: activeParsed.activityMentions.filter(
+                            activityFacts: activeParsed.activityFacts.filter(
                               (item) => item.id !== mention.id,
                             ),
                           })
@@ -592,15 +555,7 @@ export function RescueFlow() {
                           id={`mention-name-${mention.id}`}
                           value={mention.name}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              activityMentions: activeParsed.activityMentions.map(
-                                (item) =>
-                                  item.id === mention.id
-                                    ? { ...item, name: event.target.value }
-                                    : item,
-                              ),
-                            })
+                            updateFact(mention.id,{name:event.target.value})
                           }
                         />
                       </div>
@@ -611,15 +566,7 @@ export function RescueFlow() {
                           type="time"
                           value={mention.startTime ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              activityMentions: activeParsed.activityMentions.map(
-                                (item) =>
-                                  item.id === mention.id
-                                    ? { ...item, startTime: event.target.value || null }
-                                    : item,
-                              ),
-                            })
+                            updateFact(mention.id,{startTime:event.target.value||null,startTimeSource:event.target.value?"user":"not_provided"})
                           }
                         />
                       </div>
@@ -630,15 +577,7 @@ export function RescueFlow() {
                           type="time"
                           value={mention.endTime ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              activityMentions: activeParsed.activityMentions.map(
-                                (item) =>
-                                  item.id === mention.id
-                                    ? { ...item, endTime: event.target.value || null }
-                                    : item,
-                              ),
-                            })
+                            updateFact(mention.id,{endTime:event.target.value||null,durationSource:event.target.value?"user":"unknown"})
                           }
                         />
                       </div>
@@ -646,17 +585,9 @@ export function RescueFlow() {
                         <label htmlFor={`mention-location-${mention.id}`}>地点</label>
                         <input
                           id={`mention-location-${mention.id}`}
-                          value={mention.location ?? ""}
+                          value={mention.placeQuery ?? ""}
                           onChange={(event) =>
-                            updateParsed({
-                              ...activeParsed,
-                              activityMentions: activeParsed.activityMentions.map(
-                                (item) =>
-                                  item.id === mention.id
-                                    ? { ...item, location: event.target.value || null }
-                                    : item,
-                              ),
-                            })
+                            updateFact(mention.id,{placeQuery:event.target.value||null})
                           }
                         />
                       </div>
@@ -832,7 +763,7 @@ export function RescueFlow() {
               events={availableEvents.filter((event) => event.locked)}
             />
           ) : (
-            <p className="muted">{activeParsed.activityMentions.some(x=>x.locked!=="no")?`已识别需保护的预约：${activeParsed.activityMentions.filter(x=>x.locked!=="no").map(x=>`${x.startTime??"时间待补充"} ${x.name}`).join("；")}。固定性不明确时也会先按固定安排保护。`:"暂未识别到固定安排。"}</p>
+            <p className="muted">{activeParsed.activityFacts.some(fact=>fact.commitment!=="flexible")?`已识别需保护的预约：${activeParsed.activityFacts.filter(fact=>fact.commitment!=="flexible").map(fact=>`${fact.startTime??"时间待补充"} ${fact.name}`).join("；")}。固定性不明确时也会先按固定安排保护。`:"暂未识别到固定安排。"}</p>
           )}
           {parsed.disruptions.some((item) => item.kind === "closed") && (
             <fieldset className="field" style={{ marginTop: 18 }}>
@@ -873,7 +804,7 @@ export function RescueFlow() {
               {busy ? "正在生成……" : "确认并生成方案"}
               <ArrowRight size={18} />
             </button>
-            {parsed.existingPlans.length > 0 &&
+            {existingFacts.length > 0 &&
               parsed.disruptions.length === 0 && (
                 <button type="button" className="secondary" onClick={saveOnly}>
                   先保存行程
@@ -894,4 +825,3 @@ export function RescueFlow() {
     </div>
   );
 }
-

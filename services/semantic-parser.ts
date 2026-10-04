@@ -9,8 +9,7 @@ import {
   type SemanticExtraction,
   type Snapshot,
 } from "../types";
-import { addMinutesWithinDay } from "../lib/time";
-import { legacyActivitiesFromFacts, reconcileActivityFacts } from "./activity-facts";
+import { reconcileActivityFacts } from "./activity-facts";
 import { protectionPolicyForActivity, stationLevelLocation } from "./protection-policy";
 import { modelInvalidOutput, normalizeModelFailure, ServiceFailure } from "./failures";
 import type { RequestExecution } from "./request-execution";
@@ -119,7 +118,12 @@ function supportedActivity(rawText: string, activity: SemanticExtraction["activi
 function evidencedActivityStart(activity: SemanticExtraction["activities"][number], rawText: string) {
   if (!activity.startTime) return null;
   const evidence = activity.startTimeEvidence?.trim();
-  if (!evidence || !rawText.includes(evidence)) return null;
+  if (!evidence) {
+    return rawText.includes(activity.sourceText) && !/现在[^。！？；;，,]*[0-9点時时:：][^。！？；;，,]*[，,]\s*原计划/u.test(activity.sourceText) && /(?:[01]?\d|2[0-3]):[0-5]\d|(?:上午|下午|晚上|中午|凌晨)?\s*\d{1,2}\s*[点時时]/u.test(activity.sourceText)
+      ? activity.startTime
+      : null;
+  }
+  if (!rawText.includes(evidence)) return null;
   const offset = rawText.indexOf(activity.sourceText);
   const clauseStart = offset < 0 ? 0 : Math.max(0, ...[...rawText.slice(0, offset).matchAll(/[。！？；;，,]/g)].map(match => match.index + 1));
   const activityClause = offset < 0 ? activity.sourceText : rawText.slice(clauseStart, offset + activity.sourceText.length);
@@ -136,8 +140,6 @@ export function normalizeSemanticExtraction(
   hint?: ReplanningRequest["reason"],
 ): ParsedUserInput {
   const parseWarnings = [...extraction.ambiguities];
-  const activityMentions: ParsedUserInput["activityMentions"] = [];
-  const existingPlans: ParsedUserInput["existingPlans"] = [];
   const hasEvidence = (sourceText: string | null) =>
     Boolean(sourceText && rawText.includes(sourceText));
   const contextFact = <T>(
@@ -165,55 +167,12 @@ export function normalizeSemanticExtraction(
       parseWarnings.push(`关于“${activity.name}”的询问已保留在本次问题中，不重复创建同一地点的活动。`);
       continue;
     }
-    const mention = {
-      ...evidenced,
-      role,
-      id: `mention-${index}-${crypto.randomUUID()}`,
-    };
-    let endTime = activity.endTime;
-    if (!endTime && activity.startTime && activity.durationMinutes) {
-      try {
-        endTime = addMinutesWithinDay(activity.startTime, activity.durationMinutes);
-      } catch {
-        parseWarnings.push(`“${activity.name}”的停留时长会跨日，当前行程暂不支持跨日活动。`);
-      }
-    }
-    if (
-      role !== "existing_plan" ||
-      !activity.name.trim() ||
-      !activity.startTime
-    ) {
-      activityMentions.push(mention);
-      continue;
-    }
     if (activityCommitment(activity) === "uncertain") {
       parseWarnings.push(`“${activity.name}”的固定性不明确，已按可能固定安排保护。`);
     }
     if (!activity.location) {
       parseWarnings.push(`“${activity.name}”的地点未提供，请在确认页补充。`);
     }
-    const commitment = activityCommitment(activity);
-    existingPlans.push({
-      id: `llm-${index}-${crypto.randomUUID()}`,
-      name: activity.name.trim(),
-      startTime: activity.startTime,
-      endTime,
-      durationMinutes: activity.durationMinutes,
-      location: activity.location
-        ? canonicalLocation(activity.location)
-        : "",
-      locked: commitment !== "flexible",
-      protectionPolicy: protectionPolicyForActivity({
-        name: activity.name.trim(),
-        location: activity.location,
-        sourceText: activity.sourceText,
-        startTime: activity.startTime,
-        endTime: activity.endTime,
-        durationMinutes: activity.durationMinutes,
-        commitment,
-      }),
-      source: "user",
-    });
   }
 
   const disruptions = extraction.disruptions
@@ -267,17 +226,22 @@ export function normalizeSemanticExtraction(
       ? Math.max(1, Number(activity.endTime.slice(0, 2)) * 60 + Number(activity.endTime.slice(3)) - Number(startTime.slice(0, 2)) * 60 - Number(startTime.slice(3)))
       : null);
     const commitment = activityCommitment(activity);
+    const id = `message-${index}-${crypto.randomUUID()}`;
+    const endTime = startTime ? activity.endTime : null;
     return [{
-      id: `message-${index}-${crypto.randomUUID()}`,
+      id,
+      placeId: `custom-${id}`,
       origin: "message" as const,
       snapshotEventId: null,
       role: activityRoleFromEvidence(activity.role, activity.sourceText),
       progress: activityProgressFromEvidence(activity.progress, activity.sourceText),
       name: activity.name.trim(),
-      placeQuery: canonicalLocation(activity.location ?? activity.name),
+      placeQuery: activity.location ? canonicalLocation(activity.location) : null,
       startTime,
       startTimeSource: startTime ? "user" as const : "not_provided" as const,
+      endTime,
       durationMinutes,
+      durationSource: durationMinutes ? "user" as const : "unknown" as const,
       commitment,
       protectionPolicy: protectionPolicyForActivity({
         name: activity.name.trim(),
@@ -290,9 +254,11 @@ export function normalizeSemanticExtraction(
       }),
       sourceText: activity.sourceText,
     }];
-  }));
-  const projected = legacyActivitiesFromFacts(activityFacts);
-  if (!activityFacts.some(fact => fact.role === "existing_plan" && fact.progress !== "completed")) missingFacts.push("existingPlans");
+  }), (fact) => {
+    missingFacts.push(`activityMatch:${fact.id}`);
+    parseWarnings.push(`“${fact.name}”对应多个同名原安排，无法确定要修改哪一项；请补充原时间或地点。`);
+  });
+  if (!activityFacts.some(fact => fact.role === "existing_plan" && fact.progress !== "completed")) missingFacts.push("activityFacts");
   if (!disruptions.length && extraction.intent !== "optimize") missingFacts.push("disruptionOrOptimize");
   if (!context.currentLocation.trim()) missingFacts.push("currentLocation");
   if (activityFacts.some(fact => fact.role === "uncertain")) missingFacts.push("activityDecision");
@@ -302,7 +268,6 @@ export function normalizeSemanticExtraction(
   return ParsedUserInputSchema.parse({
     rawText: rawText.trim(),
     intent: extraction.intent,
-    existingPlans: projected.existingPlans,
     activityFacts,
     disruptions,
     constraints: extraction.constraints
@@ -325,7 +290,6 @@ export function normalizeSemanticExtraction(
     parser: "llm",
     parserModel: model,
     parseWarnings,
-    activityMentions: projected.activityMentions,
     question: extraction.question,
   });
 }

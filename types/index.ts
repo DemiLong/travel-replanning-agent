@@ -126,6 +126,7 @@ export const reasons = [
 ] as const;
 export const ActivityFactSchema = z.object({
   id: z.string().min(1),
+  placeId: z.string().min(1),
   origin: z.enum(["snapshot", "message"]),
   snapshotEventId: z.string().nullable(),
   role: z.enum(["existing_plan", "considering", "reference", "uncertain"]),
@@ -134,10 +135,19 @@ export const ActivityFactSchema = z.object({
   placeQuery: z.string().trim().max(160).nullable(),
   startTime: TimeSchema.nullable(),
   startTimeSource: z.enum(["user", "snapshot", "not_provided"]),
+  endTime: TimeSchema.nullable(),
   durationMinutes: z.number().int().positive().max(1440).nullable(),
+  durationSource: z.enum(["user", "suggested", "unknown"]),
   commitment: z.enum(["fixed", "flexible", "uncertain"]),
   protectionPolicy: ProtectionPolicySchema.optional(),
   sourceText: z.string().max(500).nullable(),
+}).superRefine((fact, context) => {
+  if (fact.commitment === "flexible" && fact.protectionPolicy) {
+    context.addIssue({ code: "custom", path: ["protectionPolicy"], message: "弹性安排不能携带保护策略。" });
+  }
+  if (fact.commitment !== "flexible" && !fact.protectionPolicy) {
+    context.addIssue({ code: "custom", path: ["protectionPolicy"], message: "固定或可能固定的安排必须携带保护策略。" });
+  }
 });
 export const ReplanningRequestSchema = z.object({
   reason: z.enum(reasons),
@@ -147,8 +157,7 @@ export const ReplanningRequestSchema = z.object({
   variation: z.number().int().min(0).max(100),
   stateSources: StateSourcesSchema.optional(),
   worldOptions: WorldOptionsSchema.optional(),
-  unscheduledOriginals: z.array(ActivityFactSchema).max(30).optional(),
-  originalActivityIds: z.array(z.string().min(1)).max(30).optional(),
+  activityFacts: z.array(ActivityFactSchema).max(30),
   confirmedDraftChanges: z.object({ removedLockedIds: z.array(z.string()).max(30) }).optional(),
 });
 const DecisionFactSchema = z.object({
@@ -239,9 +248,6 @@ export const SemanticActivitySchema = z.object({
   sourceText: z.string().max(500),
   progress: z.enum(["not_started", "missed", "ongoing", "completed"]).default("not_started"),
 });
-export const ActivityMentionSchema = SemanticActivitySchema.extend({
-  id: z.string().min(1),
-});
 export const SemanticExtractionSchema = z.object({
   intent: UnifiedIntentSchema,
   activities: z.array(SemanticActivitySchema).max(30),
@@ -284,17 +290,6 @@ export const SemanticExtractionSchema = z.object({
   question: z.string().max(500).nullable(),
   ambiguities: z.array(z.string().min(1).max(300)).max(12),
 });
-export const ParsedPlanItemSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  startTime: TimeSchema,
-  endTime: TimeSchema.nullable(),
-  durationMinutes: z.number().int().positive().max(1440).nullable().default(null),
-  location: z.string(),
-  locked: z.boolean(),
-  protectionPolicy: ProtectionPolicySchema.optional(),
-  source: FactSourceSchema,
-});
 export const ParsedDisruptionSchema = z.object({
   kind: z.enum(reasons),
   label: z.string().min(1),
@@ -313,8 +308,7 @@ export const ParsedUserInputSchema = z.object({
   rawText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   destinationDraft: z.string().max(80).optional(),
   intent: UnifiedIntentSchema,
-  existingPlans: z.array(ParsedPlanItemSchema).max(30),
-  activityFacts: z.array(ActivityFactSchema).max(30).default([]),
+  activityFacts: z.array(ActivityFactSchema).max(30),
   disruptions: z.array(ParsedDisruptionSchema).max(10),
   constraints: z.array(ParsedConstraintSchema).max(30),
   context: ParsedContextSchema,
@@ -327,25 +321,15 @@ export const ParsedUserInputSchema = z.object({
     .default("deterministic_fallback"),
   parserModel: z.string().max(100).nullable().default(null),
   parseWarnings: z.array(z.string().max(300)).max(20).default([]),
-  activityMentions: z.array(ActivityMentionSchema).max(30).default([]),
   question: z.string().max(500).nullable().optional(),
   resolutionEvidence: ResolutionEvidenceSchema.array().optional(),
   worldOptions: WorldOptionsSchema.optional(),
 });
-export const ConfirmedPlanItemSchema = ParsedPlanItemSchema.omit({ source: true });
-export const ConfirmedPlanItemWithPlaceSchema = ConfirmedPlanItemSchema.extend({
-  placeId: z.string().min(1).optional(),
-  // Optional for compatibility with drafts created before duration provenance
-  // was carried through the confirmation flow.
-  durationSource: z.enum(["user", "suggested", "unknown"]).optional(),
-});
 export const ConfirmedDraftSchema = z.object({
   rawText: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
   intent: UnifiedIntentSchema,
-  existingPlans: z.array(ConfirmedPlanItemWithPlaceSchema).max(30),
-  activityFacts: z.array(ActivityFactSchema).max(30).default([]),
+  activityFacts: z.array(ActivityFactSchema).max(30),
   removedOriginalIds: z.array(z.string().min(1)).max(30).default([]),
-  activityMentions: z.array(ActivityMentionSchema).max(30).default([]),
   disruptions: z.array(ParsedDisruptionSchema).max(10),
   constraints: z.array(ParsedConstraintSchema).max(30),
   context: ParsedContextSchema,
@@ -450,16 +434,13 @@ export type AgentContext = {
   trip: Trip;
   state: TripState;
   stateSources: StateSources;
-  existingItinerary: ItineraryEvent[];
-  lockedEvents: ItineraryEvent[];
-  remainingEvents: ItineraryEvent[];
-  unscheduledOriginals?: ActivityFact[];
-  originalActivityIds?: string[];
+  activityFacts: ActivityFact[];
+  remainingActivityFacts: ActivityFact[];
+  protectedActivityFacts: ActivityFact[];
   disruption: ReplanningRequest;
   places: Place[];
   travelMinutes: Record<string, number>;
   impactAnalysis?: ImpactAnalysis;
-  unresolvedMentions?: ParsedUserInput["activityMentions"];
   removedLockedIds?: string[];
 };
 export type Violation = {
@@ -544,16 +525,13 @@ export const AgentResultSchema: z.ZodType<AgentResult, z.ZodTypeDef, unknown> = 
     trip: TripSchema,
     state: TripStateSchema,
     stateSources: StateSourcesSchema,
-    existingItinerary: z.array(EventSchema),
-    lockedEvents: z.array(EventSchema),
-    remainingEvents: z.array(EventSchema),
-    unscheduledOriginals: z.array(ActivityFactSchema).optional(),
-    originalActivityIds: z.array(z.string()).optional(),
+    activityFacts: z.array(ActivityFactSchema),
+    remainingActivityFacts: z.array(ActivityFactSchema),
+    protectedActivityFacts: z.array(ActivityFactSchema),
     disruption: ReplanningRequestSchema,
     places: z.array(PlaceSchema),
     travelMinutes: z.record(z.number()),
     impactAnalysis: ImpactAnalysisSchema.optional(),
-    unresolvedMentions: z.array(ActivityMentionSchema).optional(),
   }),
   decisionTrace: DecisionTraceSchema.default({
     inputFacts: [],
@@ -590,10 +568,15 @@ export const ConditionalAdviceSchema = z.object({
   suggestions: z.array(z.string().min(1)).min(1).max(30),
   warning: z.string().min(1),
 });
-export const ItineraryDraftItemSchema = ParsedPlanItemSchema.extend({
+export const ActivityFactDraftSchema = ActivityFactSchema.innerType().extend({
   name: z.string().max(160),
-  startTime: TimeSchema.or(z.literal("")),
-  location: z.string().max(160),
+}).superRefine((fact, context) => {
+  if (fact.commitment === "flexible" && fact.protectionPolicy) {
+    context.addIssue({ code: "custom", path: ["protectionPolicy"], message: "弹性安排不能携带保护策略。" });
+  }
+  if (fact.commitment !== "flexible" && !fact.protectionPolicy) {
+    context.addIssue({ code: "custom", path: ["protectionPolicy"], message: "固定或可能固定的安排必须携带保护策略。" });
+  }
 });
 export const ItineraryDraftSchema = z.object({
   baseRevision: z.number().int().min(0),
@@ -606,11 +589,11 @@ export const ItineraryDraftSchema = z.object({
   currentTimeSource: FactSourceSchema,
   currentLocationSource: FactSourceSchema,
   rawInput: z.string().max(MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE),
-  items: z.array(ItineraryDraftItemSchema).max(30),
+  activityFacts: z.array(ActivityFactDraftSchema).max(30),
   updatedAt: z.string().datetime(),
 });
 export const RealSessionSchema = z.object({
-  schemaVersion: z.literal(3),
+  schemaVersion: z.literal(4),
   experienceMode: z.literal("real"),
   flowStage: FlowStageSchema,
   snapshot: SnapshotSchema.extend({ mode: z.literal("user") }),
@@ -628,6 +611,7 @@ export type PendingPlan = z.infer<typeof PendingPlanSchema>;
 export type ConditionalAdvice = z.infer<typeof ConditionalAdviceSchema>;
 export type ResolutionState = z.infer<typeof ResolutionStateSchema>;
 export type ItineraryDraft = z.infer<typeof ItineraryDraftSchema>;
+export type ActivityFactDraft = z.infer<typeof ActivityFactDraftSchema>;
 export type RealSession = z.infer<typeof RealSessionSchema>;
 export * from "./failures";
 export * from "./protocol";

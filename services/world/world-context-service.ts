@@ -21,13 +21,13 @@ async function mapConcurrent<T,R>(items:T[],limit:number,worker:(item:T)=>Promis
 export function validateRealInput(raw: unknown) {
   const input = ReplanInputSchema.parse(raw);
   if (input.snapshot.mode!=="user" || input.mode==="demo") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
-  if (!input.confirmation || !(input.snapshot.itinerary.some(e=>e.status!=="completed") || input.request.unscheduledOriginals?.length)) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "CONFIRMED_ITINERARY_REQUIRED" });
+  if (!input.confirmation || !input.request.activityFacts.some(fact=>fact.progress!=="completed")) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "CONFIRMED_ITINERARY_REQUIRED" });
   const state=input.request.currentState, sources=input.request.stateSources ?? input.snapshot.stateSources;
   if (Object.values(sources).includes("demo")) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DEMO_STATE_REJECTED" });
   if (state.currentDate!==input.snapshot.state.currentDate || state.currentDate<input.snapshot.trip.startDate || state.currentDate>input.snapshot.trip.endDate) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "TRIP_DATE_MISMATCH" });
   if (sources.currentTime==="unset") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "CURRENT_TIME_REQUIRED" });
   if (!input.request.freeText.trim() && input.request.reason!=="optimize") throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DISRUPTION_REQUIRED" });
-  if (new Set(input.snapshot.itinerary.map(e=>e.id)).size!==input.snapshot.itinerary.length) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DUPLICATE_ACTIVITY_ID" });
+  if (new Set(input.request.activityFacts.map(fact=>fact.id)).size!==input.request.activityFacts.length) throw new ServiceFailure("INVALID_REQUEST", "GROUNDING", { retryable: false, detail: "DUPLICATE_ACTIVITY_ID" });
   return input;
 }
 
@@ -47,9 +47,9 @@ export class WorldContextService {
     const userModes=allowedModes(request.freeText,options?.travelMode,undefined,[]);
     const modes=userModes.filter(m=>!options?.allowedTravelModes||options.allowedTravelModes.includes(m));
     const missing=(kind:"user"|"world",field:string,message:string)=>result.missingWorldFacts.push({kind,field,message});
-    const events=snapshot.itinerary.filter(e=>e.status!=="completed");
-    const unscheduled=request.unscheduledOriginals??[];
-    const worldItems=[...events.map(event=>({placeId:event.placeId,location:event.location,name:event.name})),...unscheduled.map(fact=>({placeId:`custom-${fact.id}`,location:fact.placeQuery??"",name:fact.name}))];
+    const activities=request.activityFacts.filter(fact=>fact.progress!=="completed");
+    const unscheduled=activities.filter(fact=>fact.startTime===null);
+    const worldItems=activities.map(fact=>({placeId:fact.placeId,location:fact.placeQuery??"",name:fact.name}));
     const preResolved=new Map<string,WorldPoi>();
     const cityAnchors=[...new Map(worldItems.map(event=>{
       const inferred=locationQuery(event.location.trim()||event.name,request.freeText,snapshot);
@@ -194,7 +194,7 @@ export class WorldContextService {
       const originals=worldItems.map(e=>endpoints.find(p=>p.id===e.placeId)).filter((p):p is RouteEndpoint=>Boolean(p));
       const required=originals.map((destination,i)=>({origin:i?originals[i-1]:result.currentLocation!,destination})).filter(p=>p.origin.id!==p.destination.id);
       const flexiblePairs=unscheduled.flatMap(fact=>{
-        const destination=originals.find(point=>point.id===`custom-${fact.id}`);
+        const destination=originals.find(point=>point.id===fact.placeId);
         if(!destination)return [];
         return [{origin:result.currentLocation!,destination},...originals.filter(point=>point.id!==destination.id).flatMap(point=>[{origin:point,destination},{origin:destination,destination:point}])];
       });

@@ -5,6 +5,7 @@ import {
   type RealSession,
 } from "../types";
 import type { SessionStore } from "./session-store";
+import { snapshotActivityFacts } from "./activity-facts";
 
 export function createItineraryDraft(session: RealSession): ItineraryDraft {
   return ItineraryDraftSchema.parse({
@@ -18,7 +19,7 @@ export function createItineraryDraft(session: RealSession): ItineraryDraft {
     currentTimeSource: session.snapshot.stateSources.currentTime,
     currentLocationSource: session.snapshot.stateSources.currentLocation,
     rawInput: session.rawInput,
-    items: session.parsedInput?.existingPlans ?? [],
+    activityFacts: session.parsedInput?.activityFacts ?? snapshotActivityFacts(session.snapshot),
     updatedAt: new Date().toISOString(),
   });
 }

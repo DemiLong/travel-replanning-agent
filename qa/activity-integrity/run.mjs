@@ -4,12 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActivityFactSchema, ConfirmedDraftSchema, RealSessionSchema, SemanticExtractionSchema, SnapshotSchema } from "../../types/index.ts";
 import { ActivityCoverageError, DeepSeekSemanticParser, normalizeSemanticExtraction, uncoveredActivities } from "../../services/semantic-parser.ts";
-import { confirmedDraftFromParsed } from "../../services/itinerary-domain.ts";
-import { mergeConfirmedDraft, runAgentAssist } from "../../agents/agent-orchestrator.ts";
+import { confirmedDraftFromParsed, retainedFactsFromDraft } from "../../services/itinerary-domain.ts";
+import { runAgentAssist } from "../../agents/agent-orchestrator.ts";
 import { validatePlan } from "../../validators/index.ts";
 import { loadSession, realSessionKey } from "../../services/trip-service.ts";
 import { amapGet, WorldServiceError } from "../../services/world/amap-client.ts";
 import { cityCompatible, uniquePlace } from "../../services/world/context-resolution.ts";
+import { ServiceFailure } from "../../services/failures.ts";
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const runMode = process.argv.includes("--live") ? "受控测试＋真实模型／高德测试" : "受控测试";
@@ -41,8 +42,8 @@ const extraction = activities => SemanticExtractionSchema.parse({ intent: "rescu
 const activity = (name, sourceText, extra = {}) => ({ role: "existing_plan", name, startTime: null, endTime: null,
   durationMinutes: null, location: name, locked: "no", progress: "not_started", sourceText, ...extra });
 const fact = (id, name, extra = {}) => ActivityFactSchema.parse({ id, origin: "message", snapshotEventId: null, role: "existing_plan",
-  progress: "not_started", name, placeQuery: name, startTime: null, startTimeSource: "not_provided",
-  durationMinutes: null, commitment: "flexible", sourceText: name, ...extra });
+  placeId:`custom-${id}`,progress: "not_started", name, placeQuery: name, startTime: null, endTime:null,startTimeSource: "not_provided",
+  durationMinutes: null,durationSource:"unknown", commitment: "flexible", sourceText: name, ...extra });
 
 await check("新增 A. 中文时间原文证据支持 18 点转 18:00，且不借用当前时间（受控）", async () => {
   const raw = "现在 16:00，我刚到静安寺地铁站，18 点必须到上海展览中心集合";
@@ -108,11 +109,11 @@ await check("1. 多个无时间弹性原安排首次提交直达地点查询且�
       startTimeSource: "suggested", durationSource: "suggested" })), movedEvents: [], removedEvents: [] } }),
   });
   assert.equal(direct.status, "READY");
-  assert.deepEqual(groundedRequest.originalActivityIds, draft.activityFacts.map(x => x.id));
-  assert.ok(groundedRequest.unscheduledOriginals.every(x => x.startTime === null));
-  assert.deepEqual(direct.result.plan.events.map(x => x.id), groundedRequest.originalActivityIds);
+  assert.deepEqual(groundedRequest.activityFacts.map(x=>x.id), draft.activityFacts.map(x => x.id));
+  assert.ok(groundedRequest.activityFacts.every(x => x.startTime === null));
+  assert.deepEqual(direct.result.plan.events.map(x => x.id), groundedRequest.activityFacts.map(x=>x.id));
   return { ids: draft.activityFacts.map(x => x.id), startTimes: draft.activityFacts.map(x => x.startTime),
-    groundedOriginalIds: groundedRequest.originalActivityIds, status: direct.status };
+    groundedOriginalIds: groundedRequest.activityFacts.map(x=>x.id), status: direct.status };
 });
 
 await check("2. 没完成的原计划与已完成活动保持不同进度", () => {
@@ -133,7 +134,7 @@ await check("3. 首次提交直达规划，已识别误分类纠正且已保存�
   const parsed = normalizeSemanticExtraction(base, raw, extraction([activity("上海静安寺", "原计划去上海静安寺", { role: "reference" })]), "qa");
   let groundedIds = [];
   const direct = await runAgentAssist({ snapshot: base, rawText: raw }, undefined, {
-    parse: async () => parsed, ground: async input => { groundedIds = input.request.originalActivityIds; throw Error("受控地点服务停止"); },
+    parse: async () => parsed, ground: async input => { groundedIds = input.request.activityFacts.map(fact=>fact.id); throw new ServiceFailure("MAP_PROVIDER_ERROR","GROUNDING",{retryable:true}); },
   });
   assert.equal(direct.status, "UPSTREAM_UNAVAILABLE");
   assert.equal(direct.parsedInput.activityFacts[0].role, "existing_plan");
@@ -145,7 +146,7 @@ await check("3. 首次提交直达规划，已识别误分类纠正且已保存�
   const savedOmission = normalizeSemanticExtraction(savedBase, raw, extraction([]), "qa");
   let savedIds = [];
   const savedResult = await runAgentAssist({ snapshot: savedBase, rawText: raw }, undefined, {
-    parse: async () => savedOmission, ground: async input => { savedIds = input.request.originalActivityIds; throw Error("受控地点服务停止"); },
+    parse: async () => savedOmission, ground: async input => { savedIds = input.request.activityFacts.map(fact=>fact.id); throw new ServiceFailure("MAP_PROVIDER_ERROR","GROUNDING",{retryable:true}); },
   });
   assert.equal(savedResult.status, "UPSTREAM_UNAVAILABLE");
   assert.deepEqual(savedIds, ["saved-omitted"]);
@@ -206,20 +207,21 @@ await check("3c. 高德错误按安全类别与代码记录，不泄露密钥（
 
 await check("4. 已保存弹性活动从草稿消失且无删除记录时合并拒绝", () => {
   const base = snapshot([event("saved", "上海静安寺")]);
-  const draft = ConfirmedDraftSchema.parse({ rawText: "晚点了", intent: "rescue", existingPlans: [], activityMentions: [],
+  const draft = ConfirmedDraftSchema.parse({ rawText: "晚点了", intent: "rescue", activityFacts: [],
     disruptions: [{ kind: "late", label: "延误", source: "user" }], constraints: [], context: base.state,
     contextSources: sources, closedPlaceIds: [], baseRevision: base.revision });
-  assert.throws(() => mergeConfirmedDraft(base, draft), /不能被静默删除/);
+  assert.throws(() => retainedFactsFromDraft(base, draft), /不能被静默删除/);
   const explicit = ConfirmedDraftSchema.parse({ ...draft, removedOriginalIds: ["saved"] });
-  assert.equal(mergeConfirmedDraft(base, explicit).itinerary.length, 0);
+  assert.equal(retainedFactsFromDraft(base, explicit).length, 0);
   return { savedId: "saved", silentDeletionRejected: true, explicitDeletionAccepted: true };
 });
 
 await check("5. 候选漏掉已确认原安排 ID 时校验拒绝", () => {
   const base = snapshot(); const ids = ["one", "two"];
-  const context = { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources, existingItinerary: [],
-    remainingEvents: [], unscheduledOriginals: [fact(ids[0], "上海静安寺"), fact(ids[1], "上海自然博物馆")], originalActivityIds: ids,
-    lockedEvents: [], disruption: { reason: "late", freeText: "晚点了", currentState: base.state, closedPlaceIds: [], variation: 0 },
+  const activityFacts=[fact(ids[0], "上海静安寺"), fact(ids[1], "上海自然博物馆")];
+  const context = { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources, activityFacts,
+    remainingActivityFacts:activityFacts,protectedActivityFacts:[],
+    disruption: { reason: "late", freeText: "晚点了", currentState: base.state, closedPlaceIds: [], variation: 0,activityFacts },
     places: [], travelMinutes: {} };
   const errors = validatePlan(context, { summary: "候选", explanation: "待核对", events: [], movedEvents: [], removedEvents: [] });
   assert.deepEqual(errors.filter(x => x.code === "change_accounting").map(x => x.eventId), ids);
@@ -241,7 +243,7 @@ await check("6. 新提交请求排除旧草稿和答案，计数归零且 revisi
   const raw = "晚点了，原计划去上海静安寺，请重新安排";
   const parsed = normalizeSemanticExtraction(base, raw, extraction([activity("上海静安寺", "原计划去上海静安寺")]), "qa");
   const draft = confirmedDraftFromParsed(base, parsed);
-  const saved = RealSessionSchema.parse({ schemaVersion: 3, experienceMode: "real", flowStage: "NEEDS_INPUT",
+  const saved = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "NEEDS_INPUT",
     snapshot: { ...base, revision: 5 }, rawInput: raw, parsedInput: parsed, lastDisruption: null, pendingPlan: null,
     pendingInput: { stage: "review", parsedInput: parsed, confirmedDraft: draft, missingFact: null,
       questionRawText: raw, baseRevision: 4 },
@@ -300,28 +302,27 @@ await check("8a. 仅对分类不确定的活动单项补问，回答后继续规
   const parsed = normalizeSemanticExtraction(base, raw, extraction([
     activity("上海自然博物馆", "去上海自然博物馆", { role: "uncertain", locked: "uncertain" }),
   ]), "qa");
-  assert.equal(parsed.activityFacts[0].commitment, "flexible");
+  assert.equal(parsed.activityFacts[0].commitment, "uncertain");
   const asked = await runAgentAssist({ snapshot: base, rawText: raw }, undefined, { parse: async () => parsed });
   assert.equal(asked.status, "NEEDS_INPUT");
   assert.match(asked.missingFact.key, /:role$/);
   assert.equal(asked.confirmedDraft.activityFacts.length, 1);
-  let groundedIds = [];
   const answered = await runAgentAssist({ snapshot: base, confirmedDraft: asked.confirmedDraft,
     answer: { kind: "text", field: asked.missingFact.key, value: "existing_plan" }, resolutionState: asked.resolutionState },
-  undefined, { ground: async input => { groundedIds = input.request.originalActivityIds; throw Error("受控地点服务停止"); } });
-  assert.equal(answered.status, "UPSTREAM_UNAVAILABLE");
-  assert.deepEqual(groundedIds, [parsed.activityFacts[0].id]);
-  return { blocker: asked.missingFact.key, candidates: asked.missingFact.candidates.map(x => x.value), groundedIds };
+  undefined, { ground: async () => { throw Error("固定时间未知时不应进入地图查询"); } });
+  assert.equal(answered.status, "CONDITIONAL");
+  return { blocker: asked.missingFact.key, candidates: asked.missingFact.candidates.map(x => x.value), resultStatus:answered.status };
 });
 
 await check("9. 页面改写原文后重提，不带旧答案且刷新不恢复旧补问（受控）", async () => {
   const browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+  await context.addInitScript(() => { globalThis.__COVEREDYOU_DISABLE_AUTH_FOR_TESTS__ = true; });
   await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   try {
     const base = snapshot([event("saved-ui", "上海静安寺")]);
-    const session = RealSessionSchema.parse({ schemaVersion: 3, experienceMode: "real", flowStage: "HAS_ITINERARY", snapshot: base,
+    const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "HAS_ITINERARY", snapshot: base,
       rawInput: "", parsedInput: null, lastDisruption: null, pendingPlan: null,
       resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
       updatedAt: new Date().toISOString() });
@@ -345,7 +346,7 @@ await check("9. 页面改写原文后重提，不带旧答案且刷新不恢复�
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     });
     await page.goto("http://127.0.0.1:3000/");
-    await page.evaluate(value => localStorage.setItem("travel-session-real-v3", JSON.stringify(value)), session);
+    await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
     await page.reload();
     await page.getByLabel("描述今天的安排和变化").fill(rawOld);
     await page.getByRole("button", { name: "帮我重新安排今天" }).click();
@@ -374,19 +375,21 @@ if (results.at(-1)?.passed) results.at(-1).screenshot = "ui-reanalysis.png";
 await check("10. 返回编辑时保留旧方案，提交新描述才使其失效（受控）", async () => {
   const browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+  await context.addInitScript(() => { globalThis.__COVEREDYOU_DISABLE_AUTH_FOR_TESTS__ = true; });
   const page = await context.newPage();
   try {
     const base = snapshot([event("saved-result", "上海自然博物馆")]);
     const raw = "晚点了，原计划去上海自然博物馆，请重新安排";
     const parsed = normalizeSemanticExtraction(base, raw, extraction([activity("上海自然博物馆", "原计划去上海自然博物馆")]), "qa");
+    const activityFacts=parsed.activityFacts;
     const request = { reason: "late", freeText: raw, currentState: base.state, closedPlaceIds: [], variation: 0,
-      stateSources: sources, originalActivityIds: ["saved-result"] };
+      stateSources: sources, activityFacts };
     const plan = { summary: "调整后的行程", explanation: "受控方案", events: [event("saved-result", "上海自然博物馆")], movedEvents: [], removedEvents: [] };
     const result = { id: "controlled-result", ok: true, plan, attempts: [], mode: "live", model: "controlled", message: "可执行",
       context: { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources,
-        existingItinerary: base.itinerary, lockedEvents: [], remainingEvents: base.itinerary,
+        activityFacts,protectedActivityFacts:[],remainingActivityFacts:activityFacts,
         disruption: request, places: [], travelMinutes: {} } };
-    const session = RealSessionSchema.parse({ schemaVersion: 3, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
+    const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
       rawInput: "", parsedInput: parsed, lastDisruption: request,
       pendingPlan: { result, base, request, accepted: false, parsedInput: parsed },
       resolutionState: { currentBlockerKey: "currentLocation", sameBlockerCount: 1, roundCount: 1, answeredFields: [], questionHistory: ["currentLocation"] },
@@ -394,7 +397,7 @@ await check("10. 返回编辑时保留旧方案，提交新描述才使其失效
     let assistCalls = 0;
     await page.route("**/api/assist", async route => { assistCalls++; await route.abort(); });
     await page.goto("http://127.0.0.1:3000/");
-    await page.evaluate(value => localStorage.setItem("travel-session-real-v3", JSON.stringify(value)), session);
+    await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
     await page.goto("http://127.0.0.1:3000/result");
     await page.getByRole("button", { name: "结果有误？点击重新规划" }).waitFor();
     await page.screenshot({ path: path.join(runDir, "ui-result-before.png"), fullPage: true });
@@ -402,7 +405,7 @@ await check("10. 返回编辑时保留旧方案，提交新描述才使其失效
     await page.getByLabel("描述今天的安排和变化").waitFor();
     assert.equal(await page.getByLabel("描述今天的安排和变化").inputValue(), raw);
     assert.equal(assistCalls, 0);
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v3")));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v4")));
     assert.equal(stored.pendingPlan?.result.id, "controlled-result");
     assert.equal(stored.pendingInput, null);
     assert.equal(stored.resolutionState.roundCount, 0);
