@@ -205,12 +205,20 @@ test("两个标签页基于同一 revision 保存时后提交者冲突", async (
   expect(stored.snapshot.revision).toBe(2);
 });
 
-test("coveredYou 品牌页面与既有会话键保持兼容", async ({ page }) => {
+test("六个页面路由与既有会话键保持兼容", async ({ page }) => {
   await seed(page);
-  for (const path of ["/", "/onboarding", "/trip", "/rescue", "/result"]) {
+  for (const [path, heading] of [
+    ["/", "发生了森么？"],
+    ["/onboarding", "把今天的安排放进来。"],
+    ["/trip", "今天，慢慢走"],
+    ["/rescue", "我理解的是"],
+    ["/result", "还没有待确认的方案。"],
+    ["/me", "我的"],
+  ] as const) {
     await page.goto(path);
     await expect(page).toHaveTitle(/coveredYou/);
     await expect(page.locator("header .brand")).toContainText("coveredYou");
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   expect(stored.snapshot.revision).toBe(1);
