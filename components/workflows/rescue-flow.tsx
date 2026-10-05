@@ -330,7 +330,7 @@ export function RescueFlow() {
       if (body.status !== "READY") throw new Error(body.message ?? "真实信息暂时不可用，请稍后重试。");
       const result = AgentResultSchema.parse(body.result);
       const request = ReplanningRequestSchema.parse(body.request);
-      savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
+      savePendingPlan({ result, base: SnapshotSchema.parse(body.base), request, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
       if (body.resolutionState) updateSession({ resolutionState: body.resolutionState });
       window.location.assign("/result");
     } catch (cause) {

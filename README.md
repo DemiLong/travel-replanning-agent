@@ -27,7 +27,7 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=你的Supabase匿名公钥
 
 模型名是项目当前的默认配置，可换成账号实际可用的兼容模型。密钥只供服务端使用，不要加 `NEXT_PUBLIC_` 前缀，也不要提交到仓库。
 
-生产环境使用 Supabase 匿名身份和数据库计数保护 `/api/parse`、`/api/assist`、`/api/validate`。部署前需要在 Supabase 开启 Anonymous Sign-Ins，并依次应用 `supabase/migrations`。行程内容不会因此上传到 Supabase。
+生产环境使用 Supabase 匿名身份和数据库计数保护 `/api/parse`、`/api/assist`、`/api/validate`。部署前需要在 Supabase 开启 Anonymous Sign-Ins，并只应用 `supabase/migrations/002_api_auth_rate_limits.sql`。行程内容不会因此上传到 Supabase。旧的行程云存储实验 SQL 已移入 `supabase/legacy/`，不要应用到当前项目。
 
 只在本机开发时，可以设置 `ALLOW_LOCAL_LIVE=true` 跳过身份和限流；该开关仅对开发模式和回环地址生效，生产环境会忽略它。
 
@@ -73,6 +73,7 @@ npm start
 | `/trip` | 查看已保存的今日行程 |
 | `/rescue` | 编辑复杂活动信息，或重新理解原文 |
 | `/result` | 查看推荐与可能的备选方案，确认接受 |
+| `/me` | 查看本地使用记录与最近一次接受方案 |
 
 旧的 `/replan` 兼容入口已经移除，请使用 `/rescue`。
 
@@ -89,11 +90,12 @@ npm start
 
 最新地点补问修补已通过本地受控回归。此前也留有真实模型分类和空行程生成、接受、保存后刷新的测试记录；这些证据只覆盖各自的案例，不能代表所有输入或整个 P0 已验收。
 
-修补记录见 [三个代码缺陷修补记录](docs/coveredYou-三个代码缺陷修补记录-2026-09-23.md)。其中“10/10”包含 8 条仅验证语义分类的测试，不是 10 条完整用户流程；固定预约案例最终为 `NO_SAFE_PLAN`，证明范围是预约信息保留，不能算生成新方案成功。
+带日期的修补和诊断记录只反映对应历史版本，集中保存在 `qa/activity-integrity/` 与 `docs/archive/`。其中的通过数量必须结合测试范围理解，不能把语义分类或 `NO_SAFE_PLAN` 记成完整流程成功。
 
 ## 数据与使用限制
 
 - 行程、草稿和待接受方案存放在当前浏览器的本地存储中。没有云端备份，清除浏览器数据或换设备后不能自动恢复。
+- 当前会话为 v5。v4、v3、v2 和更早的 snapshot 不再迁移；升级后从新会话开始，旧浏览器键不会被主动删除。这个兼容取舍基于产品尚未上线、没有需要保留的用户数据。
 - `localhost` 与 `127.0.0.1` 属于不同站点，浏览器里的行程不共享。开发时尽量固定使用一个地址。
 - 本地保存不等于全程离线：语义解析和规划会把相关输入与行程上下文发送到模型服务，地点与路线查询使用高德。
 - 固定预约和已完成活动有校验保护；保存时也会检查行程版本，避免直接覆盖另一标签页的修改。
@@ -112,6 +114,8 @@ npm run test:e2e
 ```
 
 `test:e2e` 会先构建，再启动测试服务。执行前请释放 **3000 端口**。首次缺少 Chromium 时，可以执行 `npx playwright install chromium` 安装浏览器。
+
+2026-10-05 第六步验收：typecheck、lint、完整单测、35/35 浏览器回归、17/17 活动完整性 QA 与普通生产 build 均通过。目前没有需要豁免的 `SYSTEM_ERROR` / `NEEDS_INPUT` 单测基线失败。完整记录见 [第六步验收记录](docs/stage6-verification-2026-10-05.md)。
 
 | 测试 | 主要用途 | 不能据此得出的结论 |
 | --- | --- | --- |
@@ -151,6 +155,10 @@ scripts/      构建辅助、测试和联调入口
 docs/         修补与验证记录
 ```
 
+当前正式会话使用 schema v5，并保存在浏览器的 `travel-session-real-v5`。解析、草稿、补问、grounding、planner 与 validators 统一以 `ActivityFact` 表示活动；`ItineraryEvent` 只用于正式 snapshot 和候选方案边界。正式 snapshot 只能通过带 revision 校验的 `commitSnapshot()` 写入，普通 Session 更新不能覆盖它。
+
+`types/index.ts` 保留统一导出入口，定义分别位于 `travel.ts`、`activity.ts`、`workflow.ts`、`agent.ts` 和 `session.ts`。当前 Session 的默认值与过期状态修复位于 `services/session-state.ts`，存储操作仍通过 `services/trip-service.ts` 门面调用。
+
 当前主要 API：
 
 | 接口 | 用途 |
@@ -162,10 +170,9 @@ docs/         修补与验证记录
 
 前三个 POST 接口要求静默匿名会话，并分别执行用户级和项目级一分钟限流；`GET /api/config` 保持公开。一次 `/api/assist` 只申领一次 assist 额度，其内部解析、地图查询、规划和校验不会重复扣取其他接口额度。
 
-`/api/assist` 的业务状态为：
- 	`READY`、`NEEDS_INPUT`、`OUT_OF_SCOPE`、`UPSTREAM_UNAVAILABLE` 和 `NO_SAFE_PLAN`。
-	补问续接携带草稿、答案和问题状态；
-	业务判断应检查返回结构与状态，不能只看 HTTP 200。
+`/api/assist` 的业务状态为 `READY`、`NEEDS_INPUT`、`CONDITIONAL`、`OUT_OF_SCOPE` 和 `NO_SAFE_PLAN`。补问续接携带草稿、答案和问题状态；业务判断应检查返回结构与状态，不能只看 HTTP 200。
+
+接口失败使用独立的失败状态：`AUTH_REQUIRED`、`RATE_LIMITED`、`INVALID_REQUEST`、`UPSTREAM_UNAVAILABLE`、`REQUEST_TIMEOUT` 和 `SYSTEM_ERROR`，并携带结构化 failure 信息。不要把失败状态与正常业务终态混为一类。
 
 ## 常见排查
 
@@ -183,4 +190,4 @@ docs/         修补与验证记录
 
 ---
 
-此前的 README 原文保存在 [readme-old.md](readme-old.md)，供查阅历史说明。
+早期说明和一次性任务书保存在 `docs/archive/`，仅用于追溯历史版本，不能作为当前实现或部署依据。

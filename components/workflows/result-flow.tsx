@@ -110,7 +110,7 @@ export function ResultFlow() {
     if (body.status !== "READY" || !body.result || !body.base || !body.request || !body.parsedInput) throw new Error(body.missingFact?.question ?? body.message ?? "请先补充这次调整需要的信息。");
     const nextResult = AgentResultSchema.parse(body.result);
     const nextRequest = ReplanningRequestSchema.parse(body.request);
-    savePendingPlan({ result: nextResult, base: SnapshotSchema.parse(body.base), request: nextRequest, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, nextRequest);
+    savePendingPlan({ result: nextResult, base: SnapshotSchema.parse(body.base), request: nextRequest, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, nextRequest);
     window.location.assign("/result");
   }
 
@@ -134,7 +134,7 @@ export function ResultFlow() {
     if (!candidate.plan || !candidate.feasible || validatePlanExplanation(result.context, candidate.plan).length) return;
     const verifiedPlan = { ...candidate.plan, summary: summarizeVerifiedPlan(result.context, candidate.plan) };
     const nextResult = AgentResultSchema.parse({ ...result, id: result.id, ok: true, plan: verifiedPlan, message: candidate.tradeOff });
-    const updated = updateSession({ pendingPlan: { base: activePending.base, request: activePending.request, accepted: false, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
+    const updated = updateSession({ pendingPlan: { base: activePending.base, request: activePending.request, parsedInput: activePending.parsedInput, impactAnalysis: activePending.impactAnalysis, result: nextResult } });
     setSession(updated);
   }
 

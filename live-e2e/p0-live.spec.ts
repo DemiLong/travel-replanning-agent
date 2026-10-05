@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const sessionKey = "travel-session-real-v4";
+const sessionKey = "travel-session-real-v5";
 const evidenceDirectory = path.resolve("work", "p0-live-evidence");
 const defectEvidenceDirectory = path.resolve("work", "three-defect-live-evidence");
 

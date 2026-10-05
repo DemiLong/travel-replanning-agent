@@ -243,9 +243,9 @@ await check("6. 新提交请求排除旧草稿和答案，计数归零且 revisi
   const raw = "晚点了，原计划去上海静安寺，请重新安排";
   const parsed = normalizeSemanticExtraction(base, raw, extraction([activity("上海静安寺", "原计划去上海静安寺")]), "qa");
   const draft = confirmedDraftFromParsed(base, parsed);
-  const saved = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "NEEDS_INPUT",
+  const saved = RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "NEEDS_INPUT",
     snapshot: { ...base, revision: 5 }, rawInput: raw, parsedInput: parsed, lastDisruption: null, pendingPlan: null,
-    pendingInput: { stage: "review", parsedInput: parsed, confirmedDraft: draft, missingFact: null,
+    pendingInput: { parsedInput: parsed, confirmedDraft: draft, missingFact: null,
       questionRawText: raw, baseRevision: 4 },
     resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 1, answeredFields: [], questionHistory: [] },
     updatedAt: new Date().toISOString() });
@@ -255,13 +255,12 @@ await check("6. 新提交请求排除旧草稿和答案，计数归零且 revisi
   assert.equal(restored.pendingInput, null);
   assert.equal(restored.snapshot.revision, 5);
   storage.set(realSessionKey, JSON.stringify({ ...saved, snapshot: base, pendingInput: { ...saved.pendingInput, baseRevision: base.revision } }));
-  const legacyReview = loadSession();
-  assert.equal(legacyReview.pendingInput, null);
-  assert.equal(legacyReview.snapshot.revision, base.revision);
-  assert.equal(legacyReview.rawInput, raw);
-  assert.equal(JSON.parse(storage.get(realSessionKey)).pendingInput, null);
+  const currentFollowUp = loadSession();
+  assert(currentFollowUp.pendingInput);
+  assert.equal(currentFollowUp.snapshot.revision, base.revision);
+  assert.equal(currentFollowUp.rawInput, raw);
   return { requestKeys: Object.keys(freshRequest), roundCount: 0, revision: base.revision,
-    stalePendingInputDiscarded: true, legacyReviewExited: true, limitation: "页面请求和刷新另由浏览器场景验证。" };
+    stalePendingInputDiscarded: true, currentFollowUpPreserved: true, limitation: "页面请求和刷新另由浏览器场景验证。" };
 });
 
 await check("7. 受控双 POI 补问选择首项后继续到最终状态", async () => {
@@ -322,7 +321,7 @@ await check("9. 页面改写原文后重提，不带旧答案且刷新不恢复�
   const page = await context.newPage();
   try {
     const base = snapshot([event("saved-ui", "上海静安寺")]);
-    const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "HAS_ITINERARY", snapshot: base,
+    const session = RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "HAS_ITINERARY", snapshot: base,
       rawInput: "", parsedInput: null, lastDisruption: null, pendingPlan: null,
       resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
       updatedAt: new Date().toISOString() });
@@ -346,7 +345,7 @@ await check("9. 页面改写原文后重提，不带旧答案且刷新不恢复�
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     });
     await page.goto("http://127.0.0.1:3000/");
-    await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
+    await page.evaluate(value => localStorage.setItem("travel-session-real-v5", JSON.stringify(value)), session);
     await page.reload();
     await page.getByLabel("描述今天的安排和变化").fill(rawOld);
     await page.getByRole("button", { name: "帮我重新安排今天" }).click();
@@ -389,15 +388,15 @@ await check("10. 返回编辑时保留旧方案，提交新描述才使其失效
       context: { profile: base.profile, trip: base.trip, state: base.state, stateSources: sources,
         activityFacts,protectedActivityFacts:[],remainingActivityFacts:activityFacts,
         disruption: request, places: [], travelMinutes: {} } };
-    const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
+    const session = RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
       rawInput: "", parsedInput: parsed, lastDisruption: request,
-      pendingPlan: { result, base, request, accepted: false, parsedInput: parsed },
+      pendingPlan: { result, base, request, parsedInput: parsed },
       resolutionState: { currentBlockerKey: "currentLocation", sameBlockerCount: 1, roundCount: 1, answeredFields: [], questionHistory: ["currentLocation"] },
       updatedAt: new Date().toISOString() });
     let assistCalls = 0;
     await page.route("**/api/assist", async route => { assistCalls++; await route.abort(); });
     await page.goto("http://127.0.0.1:3000/");
-    await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
+    await page.evaluate(value => localStorage.setItem("travel-session-real-v5", JSON.stringify(value)), session);
     await page.goto("http://127.0.0.1:3000/result");
     await page.getByRole("button", { name: "结果有误？点击重新规划" }).waitFor();
     await page.screenshot({ path: path.join(runDir, "ui-result-before.png"), fullPage: true });
@@ -405,7 +404,7 @@ await check("10. 返回编辑时保留旧方案，提交新描述才使其失效
     await page.getByLabel("描述今天的安排和变化").waitFor();
     assert.equal(await page.getByLabel("描述今天的安排和变化").inputValue(), raw);
     assert.equal(assistCalls, 0);
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v4")));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v5")));
     assert.equal(stored.pendingPlan?.result.id, "controlled-result");
     assert.equal(stored.pendingInput, null);
     assert.equal(stored.resolutionState.roundCount, 0);

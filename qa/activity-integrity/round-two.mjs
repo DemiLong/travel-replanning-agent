@@ -118,7 +118,7 @@ await check("交通停运不是地点关闭，停运方式不参加路线比较"
 const browser = await chromium.launch({ headless: true });
 const browserContext = await browser.newContext({ viewport: { width: 1100, height: 1300 } });
 await browserContext.tracing.start({ screenshots: true, snapshots: true });
-const session = (state, rawInput = "") => RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "NO_ITINERARY",
+const session = (state, rawInput = "") => RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "NO_ITINERARY",
   snapshot: state, rawInput, parsedInput: null, lastDisruption: null, pendingPlan: null,
   resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
   updatedAt: new Date().toISOString() });
@@ -134,16 +134,16 @@ async function showResult(page, state, request, plan, impact) {
       activityFacts, remainingActivityFacts:activityFacts.filter(fact=>fact.progress!=="completed"),protectedActivityFacts:activityFacts.filter(fact=>fact.commitment!=="flexible"),
       disruption: request, places: [], travelMinutes: {} } };
   const value = RealSessionSchema.parse({ ...session(state, request.freeText), flowStage: "PLAN_READY", lastDisruption: request,
-    pendingPlan: { result, base: state, request, accepted: false, impactAnalysis: impact } });
+    pendingPlan: { result, base: state, request, impactAnalysis: impact } });
   await page.goto(`${baseURL}/`);
-  await page.evaluate(data => localStorage.setItem("travel-session-real-v4", JSON.stringify(data)), value);
+  await page.evaluate(data => localStorage.setItem("travel-session-real-v5", JSON.stringify(data)), value);
   await page.goto(`${baseURL}/result`);
 }
 await check("条件性建议实际页面可见，不能接受方案；首页文本框无绿色焦点框", async () => {
   const page = await browserContext.newPage();
   try {
     await page.goto(`${baseURL}/`);
-    await page.evaluate(data => localStorage.setItem("travel-session-real-v4", JSON.stringify(data)), session(base));
+    await page.evaluate(data => localStorage.setItem("travel-session-real-v5", JSON.stringify(data)), session(base));
     await page.reload();
     await page.route("**/api/assist", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(conditional) }));
     const textarea = page.getByLabel("描述今天的安排和变化");
@@ -159,7 +159,7 @@ await check("条件性建议实际页面可见，不能接受方案；首页文�
     await page.screenshot({ path: path.join(runDir, "conditional-home.png"), fullPage: true });
     await textarea.fill(`${conditional.parsedInput.rawText} 预约时间是18:00。`);
     assert.equal(await page.getByText(conditional.advice.heading, { exact: true }).count(), 0);
-    const updated = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v4")));
+    const updated = await page.evaluate(() => JSON.parse(localStorage.getItem("travel-session-real-v5")));
     assert.equal(updated.resolutionState.roundCount, 0);
     return { status: "CONDITIONAL", acceptButtonCount: 0, textareaOutlineWidth: outline,
       oldAdviceAfterEdit: false, roundCountAfterEdit: updated.resolutionState.roundCount, screenshot: "conditional-home.png" };

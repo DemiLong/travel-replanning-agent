@@ -1,50 +1,56 @@
 import assert from "node:assert/strict";
-import { createAnalyticsService, type AnalyticsEvent } from "../services/analytics";
+
+import { createStarterSnapshot } from "../data/session-defaults";
+import {
+  createAnalyticsService,
+  type AnalyticsEvent,
+} from "../services/analytics";
 import {
   createBrowserSessionRepository,
-  legacyFallbackSnapshotKey,
-  legacyRealSessionBackupKey,
-  legacyRealSessionKey,
-  legacyRealSessionV3BackupKey,
-  legacyRealSessionV3Key,
-  legacySnapshotKey,
   realSessionKey,
 } from "../services/browser-session-repository";
 import { createItineraryDraft } from "../services/itinerary-draft-store";
 import { createPendingPlanStore } from "../services/pending-plan-store";
 import { createSessionStore } from "../services/session-store";
-import { createStarterSnapshot } from "../data/session-defaults";
 import {
   ConfirmedDraftSchema,
+  PendingPlanSchema,
   ParsedUserInputSchema,
   RealSessionSchema,
+  ReplanningRequestSchema,
   SnapshotSchema,
   type RealSession,
 } from "../types";
 
 function createStorage() {
   const values = new Map<string, string>();
+  const reads: string[] = [];
   return {
     values,
+    reads,
     storage: {
-      getItem: (key: string) => values.get(key) ?? null,
+      getItem: (key: string) => {
+        reads.push(key);
+        return values.get(key) ?? null;
+      },
       setItem: (key: string, value: string) => values.set(key, value),
     },
   };
 }
 
 function session(): RealSession {
+  const starter = createStarterSnapshot();
   const snapshot = SnapshotSchema.parse({
-    ...createStarterSnapshot(),
+    ...starter,
     state: {
-      ...createStarterSnapshot().state,
+      ...starter.state,
       currentTime: "08:30",
       stateCapturedAt: "2020-01-01T00:00:00.000Z",
     },
     revision: 0,
   });
   return RealSessionSchema.parse({
-    schemaVersion: 4,
+    schemaVersion: 5,
     experienceMode: "real",
     flowStage: "NO_ITINERARY",
     snapshot,
@@ -86,183 +92,62 @@ async function main() {
   repository.writeRaw("invalid", "{");
   assert.throws(() => repository.readJson("invalid"), SyntaxError);
 
-  const v2Storage = createStorage();
-  const v2Repository = createBrowserSessionRepository(v2Storage.storage);
   const original = session();
-  const v3Storage=createStorage();
-  const v3Repository=createBrowserSessionRepository(v3Storage.storage);
-  const v3Raw=`  ${JSON.stringify({...original,schemaVersion:3})}`;
-  v3Repository.writeRaw(legacyRealSessionV3Key,v3Raw);
-  const migratedV3=createSessionStore(v3Repository).loadPersisted();
-  assert.equal(v3Repository.readRaw(legacyRealSessionV3BackupKey),v3Raw);
-  assert.equal(migratedV3.schemaVersion,4);
+  repository.writeJson(realSessionKey, original);
+  assert.deepEqual(createSessionStore(repository).loadPersisted(), original);
 
-  const nestedV3Storage=createStorage();
-  const nestedV3Repository=createBrowserSessionRepository(nestedV3Storage.storage);
-  const legacyPlan={
-    id:"old-plan",
-    name:"旧草稿活动",
-    startTime:"10:00",
-    endTime:null,
-    durationMinutes:30,
-    location:"旧地点",
-    locked:false,
-    source:"user",
-  };
-  const currentParsed=parsedInput(original.snapshot,"旧版解析原文");
-  const legacyParsed={...currentParsed,activityFacts:undefined,existingPlans:[legacyPlan],activityMentions:[]};
-  const currentDraft=createItineraryDraft(original);
-  const legacyDraft={...currentDraft,activityFacts:undefined,items:[legacyPlan]};
-  const legacyConfirmed={
-    rawText:legacyParsed.rawText,
-    intent:legacyParsed.intent,
-    existingPlans:[legacyPlan],
-    activityMentions:[],
-    disruptions:legacyParsed.disruptions,
-    constraints:legacyParsed.constraints,
-    context:legacyParsed.context,
-    contextSources:legacyParsed.contextSources,
-    closedPlaceIds:[],
-    baseRevision:original.snapshot.revision,
-  };
-  const legacyRequest={
-    reason:"weather",
-    freeText:legacyParsed.rawText,
-    currentState:original.snapshot.state,
-    closedPlaceIds:[],
-    variation:0,
-    stateSources:original.snapshot.stateSources,
-  };
-  const legacyPendingPlan={
-    result:{
-      id:"legacy-plan",
-      ok:false,
-      plan:null,
-      attempts:[],
-      mode:"local",
-      model:"legacy-test",
-      message:"旧方案",
-      context:{
-        profile:original.snapshot.profile,
-        trip:original.snapshot.trip,
-        state:original.snapshot.state,
-        stateSources:original.snapshot.stateSources,
-        existingItinerary:[],
-        lockedEvents:[],
-        remainingEvents:[],
-        disruption:legacyRequest,
-        places:[],
-        travelMinutes:{},
-      },
-    },
-    base:original.snapshot,
-    request:legacyRequest,
-    accepted:false,
-    parsedInput:legacyParsed,
-  };
-  const nestedV3Raw=JSON.stringify({
-    ...original,
-    schemaVersion:3,
-    parsedInput:legacyParsed,
-    itineraryDraft:legacyDraft,
-    pendingInput:{
-      stage:"follow_up",
-      parsedInput:legacyParsed,
-      confirmedDraft:legacyConfirmed,
-      missingFact:null,
-      questionRawText:legacyParsed.rawText,
-      baseRevision:original.snapshot.revision,
-    },
-    pendingPlan:legacyPendingPlan,
-  });
-  nestedV3Repository.writeRaw(legacyRealSessionV3Key,nestedV3Raw);
-  const migratedNestedV3=createSessionStore(nestedV3Repository).loadPersisted();
-  assert.equal(nestedV3Repository.readRaw(legacyRealSessionV3BackupKey),nestedV3Raw);
-  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].id,"old-plan");
-  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].placeId,"custom-old-plan");
-  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].endTime,"10:30");
-  assert.equal(migratedNestedV3.parsedInput?.activityFacts[0].durationSource,"user");
-  assert.equal(migratedNestedV3.itineraryDraft?.activityFacts[0].id,"old-plan");
-  assert.equal(migratedNestedV3.pendingInput?.parsedInput.activityFacts[0].id,"old-plan");
-  assert.equal(migratedNestedV3.pendingInput?.confirmedDraft.activityFacts[0].id,"old-plan");
-  assert.equal(migratedNestedV3.pendingPlan?.request.activityFacts[0].id,"old-plan");
-  assert.equal(migratedNestedV3.pendingPlan?.result.context.activityFacts[0].id,"old-plan");
-
-  const v2Raw = `  ${JSON.stringify({ schemaVersion: 2, rawInput: "v2 原文", snapshot: original.snapshot })}`;
-  v2Repository.writeRaw(legacyRealSessionKey, v2Raw);
-  const v2Store = createSessionStore(v2Repository);
-  const migratedV2 = v2Store.loadPersisted();
-  assert.equal(v2Repository.readRaw(legacyRealSessionBackupKey), v2Raw);
-  assert.equal(migratedV2.schemaVersion, 4);
-  assert.equal(migratedV2.rawInput, "v2 原文");
-  assert.equal(migratedV2.snapshot.revision, original.snapshot.revision);
-
-  const legacyStorage = createStorage();
-  const legacyRepository = createBrowserSessionRepository(legacyStorage.storage);
-  legacyRepository.writeJson(legacySnapshotKey, {
-    ...original.snapshot,
-    trip: { ...original.snapshot.trip, destination: "旧城市" },
-  });
-  const migratedLegacy = createSessionStore(legacyRepository).loadPersisted();
-  assert.equal(migratedLegacy.snapshot.trip.destination, "旧城市");
-  assert(legacyRepository.readRaw(realSessionKey));
-
-  const demoStorage = createStorage();
-  const demoRepository = createBrowserSessionRepository(demoStorage.storage);
-  demoRepository.writeJson(legacySnapshotKey, {
-    ...original.snapshot,
-    mode: "demo",
-    trip: { ...original.snapshot.trip, destination: "演示城市" },
-  });
-  const demoFallback = createSessionStore(demoRepository).loadPersisted();
-  assert.equal(demoFallback.snapshot.mode, "user");
-  assert.equal(demoFallback.snapshot.trip.destination, "待确认城市");
+  const oldOnlyStorage = createStorage();
+  const oldOnlyRepository = createBrowserSessionRepository(
+    oldOnlyStorage.storage,
+  );
+  const oldKeys = [
+    "travel-session-real-v4",
+    "travel-session-real-v3",
+    "travel-session-real-v2",
+    "travel-snapshot-user",
+    "travel-snapshot",
+  ];
+  for (const key of oldKeys)
+    oldOnlyRepository.writeRaw(key, `old-value-${key}`);
+  const oldV4Raw = `  ${JSON.stringify({ ...original, schemaVersion: 4 })}`;
+  oldOnlyRepository.writeRaw(oldKeys[0], oldV4Raw);
+  const fresh = createSessionStore(oldOnlyRepository).loadPersisted();
+  assert.deepEqual(
+    oldOnlyStorage.reads,
+    [realSessionKey],
+    "only the v5 key is read",
+  );
+  assert.equal(fresh.schemaVersion, 5);
+  assert.equal(fresh.snapshot.trip.destination, "待确认城市");
+  assert.equal(oldOnlyRepository.readRaw(oldKeys[0]), oldV4Raw);
+  for (const key of oldKeys.slice(1)) {
+    assert.equal(oldOnlyRepository.readRaw(key), `old-value-${key}`);
+  }
+  assert(oldOnlyRepository.readRaw(realSessionKey));
 
   const damagedStorage = createStorage();
-  const damagedRepository = createBrowserSessionRepository(damagedStorage.storage);
+  const damagedRepository = createBrowserSessionRepository(
+    damagedStorage.storage,
+  );
   damagedRepository.writeRaw(realSessionKey, "{");
-  damagedRepository.writeJson(legacyFallbackSnapshotKey, {
-    ...original.snapshot,
-    trip: { ...original.snapshot.trip, destination: "损坏后回退城市" },
-  });
+  damagedRepository.writeRaw("travel-session-real-v4", "old-v4");
   const recovered = createSessionStore(damagedRepository).loadPersisted();
-  assert.equal(recovered.snapshot.trip.destination, "损坏后回退城市");
-
-  const protectedStorage = createStorage();
-  const protectedRepository = createBrowserSessionRepository(protectedStorage.storage);
-  const lockedSnapshot = SnapshotSchema.parse({
-    ...original.snapshot,
-    itinerary: [{
-      id: "locked-event",
-      placeId: "locked-place",
-      name: "固定预约",
-      category: "user activity",
-      startTime: "10:00",
-      endTime: "11:00",
-      durationSource: "user",
-      location: "固定地点",
-      status: "locked",
-      locked: true,
-      indoorOutdoor: "mixed",
-      openingTime: null,
-      closingTime: null,
-      travelTimeFromPrevious: null,
-      reason: "用户固定安排",
-      constraint: "固定预约",
-    }],
-  });
-  protectedRepository.writeJson(legacyRealSessionV3Key, {
+  assert.equal(recovered.schemaVersion, 5);
+  assert.equal(recovered.snapshot.trip.destination, "待确认城市");
+  assert.equal(damagedRepository.readRaw("travel-session-real-v4"), "old-v4");
+  damagedRepository.writeJson(realSessionKey, {
     ...original,
-    schemaVersion:3,
-    snapshot: lockedSnapshot,
+    schemaVersion: 4,
   });
-  const protectedLoaded = createSessionStore(protectedRepository).loadPersisted();
-  assert(protectedLoaded.snapshot.itinerary[0].protectionPolicy);
-  const rawProtected = JSON.parse(protectedRepository.readRaw(legacyRealSessionV3BackupKey) ?? "null") as RealSession;
-  assert.equal(rawProtected.snapshot.itinerary[0].protectionPolicy, undefined);
+  assert.equal(
+    createSessionStore(damagedRepository).loadPersisted().rawInput,
+    "",
+  );
 
   const repairStorage = createStorage();
-  const repairRepository = createBrowserSessionRepository(repairStorage.storage);
+  const repairRepository = createBrowserSessionRepository(
+    repairStorage.storage,
+  );
   const changedSnapshot = SnapshotSchema.parse({
     ...original.snapshot,
     revision: 1,
@@ -275,12 +160,18 @@ async function main() {
   const repairedDraft = createSessionStore(repairRepository).loadPersisted();
   assert.equal(repairedDraft.itineraryDraft, null);
   assert.equal(
-    (JSON.parse(repairRepository.readRaw(realSessionKey) ?? "null") as RealSession).itineraryDraft,
+    (
+      JSON.parse(
+        repairRepository.readRaw(realSessionKey) ?? "null",
+      ) as RealSession
+    ).itineraryDraft,
     null,
   );
 
   const pendingStorage = createStorage();
-  const pendingRepository = createBrowserSessionRepository(pendingStorage.storage);
+  const pendingRepository = createBrowserSessionRepository(
+    pendingStorage.storage,
+  );
   const parsed = parsedInput(original.snapshot, "需要保留的补问原文");
   const confirmedDraft = ConfirmedDraftSchema.parse({
     rawText: parsed.rawText,
@@ -296,9 +187,9 @@ async function main() {
     ...original,
     rawInput: "",
     parsedInput: parsed,
+    snapshot: changedSnapshot,
     flowStage: "NEEDS_INPUT",
     pendingInput: {
-      stage: "review",
       parsedInput: parsed,
       confirmedDraft,
       missingFact: null,
@@ -318,35 +209,120 @@ async function main() {
   assert.equal(repairedPending.parsedInput, null);
   assert.equal(repairedPending.rawInput, parsed.rawText);
   assert.equal(repairedPending.resolutionState.roundCount, 0);
+  const currentPending = {
+    parsedInput: parsed,
+    confirmedDraft,
+    missingFact: null,
+    questionRawText: parsed.rawText,
+    baseRevision: original.snapshot.revision,
+  };
+  pendingRepository.writeJson(realSessionKey, {
+    ...original,
+    pendingInput: currentPending,
+  });
+  const restoredPending = createSessionStore(pendingRepository).loadPersisted();
+  assert.deepEqual(restoredPending.pendingInput, currentPending);
 
   const pendingPlanStorage = createStorage();
-  const pendingPlanRepository = createBrowserSessionRepository(pendingPlanStorage.storage);
+  const pendingPlanRepository = createBrowserSessionRepository(
+    pendingPlanStorage.storage,
+  );
   pendingPlanRepository.writeJson(realSessionKey, original);
   const pendingSessionStore = createSessionStore(pendingPlanRepository);
   const originalSnapshot = pendingSessionStore.loadPersisted().snapshot;
-  createPendingPlanStore(pendingSessionStore).clearPendingPlan();
-  assert.deepEqual(pendingSessionStore.loadPersisted().snapshot, originalSnapshot);
+  const request = ReplanningRequestSchema.parse({
+    reason: "weather",
+    freeText: "下雨了",
+    currentState: originalSnapshot.state,
+    closedPlaceIds: [],
+    variation: 0,
+    activityFacts: [],
+  });
+  const pendingPlan = PendingPlanSchema.parse({
+    base: originalSnapshot,
+    request,
+    result: {
+      id: "plan",
+      ok: false,
+      plan: null,
+      attempts: [],
+      mode: "local",
+      model: "test",
+      message: "待处理方案",
+      context: {
+        profile: originalSnapshot.profile,
+        trip: originalSnapshot.trip,
+        state: originalSnapshot.state,
+        stateSources: originalSnapshot.stateSources,
+        activityFacts: [],
+        remainingActivityFacts: [],
+        protectedActivityFacts: [],
+        disruption: request,
+        places: [],
+        travelMinutes: {},
+      },
+    },
+  });
+  const plans = createPendingPlanStore(pendingSessionStore);
+  plans.savePendingPlan(pendingPlan, request);
+  assert.deepEqual(
+    pendingSessionStore.loadPersisted().snapshot,
+    originalSnapshot,
+  );
+  assert.deepEqual(
+    pendingSessionStore.loadPersisted().pendingPlan,
+    pendingPlan,
+  );
+  plans.clearPendingPlan();
+  assert.deepEqual(
+    pendingSessionStore.loadPersisted().snapshot,
+    originalSnapshot,
+  );
+  assert.equal(pendingSessionStore.loadPersisted().pendingPlan, null);
 
   const analyticsStorage = createStorage();
-  const analyticsRepository = createBrowserSessionRepository(analyticsStorage.storage);
+  const analyticsRepository = createBrowserSessionRepository(
+    analyticsStorage.storage,
+  );
   const analytics = createAnalyticsService(analyticsRepository);
-  const existing: AnalyticsEvent[] = Array.from({ length: 1000 }, (_, index) => ({
-    id: `event-${index}`,
-    name: "replan_started",
-    created_at: "2020-01-01T00:00:00.000Z",
-    properties: {},
-  }));
+  const existing: AnalyticsEvent[] = Array.from(
+    { length: 1000 },
+    (_, index) => ({
+      id: `event-${index}`,
+      name: "replan_started",
+      created_at: "2020-01-01T00:00:00.000Z",
+      properties: {},
+    }),
+  );
   analyticsRepository.writeRaw("travel-analytics", JSON.stringify(existing));
-  assert.equal(await analytics.logEvent("replan_accepted", { planId: "plan" }, "new-event"), true);
-  let storedAnalytics = JSON.parse(analyticsRepository.readRaw("travel-analytics") ?? "[]") as AnalyticsEvent[];
+  assert.equal(
+    await analytics.logEvent(
+      "replan_accepted",
+      { planId: "plan" },
+      "new-event",
+    ),
+    true,
+  );
+  let storedAnalytics = JSON.parse(
+    analyticsRepository.readRaw("travel-analytics") ?? "[]",
+  ) as AnalyticsEvent[];
   assert.equal(storedAnalytics.length, 1000);
   assert.equal(storedAnalytics[0].id, "event-1");
   assert.equal(storedAnalytics.at(-1)?.id, "new-event");
-  assert.equal(await analytics.logEvent("replan_accepted", { planId: "plan" }, "new-event"), true);
-  storedAnalytics = JSON.parse(analyticsRepository.readRaw("travel-analytics") ?? "[]") as AnalyticsEvent[];
+  assert.equal(
+    await analytics.logEvent(
+      "replan_accepted",
+      { planId: "plan" },
+      "new-event",
+    ),
+    true,
+  );
+  storedAnalytics = JSON.parse(
+    analyticsRepository.readRaw("travel-analytics") ?? "[]",
+  ) as AnalyticsEvent[];
   assert.equal(storedAnalytics.length, 1000);
 
-  console.log("Session repository and migration tests passed.");
+  console.log("Session repository and current-session tests passed.");
 }
 
 main().catch((error) => {

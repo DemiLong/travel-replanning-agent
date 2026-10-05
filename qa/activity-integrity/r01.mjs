@@ -120,12 +120,12 @@ await browserContext.tracing.start({ screenshots: true, snapshots: true });
 async function showPlan(page, plan, alternatives = []) {
   const result = { id: `controlled-${crypto.randomUUID()}`, ok: true, plan, mode: "live", model: "controlled", message: "受控方案", attempts: [],
     context, candidatePlans: alternatives };
-  const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
-    rawInput: rawText, parsedInput: null, lastDisruption: request, pendingPlan: { result, base, request, accepted: false, impactAnalysis: impact },
+  const session = RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "PLAN_READY", snapshot: base,
+    rawInput: rawText, parsedInput: null, lastDisruption: request, pendingPlan: { result, base, request, impactAnalysis: impact },
     resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
     updatedAt: new Date().toISOString() });
   await page.goto("http://127.0.0.1:3000/");
-  await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
+  await page.evaluate(value => localStorage.setItem("travel-session-real-v5", JSON.stringify(value)), session);
   await page.goto("http://127.0.0.1:3000/result");
 }
 async function screenshot(name, plan, inspect) {

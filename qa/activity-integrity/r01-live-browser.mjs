@@ -15,7 +15,7 @@ const base = SnapshotSchema.parse({ mode: "user", profile: { id: "qa", travelPac
   trip: { id: "qa-r01", destination: "上海", startDate: "2026-09-28", endDate: "2026-09-28" },
   state: { currentDate: "2026-09-28", currentTime: "13:00", stateCapturedAt: new Date().toISOString(), currentLocation: "上海人民广场" },
   stateSources: sources, itinerary: [], revision: 0 });
-const session = RealSessionSchema.parse({ schemaVersion: 4, experienceMode: "real", flowStage: "NO_ITINERARY", snapshot: base,
+const session = RealSessionSchema.parse({ schemaVersion: 5, experienceMode: "real", flowStage: "NO_ITINERARY", snapshot: base,
   rawInput: "", parsedInput: null, lastDisruption: null, pendingPlan: null,
   resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
   updatedAt: new Date().toISOString() });
@@ -39,7 +39,7 @@ page.on("response", async response => {
 });
 try {
   await page.goto("http://127.0.0.1:3000/");
-  await page.evaluate(value => localStorage.setItem("travel-session-real-v4", JSON.stringify(value)), session);
+  await page.evaluate(value => localStorage.setItem("travel-session-real-v5", JSON.stringify(value)), session);
   await page.reload();
   await page.getByLabel("描述今天的安排和变化").fill(rawText);
   await page.getByRole("button", { name: "帮我重新安排今天" }).click();

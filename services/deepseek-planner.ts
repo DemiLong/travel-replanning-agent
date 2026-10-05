@@ -84,7 +84,7 @@ function resolveUnknownDuration(
   mode: "DRIVING" | "WALKING" | "TRANSIT" | null | undefined,
 ) {
   const policy = old.protectionPolicy;
-  const configuredSuggestion = !policy || policy.durationPolicy.mode === "suggested" || policy.source === "legacy";
+  const configuredSuggestion = !policy || policy.durationPolicy.mode === "suggested";
   if (!configuredSuggestion && index === candidate.steps.length - 1 && stepDuration === null) {
     return { duration: 0, arrivalOnly: true, reason: "只确认到达时间，后面没有固定安排。" };
   }

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const sessionKey = "travel-session-real-v4";
+const sessionKey = "travel-session-real-v5";
 const date = new Date().toISOString().slice(0, 10);
 const capturedAt = new Date().toISOString();
 
@@ -140,7 +140,7 @@ function confirmedDraft(rawText = "下雨了，把下午行程调一下") {
 
 function ordinarySession() {
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     experienceMode: "real",
     flowStage: "HAS_ITINERARY",
     snapshot: { mode: "user", profile, trip, state, stateSources, itinerary: [event], revision: 1 },
@@ -163,7 +163,7 @@ function pendingPlanSession() {
   const plan = { summary: "保留固定预约", explanation: "雨天只保留已确认安排。", events: [plannedEvent], movedEvents: [], removedEvents: [] };
   const context = { profile, trip, state, stateSources, activityFacts: [museumFact], remainingActivityFacts: [museumFact], protectedActivityFacts: [museumFact], disruption: request, places: [], travelMinutes: {}, world };
   const result = { id: "plan-1", ok: true, plan, attempts: [{ attempt: 1, durationMs: 10, violations: [] }], mode: "live", model: "e2e", message: "已通过当前可验证规则。", verificationLevel: "partial", context, candidatePlans: [{ id: "candidate-1", title: "推荐方案", tradeOff: "保留预约", feasible: true, plan, conflicts: [] }] };
-  return { ...ordinarySession(), flowStage: "PLAN_READY", lastDisruption: request, pendingPlan: { result, base, request, accepted: false } };
+  return { ...ordinarySession(), flowStage: "PLAN_READY", lastDisruption: request, pendingPlan: { result, base, request } };
 }
 
 async function seed(page: Page, value: unknown = ordinarySession()) {
@@ -273,7 +273,7 @@ test("两个标签页基于同一 revision 保存时后提交者冲突", async (
   expect(stored.snapshot.revision).toBe(2);
 });
 
-test("六个页面路由与既有会话键保持兼容", async ({ page }) => {
+test("六个页面路由使用 v5 会话并保持行程不变", async ({ page }) => {
   await seed(page);
   for (const [path, heading] of [
     ["/", "发生了森么？"],
@@ -291,6 +291,35 @@ test("六个页面路由与既有会话键保持兼容", async ({ page }) => {
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
   expect(stored.snapshot.revision).toBe(1);
   expect(stored.snapshot.itinerary[0].id).toBe("museum");
+});
+
+test("旧浏览器会话被忽略且原始值保留，刷新继续加载 v5", async ({ page }) => {
+  await page.goto("/");
+  const oldKey = "travel-session-real-v4";
+  const oldRaw = JSON.stringify({ ...ordinarySession(), schemaVersion: 4 });
+  await page.evaluate(({ key, raw, currentKey }) => {
+    localStorage.removeItem(currentKey);
+    localStorage.setItem(key, raw);
+  }, { key: oldKey, raw: oldRaw, currentKey: sessionKey });
+  await page.goto("/trip");
+  await expect(page.getByRole("heading", { name: "今天还没有行程。", exact: true })).toBeVisible();
+  const first = await page.evaluate(({ key, currentKey }) => ({
+    old: localStorage.getItem(key),
+    current: JSON.parse(localStorage.getItem(currentKey) ?? "null"),
+  }), { key: oldKey, currentKey: sessionKey });
+  expect(first.old).toBe(oldRaw);
+  expect(first.current.schemaVersion).toBe(5);
+  expect(first.current.snapshot.revision).toBe(0);
+  expect(first.current.snapshot.itinerary).toEqual([]);
+  await page.reload();
+  const refreshed = await page.evaluate((key) =>
+    JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);
+  expect(refreshed.snapshot).toEqual(first.current.snapshot);
+});
+
+test("评测页保持仅开发可见，生产构建返回 404", async ({ page }) => {
+  const response = await page.goto("/evals");
+  expect(response?.status()).toBe(404);
 });
 
 test("原始输入统一显示剩余字数并在提交前阻止超限内容", async ({ page }) => {

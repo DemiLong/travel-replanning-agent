@@ -5,7 +5,6 @@ import { MAX_REPLAN_ATTEMPTS, replanReal } from "../agents/real-replanning-agent
 import { createStarterSnapshot } from "../data/session-defaults";
 import { confirmedDraftFromParsed } from "../services/itinerary-domain";
 import { normalizeSemanticExtraction, SEMANTIC_PARSER_PROMPT } from "../services/semantic-parser";
-import { migrateV2SessionValue } from "../services/trip-service";
 import { CandidateSetSchema, type CandidatePlanner } from "../services/deepseek-planner";
 import {
   EventSchema,
@@ -143,23 +142,6 @@ function input(base = snapshot()) {
 
 async function main() {
   assert.throws(() => SnapshotSchema.parse({ ...snapshot(), trip: { ...snapshot().trip, endDate: "2099-01-02" } }), /same-day/i);
-
-  const old = snapshot() as Snapshot & Record<string, unknown>;
-  const removedProfileField = String.fromCharCode(100, 97, 105, 108, 121, 66, 117, 100, 103, 101, 116);
-  const removedStateField = String.fromCharCode(114, 101, 109, 97, 105, 110, 105, 110, 103, 66, 117, 100, 103, 101, 116);
-  const removedEventField = String.fromCharCode(101, 115, 116, 105, 109, 97, 116, 101, 100, 67, 111, 115, 116);
-  Object.assign(old.profile, { [removedProfileField]: 500 });
-  Object.assign(old.state, { [removedStateField]: 200 });
-  Object.assign(old.itinerary[0], { [removedEventField]: 100 });
-  const migrated = migrateV2SessionValue({ schemaVersion: 2, rawInput: "保留的原文", snapshot: old });
-  assert(migrated);
-  assert.equal(migrated.schemaVersion, 4);
-  assert.equal(migrated.snapshot.revision, 7);
-  assert.equal(migrated.snapshot.itinerary[0].locked, true);
-  assert.equal(migrated.snapshot.trip.startDate, migrated.snapshot.trip.endDate);
-  assert(!(removedProfileField in migrated.snapshot.profile));
-  assert(!(removedStateField in migrated.snapshot.state));
-  assert(!(removedEventField in migrated.snapshot.itinerary[0]));
 
   let groundCalls = 0;
   const irrelevant = await runAgentAssist(
@@ -769,7 +751,7 @@ async function main() {
   const violations = validatePlan(context, unsafePlan);
   assert(violations.some((item) => item.code === "locked_event" || item.code === "place_data"));
 
-  console.log("PASS reliability: migration, input gate, complete draft round-trip, partial activity answers, semantic boundaries, safe errors, loop/planner bounds, locked-event validation");
+  console.log("PASS reliability: input gate, complete draft round-trip, partial activity answers, semantic boundaries, safe errors, loop/planner bounds, locked-event validation");
 }
 
 main().catch((error) => {

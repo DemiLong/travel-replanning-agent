@@ -32,7 +32,7 @@ function session(): RealSession {
     revision: 0,
   });
   return RealSessionSchema.parse({
-    schemaVersion: 4,
+    schemaVersion: 5,
     experienceMode: "real",
     flowStage: "NO_ITINERARY",
     snapshot,

@@ -64,7 +64,7 @@ export function HomeFlow() {
     const timeout = window.setTimeout(() => {
       setRaw(session.rawInput);
       setResolutionState(session.resolutionState);
-      if (session.pendingInput?.stage === "follow_up" && session.pendingInput.baseRevision === session.snapshot.revision) {
+      if (session.pendingInput && session.pendingInput.baseRevision === session.snapshot.revision) {
         setConfirmedDraft(session.pendingInput.confirmedDraft);
         setMissingFact(session.pendingInput.missingFact);
       }
@@ -163,7 +163,7 @@ export function HomeFlow() {
         setResolutionState(body.resolutionState);
         setFollowUp("");
         const updated = updateSession({ rawInput: raw, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), flowStage: "NEEDS_INPUT", resolutionState: body.resolutionState, pendingPlan: null,
-          pendingInput: { stage: "follow_up", parsedInput: body.parsedInput, confirmedDraft: body.confirmedDraft,
+          pendingInput: { parsedInput: body.parsedInput, confirmedDraft: body.confirmedDraft,
             missingFact: body.missingFact, questionRawText: raw, baseRevision: requestSession.snapshot.revision } });
         setSession(updated);
         return;
@@ -194,7 +194,7 @@ export function HomeFlow() {
       const result = AgentResultSchema.parse(body.result);
       const base = SnapshotSchema.parse(body.base);
       const request = ReplanningRequestSchema.parse(body.request);
-      savePendingPlan({ result, base, request, accepted: false, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
+      savePendingPlan({ result, base, request, parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, request);
       updateSession({ pendingInput: null, conditionalAdvice: null, resolutionState: body.resolutionState ?? requestSession.resolutionState });
       window.location.assign("/result");
     } catch (cause) {
@@ -278,4 +278,3 @@ export function HomeFlow() {
     </div>
   );
 }
-
