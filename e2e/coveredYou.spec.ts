@@ -322,7 +322,7 @@ test("评测页保持仅开发可见，生产构建返回 404", async ({ page })
   expect(response?.status()).toBe(404);
 });
 
-test("原始输入统一显示剩余字数并在提交前阻止超限内容", async ({ page }) => {
+test("首页隐藏剩余字数并在提交前阻止超限内容", async ({ page }) => {
   await seed(page);
   let assistCalls = 0;
   await page.route("**/api/assist", async (route) => {
@@ -333,10 +333,10 @@ test("原始输入统一显示剩余字数并在提交前阻止超限内容", as
 
   const homeInput = page.getByLabel("描述今天的安排和变化");
   await expect(homeInput).toHaveAttribute("maxlength", "4000");
-  await expect(page.locator("#home-input-limit")).toHaveText("还可输入 4000 个字");
+  await expect(page.locator("#home-input-limit")).toHaveCount(0);
   const atLimit = "行".repeat(4000);
   await homeInput.fill(atLimit);
-  await expect(page.locator("#home-input-limit")).toHaveText("还可输入 0 个字");
+  await expect(page.locator("#home-input-limit")).toHaveCount(0);
 
   const overLimit = `${atLimit}程`;
   await homeInput.evaluate((element, value) => {

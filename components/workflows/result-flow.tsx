@@ -203,7 +203,20 @@ export function ResultFlow() {
       {plan && <div className="plan-summary-card"><div className="plan-summary-top"><b>保留 {retainedCount} / {originalCount} 个原安排</b><span className="impact-chip">影响程度：{impactLabel}</span></div><p>{plan.summary}</p></div>}
       {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
       {plan && <>
-        <div className="plan-toolbar"><span>按时间顺序</span><Drawer open={analysisOpen} onOpenChange={setAnalysisOpen}><DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger><DrawerContent className="analysis-drawer"><DrawerHeader className="analysis-header"><DrawerTitle>我的情况分析</DrawerTitle><DrawerDescription>这次变化是怎么影响今天的</DrawerDescription></DrawerHeader><ResultAnalysisContent plan={plan} impact={impact} request={request} /><DrawerClose className="drawer-close">知道了</DrawerClose></DrawerContent></Drawer></div>
+        <div className="plan-toolbar">
+          <span>按时间顺序</span>
+          <Drawer autoFocus open={analysisOpen} onOpenChange={setAnalysisOpen}>
+            <DrawerTrigger asChild><button type="button" className="text-action">查看我的情况分析 <ChevronRight size={15} /></button></DrawerTrigger>
+            <DrawerContent className="analysis-drawer">
+              <DrawerHeader className="analysis-header">
+                <DrawerTitle>我的情况分析</DrawerTitle>
+                <DrawerDescription>这次变化是怎么影响今天的</DrawerDescription>
+              </DrawerHeader>
+              <ResultAnalysisContent plan={plan} impact={impact} request={request} />
+              <DrawerClose className="drawer-close">知道了</DrawerClose>
+            </DrawerContent>
+          </Drawer>
+        </div>
         <div className="plan-timeline">{plan.events.map(event => { const status = statusOf(event); return <div className="plan-event" key={event.id}><div className="plan-event-time"><b>{event.startTime}</b><small>{event.startTimeSource === "suggested" ? "建议时间" : event.endTime === event.startTime ? "时间待定" : event.endTime}</small></div><div className={`plan-event-line ${status.tone}`}><span /></div><div className={`plan-event-card ${status.tone}`}><div className="plan-event-top"><h2 style={{ minWidth: 0, flex: "1 1 auto", overflowWrap: "anywhere" }}>{displayPlace(event.name)}</h2><span className={`status-pill ${status.tone}`} style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>{status.label}</span></div><p><MapPin size={14} /> {displayPlace(event.location)}</p><div className="event-travel-row"><span className="travel-mode-tag">{event.travelMode ? ({ WALKING: "步行", TRANSIT: "公共交通", DRIVING: "打车" } as Record<string, string>)[event.travelMode] : "路线待查询"}</span><small>{eventDurationLabel(event)}</small></div></div></div>; })}</div>
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
         {candidatePlans.length > 0 && <section className="candidate-section"><div className="section-title"><h2>备选方案</h2><span>1 个取舍不同的方案</span></div><div className="candidate-list">{candidatePlans.map(candidate => <button type="button" key={candidate.id} className="candidate-card" onClick={() => chooseCandidate(candidate)}><span><b>{summarizeVerifiedPlan(result.context, candidate.plan!)}</b><small>{candidate.tradeOff}</small></span><ChevronRight size={18} /></button>)}</div></section>}

@@ -20,7 +20,6 @@ import {
   ReplanningRequestSchema,
   SnapshotSchema,
   isRawInputWithinLimit,
-  rawInputRemaining,
   type MissingFact,
   type ResolutionState,
 } from "@/types";
@@ -29,7 +28,8 @@ import {
   readAssistResponse,
   userFacingPlanningMessage,
 } from "./assist-client";
-import { Loading, RawInputLimitHint } from "./shared-ui";
+import { Loading } from "./shared-ui";
+import { HomeExampleDrawer } from "./home-example-drawer";
 import { useRealSession } from "./use-real-session";
 
 const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
@@ -55,6 +55,7 @@ export function HomeFlow() {
   const [requestController, setRequestController] = useState<AbortController | null>(null);
   const requestId = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => () => {
     requestId.current += 1;
     controllerRef.current?.abort();
@@ -89,10 +90,6 @@ export function HomeFlow() {
     setSession(clean);
     setMissingFact(null); setConfirmedDraft(null); setResolutionState(clean.resolutionState); setFollowUp(""); setBusy(false); setError("");
     return clean;
-  }
-
-  function chooseQuick(text: string) {
-    changeRaw(text);
   }
 
   function changeRaw(text: string) {
@@ -236,13 +233,18 @@ export function HomeFlow() {
     <div className="mobile-workspace home-screen">
       <div className="home-copy">
         <h1>发生了森么？</h1>
-        <p>把你的原计划和突发情况直接告诉俺！</p>
+        <div className="home-intro-row">
+          <p>把你的原计划和突发情况直接告诉俺！</p>
+          <HomeExampleDrawer disabled={busy} onUseExample={text => {
+            changeRaw(text);
+            setError("");
+            inputRef.current?.focus();
+          }} />
+        </div>
       </div>
-      <form className="mobile-card home-card" onSubmit={submitAssist}>
-        <textarea id="home-input" value={raw} maxLength={MAX_RAW_INPUT_LENGTH} onChange={event => changeRaw(event.target.value)} placeholder="比如：航班晚点了，我想保留晚餐预约" aria-label="描述今天的安排和变化" aria-describedby="home-input-limit" />
-        <RawInputLimitHint id="home-input-limit" remaining={rawInputRemaining(raw)} />
-        <div className="example-row" aria-label="示例提示">
-          {["航班晚点了", "突然下雨了", "起晚了", "景点关闭"].map(item => <button key={item} type="button" className="example-chip" onClick={() => chooseQuick(item)}>{item}</button>)}
+      <form className="home-form" onSubmit={submitAssist}>
+        <div className="mobile-card home-card">
+          <textarea ref={inputRef} id="home-input" value={raw} maxLength={MAX_RAW_INPUT_LENGTH} onChange={event => changeRaw(event.target.value)} aria-label="描述今天的安排和变化" />
         </div>
         {missingFact && !descriptionChanged && (
           <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
@@ -269,7 +271,7 @@ export function HomeFlow() {
           <p>可在上方描述中补充固定安排的准确时间，然后重新分析。</p>
         </section>}
         {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
-        {(!missingFact || descriptionChanged) && <button className="primary full home-submit" disabled={busy}>{busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
+        {(!missingFact || descriptionChanged) && <button type="submit" className="primary full home-submit" disabled={busy}>{busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
         {busy && <div className="loading-caption" role="status">正在处理你的请求，已等待 {elapsed} 秒。<button type="button" className="text-button" onClick={() => requestController?.abort()}>取消</button></div>}
       </form>
       {activeSession.pendingPlan && <Link className="text-action centered" href="/result">返回上一个方案</Link>}
