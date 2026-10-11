@@ -31,6 +31,7 @@ import {
 import { errorText, parseWithModel } from "./assist-client";
 import { Loading, RawInputLimitHint } from "./shared-ui";
 import { useRealSession } from "./use-real-session";
+import { useAuthState } from "./use-auth-state";
 
 function snapshotFromItineraryDraft(
   base: Snapshot,
@@ -66,6 +67,8 @@ function snapshotFromItineraryDraft(
 
 export function OnboardingFlow() {
   const { session, setSession, error, setError } = useRealSession();
+  const auth = useAuthState();
+  const authPreparing = auth.status === "preparing";
   const [draft, setDraft] = useState<ItineraryDraft | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [parsing, setParsing] = useState(false);
@@ -323,10 +326,10 @@ export function OnboardingFlow() {
           <button
             type="button"
             className="secondary"
-            disabled={parsing}
+            disabled={parsing || authPreparing}
             onClick={parsePlans}
           >
-            {parsing ? "正在整理你的安排…" : "整理这份行程"}
+            {authPreparing ? "正在准备安全会话…" : parsing ? "正在整理你的安排…" : "整理这份行程"}
           </button>
           {items.length > 0 && (
             <div className="stop-list" style={{ marginTop: 18 }}>

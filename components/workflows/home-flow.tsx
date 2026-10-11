@@ -11,7 +11,7 @@ import {
   savePendingPlan,
   updateSession,
 } from "@/services/trip-service";
-import { authenticatedJsonFetch } from "@/services/api-client";
+import { authenticatedJsonFetch, retryAnonymousSession } from "@/services/api-client";
 import {
   AgentResultSchema,
   MAX_RAW_INPUT_LENGTH,
@@ -31,6 +31,7 @@ import {
 import { Loading } from "./shared-ui";
 import { HomeExampleDrawer } from "./home-example-drawer";
 import { useRealSession } from "./use-real-session";
+import { useAuthState } from "./use-auth-state";
 
 const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
 const stationExitSuffix = /\s*[（(]?\s*(?:[A-Z]|\d+|[一二三四五六七八九十]+)\s*号?\s*(?:出入口|出口|口)\s*[）)]?\s*$/i;
@@ -44,6 +45,8 @@ const metroLines = (value: string) => [
 
 export function HomeFlow() {
   const { session, setSession, error, setError } = useRealSession();
+  const auth = useAuthState();
+  const authPreparing = auth.status === "preparing";
   const [raw, setRaw] = useState("");
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -271,7 +274,8 @@ export function HomeFlow() {
           <p>可在上方描述中补充固定安排的准确时间，然后重新分析。</p>
         </section>}
         {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
-        {(!missingFact || descriptionChanged) && <button type="submit" className="primary full home-submit" disabled={busy}>{busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
+        {(!missingFact || descriptionChanged) && <button type="submit" className="primary full home-submit" disabled={busy || authPreparing}>{authPreparing ? "正在准备安全会话…" : busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
+        {auth.status === "error" && <button type="button" className="text-action centered" onClick={() => { void retryAnonymousSession(); }}>会话没准备好，点此重试</button>}
         {busy && <div className="loading-caption" role="status">正在处理你的请求，已等待 {elapsed} 秒。<button type="button" className="text-button" onClick={() => requestController?.abort()}>取消</button></div>}
       </form>
       {activeSession.pendingPlan && <Link className="text-action centered" href="/result">返回上一个方案</Link>}
