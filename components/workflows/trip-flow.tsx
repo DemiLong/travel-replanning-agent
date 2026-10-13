@@ -17,9 +17,7 @@ export function TripFlow() {
   if (!snapshot.itinerary.length)
     return (
       <div className="mobile-workspace empty-screen">
-        <span className="eyebrow">今日</span>
         <h1>今天还没有行程。</h1>
-        <p className="muted">把今天的安排告诉我，我们一起慢慢排好。</p>
         <Link className="primary full" href="/">开始安排今天 <ArrowRight size={17} /></Link>
       </div>
     );

@@ -1,19 +1,19 @@
 "use client";
 
 import Image from "next/image";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, MousePointerClick, X } from "lucide-react";
 import {
   Drawer,
   DrawerClose,
   DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
   DrawerTitle,
   DrawerTrigger,
 } from "@/components/ui/drawer";
 
 const exampleText = "我刚到上海博物馆东馆，比原计划晚了60分钟，本来我打算17:00去国金中心、19:00去外滩的，现在还来得及么？";
+
+const STEP_COUNT = 3;
 
 function ClickCue({ className = "" }: { className?: string }) {
   return <span className={`example-click-cue ${className}`} aria-hidden="true"><MousePointerClick size={25} strokeWidth={2.1} /></span>;
@@ -27,7 +27,31 @@ export function HomeExampleDrawer({
   onUseExample: (text: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const carouselRef = useRef<HTMLDivElement | null>(null);
   const useExampleOnClose = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setActive(0);
+    const node = carouselRef.current;
+    if (node) node.scrollTo({ left: 0 });
+  }, [open]);
+
+  function handleScroll() {
+    const node = carouselRef.current;
+    if (!node) return;
+    const width = node.clientWidth;
+    if (!width) return;
+    const index = Math.max(0, Math.min(STEP_COUNT - 1, Math.round(node.scrollLeft / width)));
+    setActive(index);
+  }
+
+  function goTo(index: number) {
+    const node = carouselRef.current;
+    if (!node) return;
+    node.scrollTo({ left: index * node.clientWidth, behavior: "smooth" });
+  }
 
   return (
     <Drawer autoFocus open={open} onOpenChange={setOpen}>
@@ -36,6 +60,7 @@ export function HomeExampleDrawer({
       </DrawerTrigger>
       <DrawerContent
         className="home-example-drawer"
+        aria-label="行程示例"
         onCloseAutoFocus={event => {
           if (!useExampleOnClose.current) return;
           event.preventDefault();
@@ -43,17 +68,20 @@ export function HomeExampleDrawer({
           onUseExample(exampleText);
         }}
       >
-        <DrawerHeader className="home-example-header">
-          <DrawerTitle>行程被打乱了，可以这样说</DrawerTitle>
-          <DrawerDescription>从描述变化，到拿到新的安排，只需这几步。</DrawerDescription>
+        <div className="home-example-topbar">
+          <DrawerTitle className="sr-only">行程示例</DrawerTitle>
           <DrawerClose className="home-example-close" aria-label="关闭示例"><X size={20} /></DrawerClose>
-        </DrawerHeader>
+        </div>
 
-        <div className="home-example-scroll" data-vaul-no-drag>
-          <ol className="home-example-steps">
-            <li className="home-example-step">
-              <h3><span className="home-example-number">1</span>说说原计划，发生了什么变化</h3>
-              <p className="home-example-caption">写下你现在在哪儿、原本要去哪儿，以及晚了多久。</p>
+        <div
+          className="home-example-carousel"
+          data-vaul-no-drag
+          ref={carouselRef}
+          onScroll={handleScroll}
+        >
+          <section className="home-example-page">
+            <h3><span className="home-example-number">1</span>说说原计划，发生了什么变化</h3>
+            <div className="home-example-page-body">
               <div className="home-example-input-preview" role="img" aria-label={`示例输入：${exampleText} 点击帮我重新安排今天。`}>
                 <div className="home-example-input">{exampleText}</div>
                 <div className="home-example-preview-button">
@@ -61,29 +89,44 @@ export function HomeExampleDrawer({
                   <ClickCue className="example-click-submit" />
                 </div>
               </div>
-              <p className="home-example-note">点击「帮我重新安排今天」，开始分析。</p>
-            </li>
+            </div>
+          </section>
 
-            <li className="home-example-step">
-              <h3><span className="home-example-number">2</span>确认对应的地点</h3>
-              <p className="home-example-caption">遇到同名地点，选择你要去的那个地址。图中以第一项为例。</p>
-              <figure className="home-example-image">
-                <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，第一项为上海ifc商场，地址为世纪大道8号。" width={786} height={1074} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
+          <section className="home-example-page">
+            <h3><span className="home-example-number">2</span>确认对应的地点</h3>
+            <div className="home-example-page-body">
+              <figure className="home-example-image home-example-image--crop">
+                <span className="home-example-crop-frame">
+                  <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，第一项为上海ifc商场，地址为世纪大道8号。" width={786} height={1074} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
+                </span>
                 <ClickCue className="example-click-location" />
               </figure>
-            </li>
+            </div>
+          </section>
 
-            <li className="home-example-step">
-              <h3><span className="home-example-number">3</span>查看调整方案，再决定是否接受</h3>
-              <p className="home-example-caption">本例保留博物馆和外滩，移除国金中心，并重新安排时间和路线。</p>
+          <section className="home-example-page">
+            <h3><span className="home-example-number">3</span>查看调整方案，再决定是否接受</h3>
+            <div className="home-example-page-body">
               <figure className="home-example-image">
-                <span className="home-example-result-label">示例结果</span>
-                <Image src="/examples/adjusted-itinerary.png" alt="调整方案示例：保留2个原安排，16:15参观上海博物馆东馆，19:04去外滩，底部点击接受方案。" width={791} height={1232} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
+                <Image src="/examples/adjusted-itinerary.png" alt="调整方案示例：保留2个原安排，16:15参观上海博物馆东馆，19:04去外滩，底部点击接受方案。" width={791} height={1097} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
                 <ClickCue className="example-click-accept" />
               </figure>
-              <p className="home-example-note">示例中的时间仅作展示，实际方案会根据你的情况生成。</p>
-            </li>
-          </ol>
+            </div>
+          </section>
+        </div>
+
+        <div className="home-example-dots" role="tablist" aria-label="示例步骤">
+          {[0, 1, 2].map(index => (
+            <button
+              key={index}
+              type="button"
+              role="tab"
+              aria-selected={index === active}
+              aria-label={`第 ${index + 1} 步`}
+              className={`home-example-dot${index === active ? " is-active" : ""}`}
+              onClick={() => goTo(index)}
+            />
+          ))}
         </div>
 
         <div className="home-example-footer">
@@ -91,7 +134,6 @@ export function HomeExampleDrawer({
             useExampleOnClose.current = true;
             setOpen(false);
           }}>用这个示例试试 <ArrowRight size={17} /></button>
-          <p>填入首页后，你可以修改，再提交。</p>
         </div>
       </DrawerContent>
     </Drawer>
