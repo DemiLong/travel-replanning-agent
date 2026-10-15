@@ -189,8 +189,6 @@ test("首次创建只保存单日正式行程", async ({ page }) => {
     });
   });
   await page.goto("/onboarding");
-  await page.getByLabel("所在城市").fill("上海");
-  await page.getByLabel("现在在哪儿").fill("人民广场");
   await page.getByLabel("你今天想怎么安排？").fill("10点去城市博物馆");
   await page.getByRole("button", { name: "整理这份行程" }).click();
   await expect(page.locator('input[id^="name-"]')).toHaveValue("城市博物馆");
@@ -258,8 +256,7 @@ test("两个标签页基于同一 revision 保存时后提交者冲突", async (
   await secondPage.goto("/onboarding");
 
   for (const candidate of [page, secondPage]) {
-    await candidate.getByLabel("所在城市").fill("上海");
-    await candidate.getByLabel("现在在哪儿").fill("人民广场");
+    await candidate.getByRole("button", { name: "重新输入", exact: true }).click();
     await candidate.getByLabel("你今天想怎么安排？").fill("10点去城市博物馆");
     await candidate.getByRole("button", { name: "整理这份行程" }).click();
     await expect(candidate.locator('input[id^="name-"]')).toHaveValue("城市博物馆");
@@ -276,9 +273,9 @@ test("两个标签页基于同一 revision 保存时后提交者冲突", async (
 test("六个页面路由使用 v5 会话并保持行程不变", async ({ page }) => {
   await seed(page);
   for (const [path, heading] of [
-    ["/", "发生了森么？"],
+    ["/", "发生了什么？"],
     ["/onboarding", "把今天的安排放进来。"],
-    ["/trip", "今天，慢慢走"],
+    ["/trip", "今日行程"],
     ["/rescue", "我理解的是"],
     ["/result", "还没有待确认的方案。"],
     ["/me", "我的"],
@@ -350,10 +347,11 @@ test("首页隐藏剩余字数并在提交前阻止超限内容", async ({ page 
   expect(assistCalls).toBe(0);
 
   await page.goto("/onboarding");
+  await page.getByRole("button", { name: "重新输入", exact: true }).click();
   const itineraryInput = page.getByLabel("你今天想怎么安排？");
   await expect(itineraryInput).toHaveAttribute("maxlength", "4000");
   await expect(itineraryInput).toHaveValue(atLimit);
-  await expect(page.locator("#itinerary-input-limit")).toHaveText("还可输入 0 个字");
+  await expect(page.locator("#itinerary-input-limit")).toHaveCount(0);
 });
 
 test("rescue 修改原文和补充方案使用统一长度协议", async ({ page }) => {
@@ -410,7 +408,7 @@ test("地点候选只作为当前 blocker 的字段答案提交", async ({ page 
   await page.goto("/");
   await page.getByLabel("描述今天的安排和变化").fill("下雨了，把下午行程调一下");
   await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
-  await expect(page.getByText("你指的是哪一个城市博物馆？")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "请确认城市博物馆位置", exact: true })).toBeVisible();
   await page.getByRole("button", { name: /城市博物馆东馆/ }).click();
   await expect(page.locator(".error-box")).toContainText("原行程没有改变");
   expect(continuation?.rawText).toBeUndefined();
@@ -517,7 +515,6 @@ test("故障注入 C1：合法 JSON null 按结构异常处理", async ({ page }
 test("故障注入 C3：parse 成功响应结构错误不能进入创建流程", async ({ page }) => {
   await page.route("**/api/parse", async (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ parser: "llm" }) }));
   await page.goto("/onboarding");
-  await page.getByLabel("所在城市").fill("上海");
   const input = page.getByLabel("你今天想怎么安排？");
   await input.fill("10点去城市博物馆");
   await page.getByRole("button", { name: "整理这份行程" }).click();
@@ -715,6 +712,7 @@ test("接受方案前复验成功后才更新 revision", async ({ page }) => {
   expect(stored.parsedInput).toBeNull();
   expect(stored.pendingPlan).toBeNull();
   expect(stored.lastDisruption).toEqual(pendingPlanSession().lastDisruption);
+  expect(stored.itineraryPresentation).toEqual({ revision: 2, events: [{ id: "museum", name: "城市博物馆", address: "城市博物馆", label: "保留", tone: "kept" }] });
   expect(stored.conditionalAdvice).toEqual(conditionalAdvice);
 });
 

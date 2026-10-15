@@ -1,17 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { CalendarDays, UserRound } from "lucide-react";
+import { CalendarDays, ChevronLeft, UserRound } from "lucide-react";
 import { SessionWorkflow } from "./workflows";
 
 export function TravelApp({ page }: { page: string }) {
   const isMe = page === "me";
+  const hasBack = page === "result" || page === "onboarding";
   return (
     <div className="site">
-      <header className="header">
-        <Link className="brand" href="/" aria-label="coveredYou 首页">
+      <header className={hasBack ? "header result-header" : "header"}>
+        {hasBack ? <Link className="result-back" href="/" aria-label="返回上一页"><ChevronLeft size={22} strokeWidth={1.8} /></Link> : <Link className="brand" href="/" aria-label="coveredYou 首页">
           coveredYou · 接住你
-        </Link>
+        </Link>}
         <nav aria-label="主导航">
           <Link className={page === "home" ? "active" : ""} href="/">
             首页

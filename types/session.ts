@@ -99,6 +99,10 @@ export const RealSessionSchema = z.object({
   conditionalAdvice: ConditionalAdviceSchema.nullable().default(null),
   itineraryDraft: ItineraryDraftSchema.nullable().default(null),
   resolutionState: ResolutionStateSchema,
+  itineraryPresentation: z.object({
+    revision: z.number().int().min(0),
+    events: z.array(z.object({ id: z.string().min(1), name: z.string(), address: z.string(), label: z.string(), tone: z.enum(["kept", "adjusted", "new", "replaced"]) })).max(20),
+  }).nullable().optional().default(null),
   updatedAt: z.string().datetime(),
 });
 

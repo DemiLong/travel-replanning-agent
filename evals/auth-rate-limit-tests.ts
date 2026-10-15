@@ -1,3 +1,4 @@
+import { createLocalRateLimiter, LOCAL_REQUEST_LIMITS } from "../services/local-rate-limit";
 import assert from "node:assert/strict";
 import { createAuthenticatedJsonFetch } from "../services/api-client";
 import { failureEnvelope, failureResponse } from "../services/api-failure";
@@ -196,6 +197,27 @@ async function main() {
   );
   assert.equal(cancelledFetches, 1, "cancellation must prevent the second fetch");
 
+  let clock = 100_000;
+  const local = createLocalRateLimiter(() => clock);
+  for (const route of ["assist", "parse", "validate"] as const) {
+    for (let i = 0; i < LOCAL_REQUEST_LIMITS[route]; i++) assert.equal(local.claim("local-user", route).allowed, true);
+    assert.equal(local.claim("local-user", route).allowed, false);
+  }
+  clock += 27_100;
+  assert.equal(local.claim("local-user", "assist").retry_after_seconds, 33);
+  assert.equal(local.claim("another-user", "assist").allowed, true);
+  clock = 160_000;
+  assert.equal(local.claim("local-user", "assist").allowed, true, "blocked attempts must not extend the window");
+  assert.equal(local.claim("local-user", "assist").remaining, 18);
+  let databaseClaims = 0;
+  const localAuth = await authorizeApiRequest(request("Bearer token"), "assist", signal(), {
+    configured: true, localBypass: false, localRateLimits: true,
+    gateway: gateway({ claimRequest: async () => { databaseClaims++; throw new Error("local use should not claim the deployed allowance"); } }),
+  });
+  assert.equal(localAuth.userId, "anonymous-user");
+  assert.equal(localAuth.bypassed, false);
+  assert.equal(databaseClaims, 0);
+  await expectFailure(authorizeApiRequest(request(), "assist", signal(), { configured: true, localBypass: false, localRateLimits: true }), "AUTH_REQUIRED");
   console.log("Authentication and rate-limit tests passed.");
 }
 

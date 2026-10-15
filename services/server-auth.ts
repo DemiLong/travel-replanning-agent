@@ -1,3 +1,4 @@
+import { createLocalRateLimiter } from "./local-rate-limit";
 import { createClient } from "@supabase/supabase-js";
 import { requestCancelled, ServiceFailure } from "./failures";
 
@@ -26,9 +27,11 @@ export type AuthorizationDependencies = {
   localBypass?: boolean;
   gateway?: AuthRateGateway;
   operationTimeoutMs?: number;
+  localRateLimits?: boolean;
 };
 
 const AUTH_OPERATION_TIMEOUT_MS = 5_000;
+const localRateLimiter = createLocalRateLimiter();
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
 function configuration() {
@@ -212,7 +215,8 @@ export async function authorizeApiRequest(
   const userId = await timedOperation(signal, "AUTH_TIMEOUT", (operationSignal) =>
     gateway.getUserId(token, operationSignal), dependencies.operationTimeoutMs);
 
-  const claim = await timedOperation(signal, "RATE_LIMITER_TIMEOUT", (operationSignal) =>
+  const useLocalLimits = dependencies.localRateLimits ?? (process.env.NODE_ENV !== "production" && LOOPBACK_HOSTS.has(new URL(request.url).hostname.toLowerCase()));
+  const claim = useLocalLimits ? localRateLimiter.claim(userId, route) : await timedOperation(signal, "RATE_LIMITER_TIMEOUT", (operationSignal) =>
     gateway.claim(token, route, operationSignal), dependencies.operationTimeoutMs);
 
   if (!claim.allowed) {

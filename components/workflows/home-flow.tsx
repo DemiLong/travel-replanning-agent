@@ -1,6 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { PlanningError } from "@/components/ui/planning-error";
+import { PlaceCandidateContent, PLACE_CANDIDATE_LIMIT, locationConfirmationTitle } from "@/components/ui/place-candidate";
+import { TimeField } from "@/components/ui/time-field";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArrowRight, ChevronRight } from "lucide-react";
 import { LocationService } from "@/services/world/location-service";
@@ -32,16 +35,6 @@ import { Loading } from "./shared-ui";
 import { HomeExampleDrawer } from "./home-example-drawer";
 import { useRealSession } from "./use-real-session";
 import { useAuthState } from "./use-auth-state";
-
-const metroStationPattern = /(?:地铁站|轨道交通|[^\s]{1,12}站)/;
-const stationExitSuffix = /\s*[（(]?\s*(?:[A-Z]|\d+|[一二三四五六七八九十]+)\s*号?\s*(?:出入口|出口|口)\s*[）)]?\s*$/i;
-const metroLines = (value: string) => [
-  ...new Set(
-    [...value.matchAll(/(\d{1,2})\s*号线/g)].map(
-      (match) => `${match[1]}号线`,
-    ),
-  ),
-];
 
 export function HomeFlow() {
   const { session, setSession, error, setError } = useRealSession();
@@ -214,30 +207,15 @@ export function HomeFlow() {
     }
   }
 
-  const metroStationCandidates = missingFact?.answerType === "poi"
-    ? [...new Map((missingFact.candidates ?? [])
-      .filter(candidate => metroStationPattern.test(candidate.label))
-      .map(candidate => {
-        const label = candidate.label.replace(stationExitSuffix, "").trim() || candidate.label;
-        return [label, { ...candidate, label }] as const;
-      })).values()]
-    : [];
-  const showMetroStations = metroStationCandidates.length > 0;
-  const renderPoiOption = (candidate: NonNullable<MissingFact["candidates"]>[number], metro = false) => {
-    const lines = metro ? metroLines(`${candidate.label} ${candidate.description ?? ""}`) : [];
-    const label = metro ? candidate.label.replace(/\d{1,2}\s*号线/g, "").replace(/\s+/g, " ").trim() || candidate.label : candidate.label;
-    return <button className={`poi-option${metro ? " metro-option" : ""}`} key={candidate.value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}>
-      <span className="poi-option-copy"><b>{label}</b>{candidate.description && !metro && <small>{candidate.description}</small>}</span>
-      {lines.length ? <span className="metro-line-list" aria-label={lines.join("、")}>{lines.map(line => <span className={`metro-line metro-line-${line.replace("号线", "")}`} key={line}>{line}</span>)}</span> : <ChevronRight size={17} />}
-    </button>;
-  };
+  const isLocationQuestion = Boolean(missingFact && (missingFact.answerType === "poi" || /location|place/i.test(missingFact.key)));
+  const locationName = missingFact?.key === "currentLocation" ? confirmedDraft?.context.currentLocation : confirmedDraft?.activityFacts.find(fact => fact.placeId === missingFact?.key || fact.id === missingFact?.key)?.placeQuery;
 
   return (
     <div className="mobile-workspace home-screen">
       <div className="home-copy">
-        <h1>发生了森么？</h1>
+        <h1>发生了什么？</h1>
         <div className="home-intro-row">
-          <p>把你的原计划和突发情况直接告诉俺！</p>
+          <p>请在下方填写你的原计划和突发情况</p>
           <HomeExampleDrawer disabled={busy} onUseExample={text => {
             changeRaw(text);
             setError("");
@@ -251,17 +229,18 @@ export function HomeFlow() {
         </div>
         {missingFact && !descriptionChanged && (
           <div className="follow-up-card" role="dialog" aria-label="补充必要信息">
-            <span className="eyebrow">{missingFact.answerType === "poi" || /location|place/i.test(missingFact.key) ? "请确认位置" : "再确认一下"}</span>
-            <h2>{missingFact.question}</h2>
-            {showMetroStations ? <div className="metro-candidate-list">
-              <div className="metro-candidate-group" role="group" aria-label="车站"><h3>车站</h3>{metroStationCandidates.map(candidate => renderPoiOption(candidate, true))}</div>
-              {missingFact.candidates?.filter(candidate => !metroStationPattern.test(candidate.label)).map(candidate => renderPoiOption(candidate))}
-            </div> : missingFact.candidates?.map(candidate => renderPoiOption(candidate))}
+            {isLocationQuestion ? <h2 className="location-confirmation-title">{locationConfirmationTitle(missingFact.question, locationName)}</h2> : <><span className="eyebrow">再确认一下</span><h2>{missingFact.question}</h2></>}
+            {missingFact.candidates?.length ? <div className={missingFact.answerType === "poi" ? "place-candidate-list" : undefined}>
+              {(missingFact.answerType === "poi" ? missingFact.candidates.slice(0, PLACE_CANDIDATE_LIMIT) : missingFact.candidates).map(candidate => <button key={candidate.value} type="button" className={missingFact.answerType === "poi" ? "place-candidate-option" : "poi-option"} disabled={busy} onClick={() => void submitAssist(undefined, candidate.value)}>
+                {missingFact.answerType === "poi" ? <PlaceCandidateContent name={candidate.label} description={candidate.description} /> : <span><b>{candidate.label}</b>{candidate.description && <small>{candidate.description}</small>}</span>}
+                <ChevronRight size={17} aria-hidden="true" />
+              </button>)}
+            </div> : null}
             {missingFact.key === "travelMode" && [
               ["WALKING", "步行"], ["TRANSIT", "公共交通"], ["DRIVING", "驾车或打车"],
             // eslint-disable-next-line react-hooks/refs
             ].map(([value, label]) => <button className="poi-option" key={value} type="button" disabled={busy} onClick={() => void submitAssist(undefined, value)}><span><b>{label}</b></span><ChevronRight size={17} /></button>)}
-            {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <input type={missingFact.answerType === "time" ? "time" : "text"} value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder="只补充这一项信息" />}
+            {!missingFact.candidates?.length && missingFact.key !== "travelMode" && (missingFact.answerType === "time" ? <TimeField id="follow-up-time" value={followUp} onValueChange={setFollowUp} aria-label="补充时间" /> : <input type="text" value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder="只补充这一项信息" />)}
             {missingFact.key === "currentLocation" && <button type="button" className="secondary full browser-location-button" disabled={busy} onClick={() => void requestBrowserLocation()}>使用当前浏览器位置</button>}
             {!missingFact.candidates?.length && missingFact.key !== "travelMode" && <button type="button" className="primary full" disabled={busy} onClick={() => void submitAssist()}>{busy ? "正在确认…" : "回答当前问题"}</button>}
             <button type="button" className="follow-up-retry" onClick={() => void submitAssist(undefined, undefined, undefined, true)}>放弃这个问题，按上方描述重新分析</button>
@@ -273,7 +252,7 @@ export function HomeFlow() {
           <p className="conditional-warning">{activeSession.conditionalAdvice.warning}</p>
           <p>可在上方描述中补充固定安排的准确时间，然后重新分析。</p>
         </section>}
-        {error && <div className="error-box" role="alert">{userFacingPlanningMessage(error)}</div>}
+        {error && <PlanningError message={userFacingPlanningMessage(error)} />}
         {(!missingFact || descriptionChanged) && <button type="submit" className="primary full home-submit" disabled={busy || authPreparing}>{authPreparing ? "正在准备安全会话…" : busy ? "正在处理…" : descriptionChanged ? "按新描述重新分析" : "帮我重新安排今天"}<ArrowRight size={18} /></button>}
         {auth.status === "error" && <button type="button" className="text-action centered" onClick={() => { void retryAnonymousSession(); }}>会话没准备好，点此重试</button>}
         {busy && <div className="loading-caption" role="status">正在处理你的请求，已等待 {elapsed} 秒。<button type="button" className="text-button" onClick={() => requestController?.abort()}>取消</button></div>}

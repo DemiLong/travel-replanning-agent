@@ -1,9 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { PlanningError } from "@/components/ui/planning-error";
+import { PlaceCandidateContent, PLACE_CANDIDATE_LIMIT } from "@/components/ui/place-candidate";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, ShieldCheck, Trash2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { SelectField } from "@/components/ui/select-field";
+import { TimeField } from "@/components/ui/time-field";
 import { LocationService } from "@/services/world/location-service";
 import {
   confirmParsedInput,
@@ -473,25 +477,19 @@ export function RescueFlow() {
                       </div>
                       <div className="field">
                         <label htmlFor={`confirm-start-${item.id}`}>开始</label>
-                        <input
-                          id={`confirm-start-${item.id}`}
-                          type="time"
+                        <TimeField id={`confirm-start-${item.id}`}
                           value={item.startTime ?? ""}
-                          onChange={(event) =>
-                            updateFact(item.id,{startTime:event.target.value||null,startTimeSource:event.target.value?"user":"not_provided"})
-                          }
-                        />
+                          onValueChange={(value) =>
+                            updateFact(item.id,{startTime:value||null,startTimeSource:value?"user":"not_provided"})
+                          } />
                       </div>
                       <div className="field">
                         <label htmlFor={`confirm-end-${item.id}`}>结束</label>
-                        <input
-                          id={`confirm-end-${item.id}`}
-                          type="time"
+                        <TimeField id={`confirm-end-${item.id}`}
                           value={item.endTime ?? ""}
-                          onChange={(event) =>
-                            updateFact(item.id,{endTime:event.target.value||null,durationSource:event.target.value?"user":"unknown"})
-                          }
-                        />
+                          onValueChange={(value) =>
+                            updateFact(item.id,{endTime:value||null,durationSource:value?"user":"unknown"})
+                          } />
                       </div>
                       <div className="field">
                         <label htmlFor={`confirm-location-${item.id}`}>
@@ -561,25 +559,19 @@ export function RescueFlow() {
                       </div>
                       <div className="field">
                         <label htmlFor={`mention-start-${mention.id}`}>开始时间</label>
-                        <input
-                          id={`mention-start-${mention.id}`}
-                          type="time"
+                        <TimeField id={`mention-start-${mention.id}`}
                           value={mention.startTime ?? ""}
-                          onChange={(event) =>
-                            updateFact(mention.id,{startTime:event.target.value||null,startTimeSource:event.target.value?"user":"not_provided"})
-                          }
-                        />
+                          onValueChange={(value) =>
+                            updateFact(mention.id,{startTime:value||null,startTimeSource:value?"user":"not_provided"})
+                          } />
                       </div>
                       <div className="field">
                         <label htmlFor={`mention-end-${mention.id}`}>结束时间（可选，不知道可以留空）</label>
-                        <input
-                          id={`mention-end-${mention.id}`}
-                          type="time"
+                        <TimeField id={`mention-end-${mention.id}`}
                           value={mention.endTime ?? ""}
-                          onChange={(event) =>
-                            updateFact(mention.id,{endTime:event.target.value||null,durationSource:event.target.value?"user":"unknown"})
-                          }
-                        />
+                          onValueChange={(value) =>
+                            updateFact(mention.id,{endTime:value||null,durationSource:value?"user":"unknown"})
+                          } />
                       </div>
                       <div className="field">
                         <label htmlFor={`mention-location-${mention.id}`}>地点</label>
@@ -637,24 +629,21 @@ export function RescueFlow() {
           <div className="form-grid">
             <div className="field">
               <label htmlFor="confirm-time">当前时间（必填）</label>
-              <input
-                id="confirm-time"
-                type="time"
+              <TimeField id="confirm-time"
                 value={parsed.context.currentTime}
-                onChange={(event) =>
+                onValueChange={(value) =>
                   updateParsed({
                     ...parsed,
                     context: {
                       ...parsed.context,
-                      currentTime: event.target.value,
+                      currentTime: value,
                     },
                     contextSources: {
                       ...parsed.contextSources,
                       currentTime: "user",
                     },
                   })
-                }
-              />
+                } allowClear={false} />
             </div>
             <div className="field">
               <label htmlFor="confirm-location">当前位置（必填）</label>
@@ -679,57 +668,43 @@ export function RescueFlow() {
             </div>
             <div className="field">
               <label htmlFor="confirm-weather">天气（可选）</label>
-              <select
-                id="confirm-weather"
+              <SelectField id="confirm-weather"
                 value={parsed.context.weather ?? ""}
-                onChange={(event) =>
+                onValueChange={(value) =>
                   updateParsed({
                     ...parsed,
                     context: {
                       ...parsed.context,
-                      weather: event.target.value
-                        ? (event.target.value as "rain" | "sunny" | "hot")
+                      weather: value
+                        ? (value as "rain" | "sunny" | "hot")
                         : undefined,
                     },
                     contextSources: {
                       ...parsed.contextSources,
-                      weather: event.target.value ? "user" : "unset",
+                      weather: value ? "user" : "unset",
                     },
                   })
-                }
-              >
-                <option value="">未提供</option>
-                <option value="rain">下雨</option>
-                <option value="sunny">晴天</option>
-                <option value="hot">很热</option>
-              </select>
+                } options={[{"value":"","label":"未提供"},{"value":"rain","label":"下雨"},{"value":"sunny","label":"晴天"},{"value":"hot","label":"很热"}]} />
             </div>
             <div className="field">
               <label htmlFor="confirm-energy">体力（可选）</label>
-              <select
-                id="confirm-energy"
+              <SelectField id="confirm-energy"
                 value={parsed.context.energyLevel ?? ""}
-                onChange={(event) =>
+                onValueChange={(value) =>
                   updateParsed({
                     ...parsed,
                     context: {
                       ...parsed.context,
-                      energyLevel: event.target.value
-                        ? (event.target.value as "low" | "medium" | "high")
+                      energyLevel: value
+                        ? (value as "low" | "medium" | "high")
                         : undefined,
                     },
                     contextSources: {
                       ...parsed.contextSources,
-                      energyLevel: event.target.value ? "user" : "unset",
+                      energyLevel: value ? "user" : "unset",
                     },
                   })
-                }
-              >
-                <option value="">未提供</option>
-                <option value="low">较低</option>
-                <option value="medium">一般</option>
-                <option value="high">充沛</option>
-              </select>
+                } options={[{"value":"","label":"未提供"},{"value":"low","label":"较低"},{"value":"medium","label":"一般"},{"value":"high","label":"充沛"}]} />
             </div>
           </div>
           <div className="field">
@@ -749,13 +724,11 @@ export function RescueFlow() {
           </div>
           <div className="field">
             <label htmlFor="rescue-mode">愿意使用的交通方式（必填）</label>
-            <select id="rescue-mode" value={activeParsed.worldOptions?.travelMode??""} onChange={event=>updateParsed({...activeParsed,worldOptions:{selectedPois:activeParsed.worldOptions?.selectedPois??{},travelMode:event.target.value as TravelMode||undefined}})}>
-              <option value="">请选择</option><option value="WALKING">步行</option><option value="DRIVING">驾车 / 打车</option><option value="TRANSIT">公交 / 地铁</option>
-            </select>
+            <SelectField id="rescue-mode" value={activeParsed.worldOptions?.travelMode??""} onValueChange={value=>updateParsed({...activeParsed,worldOptions:{selectedPois:activeParsed.worldOptions?.selectedPois??{},travelMode:value as TravelMode||undefined}})} options={[{"value":"","label":"请选择"},{"value":"WALKING","label":"步行"},{"value":"DRIVING","label":"驾车 / 打车"},{"value":"TRANSIT","label":"公交 / 地铁"}]} />
           </div>
           {world && <section aria-label="地点确认与数据状态">
             {world.missingWorldFacts.map((fact,i)=><p key={i} role="status">{fact.kind==="user"?"请补充：":"数据状态："}{fact.message}</p>)}
-            {world.ambiguities.map(item=><fieldset key={item.field} className="field"><legend>请确认：{item.label}</legend>{item.candidates.map(poi=><label key={poi.poiId} className="interest"><input type="radio" name={`poi-${item.field}`} checked={activeParsed.worldOptions?.selectedPois[item.field]===poi.poiId} onChange={()=>updateParsed({...activeParsed,worldOptions:{...activeParsed.worldOptions,selectedPois:{...activeParsed.worldOptions?.selectedPois,[item.field]:poi.poiId}}})}/>{poi.name} · {poi.address}（{poi.city} {poi.district}）</label>)}</fieldset>)}
+            {world.ambiguities.map(item=><fieldset key={item.field} className="field"><legend>请确认{item.label}位置</legend><div className="place-candidate-list">{item.candidates.slice(0, PLACE_CANDIDATE_LIMIT).map(poi=><label key={poi.poiId} className="place-candidate-option"><PlaceCandidateContent name={poi.displayName || poi.name} description={[poi.address, poi.city, poi.district].filter(Boolean).join(" · ")} /><input type="radio" name={`poi-${item.field}`} checked={activeParsed.worldOptions?.selectedPois[item.field]===poi.poiId} onChange={()=>updateParsed({...activeParsed,worldOptions:{...activeParsed.worldOptions,selectedPois:{...activeParsed.worldOptions?.selectedPois,[item.field]:poi.poiId}}})}/></label>)}</div></fieldset>)}
           </section>}
           <h2 style={{ marginTop: 24 }}>需要保留</h2>
           {availableEvents.filter((event) => event.locked).length ? (
@@ -790,9 +763,7 @@ export function RescueFlow() {
             </fieldset>
           )}
           {error && (
-            <div className="error-box" role="alert">
-              {error}
-            </div>
+            <PlanningError message={error} />
           )}
           <div className="form-actions">
             <button
