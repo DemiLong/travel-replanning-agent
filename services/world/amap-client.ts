@@ -35,7 +35,7 @@ export function clearWorldCache() {
   inFlight.clear();
   lastRequestStartedAt=0;
 }
-export type AmapRequestOptions = { paced?: boolean; signal?: AbortSignal; execution?: RequestExecution };
+export type AmapRequestOptions = { paced?: boolean; signal?: AbortSignal; execution?: RequestExecution; timeoutMs?: number };
 function cancellationReason(signal?: AbortSignal) {
   return signal?.reason instanceof ServiceFailure ? signal.reason : requestCancelled("GROUNDING", signal?.reason);
 }
@@ -111,37 +111,51 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
   }
   const entry:InFlightEntry={promise:Promise.resolve({}),controller:new AbortController(),consumers:new Map(),settled:false};
   entry.promise = (async () => {
-    const timeoutSignal = AbortSignal.timeout(MAP_REQUEST_TIMEOUT_MS);
-      const transportSignal=AbortSignal.any([entry.controller.signal,timeoutSignal]);
     try {
-      if(options.paced!==false){
-        await waitForPacing(transportSignal);
+      for (let attempt = 0; ; attempt++) {
+        // Pacing belongs to the overall request deadline, not network time.
+        if (options.paced !== false) await waitForPacing(entry.controller.signal);
+        if (entry.controller.signal.aborted) throw cancellationReason(entry.controller.signal);
+        const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? MAP_REQUEST_TIMEOUT_MS);
+        const transportSignal = AbortSignal.any([entry.controller.signal, timeoutSignal]);
+        try {
+          query.set("key", key); query.set("output", "JSON");
+          entry.networkStartedAt ??= performance.now();
+          if (attempt > 0) for (const execution of new Set(entry.consumers.values())) execution?.recordProvider("amap", { requestCount: 1 });
+          const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal: transportSignal });
+          if (!response.ok) throw new WorldServiceError("MAP_HTTP_ERROR", String(response.status));
+          let body: Record<string, unknown>;
+          try { body = await response.json() as Record<string, unknown>; }
+          catch (error) {
+            if (transportSignal.aborted) throw error;
+            throw new WorldServiceError("MAP_INVALID_RESPONSE", undefined, error);
+          }
+          if (body.status !== "1") {
+            const providerCode = String(body.infocode ?? "unknown");
+            throw new WorldServiceError("MAP_PROVIDER_ERROR", /^\d{1,8}$/.test(providerCode) ? providerCode : "unknown");
+          }
+          const value = { ...body, _fetchedAt: new Date().toISOString() };
+          if (cache.size >= 500) cache.delete(cache.keys().next().value!);
+          cache.set(cacheKey, { expires: Date.now() + ttl, value });
+          return value;
+        } catch (error) {
+          if (entry.controller.signal.aborted) throw cancellationReason(entry.controller.signal);
+          const failure = timeoutSignal.aborted ? new WorldServiceError("MAP_TIMEOUT", undefined, error)
+            : error instanceof ServiceFailure ? error
+            : error instanceof TypeError ? new WorldServiceError("MAP_NETWORK_ERROR", undefined, error)
+            : new ServiceFailure("INTERNAL_ERROR", "GROUNDING", { retryable: true, cause: error });
+          const transient = failure.code === "MAP_TIMEOUT" || failure.code === "MAP_NETWORK_ERROR" ||
+            failure.code === "MAP_HTTP_ERROR" && ["500", "502", "503", "504"].includes(failure.detail ?? "");
+          if (attempt >= 1 || !transient) throw failure;
+          await cancellableDelay(200, entry.controller.signal);
+        }
       }
-      query.set("key", key); query.set("output", "JSON");
-      entry.networkStartedAt=performance.now();
-      const response=await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal:transportSignal });
-      if (!response.ok) throw new WorldServiceError("MAP_HTTP_ERROR", String(response.status));
-      let body: Record<string, unknown>;
-      try { body = await response.json() as Record<string, unknown>; }
-      catch (error) { throw new WorldServiceError("MAP_INVALID_RESPONSE", undefined, error); }
-      if (body.status !== "1") {
-        const providerCode = String(body.infocode ?? "unknown");
-        throw new WorldServiceError("MAP_PROVIDER_ERROR", /^\d{1,8}$/.test(providerCode) ? providerCode : "unknown");
-      }
-      const value={ ...body, _fetchedAt: new Date().toISOString() };
-      if(cache.size>=500)cache.delete(cache.keys().next().value!);
-      cache.set(cacheKey,{expires:Date.now()+ttl,value});
-      return value;
     } catch (error) {
       cache.delete(cacheKey);
-      if (error instanceof ServiceFailure) throw error;
-      if (timeoutSignal.aborted) throw new WorldServiceError("MAP_TIMEOUT", undefined, error);
-      if(entry.controller.signal.aborted)throw cancellationReason(entry.controller.signal);
-      if (error instanceof TypeError) throw new WorldServiceError("MAP_NETWORK_ERROR", undefined, error);
-      throw new ServiceFailure("INTERNAL_ERROR", "GROUNDING", { retryable: true, cause: error });
-    }finally{
-      entry.settled=true;
-      if(inFlight.get(cacheKey)===entry)inFlight.delete(cacheKey);
+      throw error;
+    } finally {
+      entry.settled = true;
+      if (inFlight.get(cacheKey) === entry) inFlight.delete(cacheKey);
     }
   })();
   inFlight.set(cacheKey,entry);

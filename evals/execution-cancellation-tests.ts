@@ -150,11 +150,76 @@ async function providerMetricsLogTests() {
   }
 }
 
+async function mapTransientRetryTests() {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.AMAP_API_KEY;
+  process.env.AMAP_API_KEY = "test-map-retry";
+  let calls = 0;
+  const keepAlive = setInterval(() => undefined, 1000);
+  try {
+    clearWorldCache();
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) throw new TypeError("temporary connection failure");
+      return Response.json({ status: "1", pois: [] });
+    }) as typeof fetch;
+    assert.equal((await amapGet("/transient-network", {}, 1000, { paced: false })).status, "1");
+    assert.equal(calls, 2);
+    await amapGet("/transient-network", {}, 1000, { paced: false });
+    assert.equal(calls, 2, "successful retry is cached");
+
+    for (const status of [500, 502, 503, 504]) {
+      clearWorldCache(); calls = 0;
+      globalThis.fetch = (async () => { calls++; return calls === 1 ? new Response("temporary", { status }) : Response.json({ status: "1" }); }) as typeof fetch;
+      assert.equal((await amapGet("/temporary-http", {}, 1000, { paced: false })).status, "1");
+      assert.equal(calls, 2);
+    }
+    for (const status of [400, 401, 403, 429]) {
+      clearWorldCache(); calls = 0;
+      globalThis.fetch = (async () => { calls++; return new Response("rejected", { status }); }) as typeof fetch;
+      await assert.rejects(amapGet("/permanent-http", {}, 1000, { paced: false }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_HTTP_ERROR");
+      assert.equal(calls, 1, "permanent HTTP failures must not be retried");
+    }
+    clearWorldCache(); calls = 0;
+    globalThis.fetch = (async () => { calls++; return Response.json({ status: "0", infocode: "10001" }); }) as typeof fetch;
+    await assert.rejects(amapGet("/invalid-key", {}, 1000, { paced: false }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_PROVIDER_ERROR");
+    assert.equal(calls, 1, "provider key/quota failures are not transient");
+
+    clearWorldCache(); calls = 0;
+    globalThis.fetch = (async (_input, init) => { calls++; return waitForAbort(init?.signal as AbortSignal); }) as typeof fetch;
+    await assert.rejects(amapGet("/always-times-out", {}, 1000, { paced: false, timeoutMs: 10 }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_TIMEOUT");
+    assert.equal(calls, 2, "timeout retries are bounded to one");
+
+    clearWorldCache(); calls = 0;
+    const execution = new RequestExecution({ deadlineMs: 30 });
+    globalThis.fetch = (async () => { calls++; throw new TypeError("temporary"); }) as typeof fetch;
+    try {
+      await assert.rejects(amapGet("/deadline-during-backoff", {}, 1000, { paced: false, signal: execution.signal }), (error: unknown) => error instanceof ServiceFailure && error.code === "REQUEST_DEADLINE_EXCEEDED");
+      assert.equal(calls, 1, "overall cancellation must stop a pending retry");
+    } finally { execution.dispose(); }
+
+    clearWorldCache(); calls = 0;
+    globalThis.fetch = (async () => { calls++; return Response.json({ status: "1" }); }) as typeof fetch;
+    await amapGet("/reserve-pacing-slot", {}, 1000);
+    const queuedAt = performance.now();
+    await amapGet("/queued-with-short-network-timeout", {}, 1000, { timeoutMs: 10 });
+    assert.equal(performance.now() - queuedAt >= 300, true, "fixture must really queue before the network starts");
+    assert.equal(calls, 2, "waiting for pacing must not consume the network timeout");
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.AMAP_API_KEY; else process.env.AMAP_API_KEY = originalKey;
+    clearWorldCache();
+  }
+}
+
+
 async function main() {
   await deadlineAndLogTests();
   await sharedRequestCancellationTests();
   await pacingCancellationTests();
   await providerMetricsLogTests();
+  await mapTransientRetryTests();
   console.log("Execution cancellation and timing tests passed.");
 }
 

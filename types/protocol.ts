@@ -4,7 +4,7 @@ export const WORLD_CONFIRMATION_TTL_MS = 5 * 60 * 1_000;
 export const REQUEST_DEADLINE_MS = 30_000;
 export const ASSIST_REQUEST_DEADLINE_MS = 60_000;
 export const MODEL_REQUEST_TIMEOUT_MS = 25_000;
-export const MAP_REQUEST_TIMEOUT_MS = 8_000;
+export const MAP_REQUEST_TIMEOUT_MS = 12_000;
 
 export function isRawInputWithinLimit(value: string) {
   return value.length <= MAX_RAW_INPUT_LENGTH;

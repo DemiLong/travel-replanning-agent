@@ -23,7 +23,7 @@ async function main() {
   assert.equal(MAX_RAW_INPUT_LENGTH, 4_000);
   assert.equal(WORLD_CONFIRMATION_TTL_MS, 5 * 60 * 1_000);
   assert.equal(REQUEST_DEADLINE_MS, 30_000);
-  assert.equal(MAP_REQUEST_TIMEOUT_MS, 8_000);
+  assert.equal(MAP_REQUEST_TIMEOUT_MS, 12_000);
   assert.equal(RAW_INPUT_TOO_LONG_MESSAGE, "输入最多 4000 个字，请删减后再提交。");
 
   const atLimit = "行".repeat(MAX_RAW_INPUT_LENGTH);
