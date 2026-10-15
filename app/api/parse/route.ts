@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { OpenAISemanticParser } from "@/services/semantic-parser";
-import { MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE, SnapshotSchema, reasons } from "@/types";
+import { MAX_RAW_INPUT_LENGTH, RAW_INPUT_TOO_LONG_MESSAGE, REQUEST_DEADLINE_MS, SnapshotSchema, reasons } from "@/types";
 import { failureEnvelope, failureResponse } from "@/services/api-failure";
 import { ServiceFailure } from "@/services/failures";
 import { outcomeForFailure, RequestExecution } from "@/services/request-execution";
 import { authorizeApiRequest } from "@/services/server-auth";
 
-export const maxDuration = 12;
+export const maxDuration = 35;
 
 const ParseRequestSchema = z.object({
   snapshot: SnapshotSchema,
@@ -15,7 +15,7 @@ const ParseRequestSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: null });
+  const execution = new RequestExecution({ clientSignal: request.signal, deadlineMs: REQUEST_DEADLINE_MS });
   const headers = { "Cache-Control": "no-store", "X-Trace-Id": execution.traceId };
   try {
     await execution.measure("AUTH", () => authorizeApiRequest(request, "parse", execution.signal));

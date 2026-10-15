@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { MODEL_REQUEST_TIMEOUT_MS } from "../types/protocol";
 import { z } from "zod";
 import { deepSeekFormat } from "./deepseek-format";
 import {
@@ -309,7 +310,7 @@ export class DeepSeekSemanticParser {
       apiKey: process.env.DEEPSEEK_API_KEY,
       baseURL,
       maxRetries: 0,
-      timeout: 8000,
+      timeout: MODEL_REQUEST_TIMEOUT_MS,
     });
   }
 
@@ -321,7 +322,7 @@ export class DeepSeekSemanticParser {
   }
 
   private async modelCall<T>(signal: AbortSignal | undefined, operation: (requestSignal: AbortSignal) => Promise<T>, execution?: RequestExecution) {
-    const timeoutSignal = AbortSignal.timeout(8000);
+    const timeoutSignal = AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS);
     const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     try {
       return await this.trackedModelCall(execution, () => operation(requestSignal));
@@ -381,12 +382,10 @@ export class DeepSeekSemanticParser {
   async parse(snapshot: Snapshot, rawText: string, hint?: ReplanningRequest["reason"], signal?: AbortSignal,
     trace?: (stage: string, value: unknown) => void, execution?: RequestExecution) {
     if(snapshot.mode!=="user" || Object.values(snapshot.stateSources).includes("demo"))throw new ServiceFailure("INVALID_REQUEST", "PARSER", { retryable: false, detail: "DEMO_CONTEXT_REJECTED" });
-    const timeoutSignal = AbortSignal.timeout(8000);
-    const parserSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
     // One bounded structured-output repair; no network/API-key fallback and no local parsing.
     for(let attempt=0;attempt<2;attempt++){
     try{
-    const response = await this.trackedModelCall(execution, () => this.client.responses.parse({
+    const response = await this.modelCall(signal, requestSignal => this.client.responses.parse({
       model: this.model,
       store: false,
       max_output_tokens: 3000,
@@ -414,7 +413,7 @@ export class DeepSeekSemanticParser {
         },
       ],
       text: { format: deepSeekFormat(SemanticExtractionSchema, "coveredYou_semantic_facts") },
-    }, { signal: parserSignal }));
+    }, { signal: requestSignal }), execution);
     if (response.status !== "completed" || !response.output_parsed) {
       throw modelInvalidOutput("PARSER", attempt + 1);
     }
@@ -472,7 +471,7 @@ export class DeepSeekSemanticParser {
       warnings: normalized.parseWarnings });
     return normalized;
     }catch(error){
-      const failure=normalizeModelFailure(error,"PARSER",{externalSignal:signal,providerTimedOut:timeoutSignal.aborted});
+      const failure=normalizeModelFailure(error,"PARSER",{externalSignal:signal});
       if(failure.code!=="MODEL_INVALID_OUTPUT" || attempt===1)throw failure;
     }
     }

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { MODEL_REQUEST_TIMEOUT_MS } from "../types/protocol";
 import { z } from "zod";
 import { deepSeekFormat } from "./deepseek-format";
 import type { ActivityFact, AgentContext, PlanConflict, ProposedPlan, Snapshot, Violation } from "../types";
@@ -29,7 +30,7 @@ export class DeepSeekPlanner implements CandidatePlanner {
     if(typeof window!=="undefined")throw new Error("SERVER_ONLY");
     if(!process.env.DEEPSEEK_API_KEY?.trim())throw new ServiceFailure("MODEL_NOT_CONFIGURED","PLANNER",{retryable:true,provider:"deepseek"});
     this.name=process.env.DEEPSEEK_MODEL||"deepseek-v4-flash";
-    this.client=new OpenAI({apiKey:process.env.DEEPSEEK_API_KEY,baseURL:process.env.DEEPSEEK_BASE_URL||"https://api.deepseek.com",maxRetries:0,timeout:10000});
+    this.client=new OpenAI({apiKey:process.env.DEEPSEEK_API_KEY,baseURL:process.env.DEEPSEEK_BASE_URL||"https://api.deepseek.com",maxRetries:0,timeout:MODEL_REQUEST_TIMEOUT_MS});
   }
   async generateCandidates(context:AgentContext,feedback:Violation[],attempt:number,signal?:AbortSignal){
     if(context.world?.status!=="ready")throw new ServiceFailure("INTERNAL_ERROR","PLANNER",{retryable:true,detail:"WORLD_CONTEXT_NOT_READY"});
