@@ -6,10 +6,11 @@ import { SessionWorkflow } from "./workflows";
 
 export function TravelApp({ page }: { page: string }) {
   const isMe = page === "me";
+  const hasHeader = page !== "trip" && !isMe;
   const hasBack = page === "result" || page === "onboarding";
   return (
-    <div className="site">
-      <header className={hasBack ? "header result-header" : "header"}>
+    <div className={hasHeader ? "site" : "site site-without-header"}>
+      {hasHeader && <header className={hasBack ? "header result-header" : "header"}>
         {hasBack ? <Link className="result-back" href="/" aria-label="返回上一页"><ChevronLeft size={22} strokeWidth={1.8} /></Link> : <Link className="brand" href="/" aria-label="coveredYou 首页">
           coveredYou · 接住你
         </Link>}
@@ -28,7 +29,7 @@ export function TravelApp({ page }: { page: string }) {
           </Link>
         </nav>
         <span className="site-mode-label">真实行程 · 本地保存</span>
-      </header>
+      </header>}
       <main className={isMe ? "app-main me-main" : "app-main"}>
         <SessionWorkflow page={page} />
       </main>

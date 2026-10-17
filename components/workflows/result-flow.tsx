@@ -3,9 +3,18 @@
 import Link from "next/link";
 import { PlanningError } from "@/components/ui/planning-error";
 import { ItineraryTimeline, type ItineraryTone } from "@/components/ui/itinerary-timeline";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerTrigger,
+} from "@/components/ui/drawer";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { ArrowRight, Check, ChevronDown, ChevronUp, ChevronRight } from "lucide-react";
+import { ArrowRight, Check, ChevronRight } from "lucide-react";
 import { confirmedDraftFromParsed, eventsFromActivityFacts } from "@/services/itinerary-domain";
 import {
   summarizeVerifiedPlan,
@@ -58,59 +67,6 @@ function PlanDetails({ plan, request }: { plan: ProposedPlan; request: Replannin
     {plan.removedEvents.length > 0 && <section className="plan-detail-group removed"><h2>移除的原因</h2>
       {plan.removedEvents.map(item => <div className="plan-detail-reason" key={item.eventId}><h3>{item.name}</h3><p>{item.reason}</p></div>)}
     </section>}
-  </div>;
-}
-
-function AnimatedPlanDetails({ open, plan, request }: { open: boolean; plan: ProposedPlan; request: ReplanningRequest }) {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const animationRef = useRef<Animation | null>(null);
-
-  useLayoutEffect(() => {
-    const panel = panelRef.current;
-    const content = contentRef.current;
-    if (!panel || !content) return;
-    // Read the visible position before cancelling so rapid clicks reverse smoothly.
-    const from = panel.getBoundingClientRect().height;
-    const opacity = getComputedStyle(panel).opacity;
-    animationRef.current?.cancel();
-    animationRef.current = null;
-    const target = open ? content.getBoundingClientRect().height : 0;
-    const settle = () => {
-      panel.style.height = open ? "auto" : "0px";
-      panel.style.opacity = open ? "1" : "0";
-    };
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || Math.abs(target - from) < 1) {
-      settle();
-      return;
-    }
-    panel.style.height = from + "px";
-    panel.style.opacity = opacity;
-    const frames: Keyframe[] = open ? [
-      { height: from + "px", opacity, easing: "cubic-bezier(.2,.8,.2,1)" },
-      { height: target + 6 + "px", opacity: 1, offset: .72, easing: "ease-out" },
-      { height: Math.max(0, target - 2) + "px", opacity: 1, offset: .9, easing: "ease-out" },
-      { height: target + "px", opacity: 1 },
-    ] : [
-      { height: from + "px", opacity, easing: "ease-out" },
-      { height: from + 3 + "px", opacity, offset: .12, easing: "cubic-bezier(.4,0,.2,1)" },
-      { height: "0px", opacity: 0, offset: .82, easing: "ease-out" },
-      { height: "4px", opacity: 0, offset: .93, easing: "ease-out" },
-      { height: "0px", opacity: 0 },
-    ];
-    const animation = panel.animate(frames, { duration: open ? 480 : 380, fill: "both" });
-    animationRef.current = animation;
-    animation.onfinish = () => {
-      if (animationRef.current !== animation) return;
-      settle();
-      animation.cancel();
-      animationRef.current = null;
-    };
-  }, [open, plan.events, plan.removedEvents, plan.explanation, request.activityFacts]);
-
-  useEffect(() => () => animationRef.current?.cancel(), []);
-  return <div id="plan-adjustment-details" ref={panelRef} className="plan-details-motion" aria-hidden={!open} inert={!open} style={{ height: 0, opacity: 0 }}>
-    <div ref={contentRef} className="plan-details-motion-inner"><PlanDetails plan={plan} request={request} /></div>
   </div>;
 }
 
@@ -253,12 +209,26 @@ export function ResultFlow() {
       <div className="plan-heading"><h1>今天建议这样调整</h1></div>
       {error && <PlanningError message={userFacingPlanningMessage(error)} />}
       {plan && <section className="plan-summary-card">
-        <div className="plan-summary-top"><div className="plan-summary-heading"><b>保留 {retainedCount} / {originalCount} 个原安排</b><button className="plan-summary-toggle" type="button" aria-label={detailsOpen ? "收起方案说明" : "展开方案说明"} aria-expanded={detailsOpen} aria-controls="plan-adjustment-details" onClick={() => setDetailsOpen(open => !open)}>{detailsOpen ? <ChevronUp className="plan-summary-chevron" size={16} aria-hidden="true" /> : <ChevronDown className="plan-summary-chevron" size={16} aria-hidden="true" />}</button></div><span className="impact-chip">影响程度：{impactLabel}</span></div>
+        <div className="plan-summary-top"><div className="plan-summary-heading"><b>保留 {retainedCount} / {originalCount} 个原安排</b></div><span className="impact-chip">影响程度：{impactLabel}</span></div>
         <p className="plan-summary-overview">{plan.summary}</p>
-        <AnimatedPlanDetails open={detailsOpen} plan={plan} request={request} />
       </section>}
       {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
       {plan && <>
+        <div className="plan-toolbar">
+          <Drawer autoFocus open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <DrawerTrigger asChild>
+              <button type="button" className="text-action plan-reasons-link">查看更改理由 <ChevronRight size={15} aria-hidden="true" /></button>
+            </DrawerTrigger>
+            <DrawerContent className="analysis-drawer plan-reasons-drawer">
+              <DrawerHeader className="analysis-header">
+                <DrawerTitle>更改理由</DrawerTitle>
+                <DrawerDescription className="sr-only">方案说明、保留与新增的原因，以及移除的原因。</DrawerDescription>
+              </DrawerHeader>
+              <div className="drawer-scroll" data-vaul-no-drag><PlanDetails plan={plan} request={request} /></div>
+              <DrawerClose className="drawer-close">知道了</DrawerClose>
+            </DrawerContent>
+          </Drawer>
+        </div>
         <ItineraryTimeline items={plan.events.map(event => ({ event, ...destinationFor(event), ...statusOf(event) }))} />
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
       </>}
