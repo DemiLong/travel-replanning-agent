@@ -57,8 +57,8 @@ async function sharedRequestCancellationTests() {
 
     const firstController = new AbortController();
     const secondController = new AbortController();
-    const first = amapGet("/shared", { id: "1" }, 1000, { paced: false, signal: firstController.signal });
-    const second = amapGet("/shared", { id: "1" }, 1000, { paced: false, signal: secondController.signal });
+    const first = amapGet("/shared", { id: "1" }, 1000, { signal: firstController.signal });
+    const second = amapGet("/shared", { id: "1" }, 1000, { signal: secondController.signal });
     firstController.abort();
     await assert.rejects(first, (error: unknown) => error instanceof ServiceFailure && error.code === "REQUEST_CANCELLED");
     assert.equal(upstreamSignal?.aborted, false, "one consumer must not cancel another consumer's upstream request");
@@ -76,8 +76,9 @@ async function sharedRequestCancellationTests() {
     }) as typeof fetch;
     const leftController = new AbortController();
     const rightController = new AbortController();
-    const left = amapGet("/all-cancel", { id: "2" }, 1000, { paced: false, signal: leftController.signal });
-    const right = amapGet("/all-cancel", { id: "2" }, 1000, { paced: false, signal: rightController.signal });
+    const left = amapGet("/all-cancel", { id: "2" }, 1000, { signal: leftController.signal });
+    const right = amapGet("/all-cancel", { id: "2" }, 1000, { signal: rightController.signal });
+    await new Promise(resolve => setTimeout(resolve, 0));
     leftController.abort();
     rightController.abort();
     await Promise.all([
@@ -133,8 +134,8 @@ async function providerMetricsLogTests() {
   const execution = new RequestExecution({ traceId: "trace-provider-metrics", deadlineMs: null });
   try {
     clearWorldCache();
-    await amapGet("/metrics", { id: "1" }, 1000, { paced: false, execution });
-    await amapGet("/metrics", { id: "1" }, 1000, { paced: false, execution });
+    await amapGet("/metrics", { id: "1" }, 1000, { execution });
+    await amapGet("/metrics", { id: "1" }, 1000, { execution });
     execution.finish({ route: "/api/validate", outcome: "success", httpStatus: 200, status: "VALID" });
     const log = JSON.parse(messages[0]) as { providers: { amap: { requestCount: number; cacheHitCount: number; networkMs: number } } };
     assert.equal(log.providers.amap.requestCount, 2);
@@ -163,38 +164,38 @@ async function mapTransientRetryTests() {
       if (calls === 1) throw new TypeError("temporary connection failure");
       return Response.json({ status: "1", pois: [] });
     }) as typeof fetch;
-    assert.equal((await amapGet("/transient-network", {}, 1000, { paced: false })).status, "1");
+    assert.equal((await amapGet("/transient-network", {}, 1000, {})).status, "1");
     assert.equal(calls, 2);
-    await amapGet("/transient-network", {}, 1000, { paced: false });
+    await amapGet("/transient-network", {}, 1000, {});
     assert.equal(calls, 2, "successful retry is cached");
 
     for (const status of [500, 502, 503, 504]) {
       clearWorldCache(); calls = 0;
       globalThis.fetch = (async () => { calls++; return calls === 1 ? new Response("temporary", { status }) : Response.json({ status: "1" }); }) as typeof fetch;
-      assert.equal((await amapGet("/temporary-http", {}, 1000, { paced: false })).status, "1");
+      assert.equal((await amapGet("/temporary-http", {}, 1000, {})).status, "1");
       assert.equal(calls, 2);
     }
-    for (const status of [400, 401, 403, 429]) {
+    for (const status of [400, 401, 403]) {
       clearWorldCache(); calls = 0;
       globalThis.fetch = (async () => { calls++; return new Response("rejected", { status }); }) as typeof fetch;
-      await assert.rejects(amapGet("/permanent-http", {}, 1000, { paced: false }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_HTTP_ERROR");
+      await assert.rejects(amapGet("/permanent-http", {}, 1000, {}), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_HTTP_ERROR");
       assert.equal(calls, 1, "permanent HTTP failures must not be retried");
     }
     clearWorldCache(); calls = 0;
     globalThis.fetch = (async () => { calls++; return Response.json({ status: "0", infocode: "10001" }); }) as typeof fetch;
-    await assert.rejects(amapGet("/invalid-key", {}, 1000, { paced: false }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_PROVIDER_ERROR");
+    await assert.rejects(amapGet("/invalid-key", {}, 1000, {}), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_PROVIDER_ERROR");
     assert.equal(calls, 1, "provider key/quota failures are not transient");
 
     clearWorldCache(); calls = 0;
     globalThis.fetch = (async (_input, init) => { calls++; return waitForAbort(init?.signal as AbortSignal); }) as typeof fetch;
-    await assert.rejects(amapGet("/always-times-out", {}, 1000, { paced: false, timeoutMs: 10 }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_TIMEOUT");
+    await assert.rejects(amapGet("/always-times-out", {}, 1000, { timeoutMs: 10 }), (error: unknown) => error instanceof ServiceFailure && error.code === "MAP_TIMEOUT");
     assert.equal(calls, 2, "timeout retries are bounded to one");
 
     clearWorldCache(); calls = 0;
     const execution = new RequestExecution({ deadlineMs: 30 });
     globalThis.fetch = (async () => { calls++; throw new TypeError("temporary"); }) as typeof fetch;
     try {
-      await assert.rejects(amapGet("/deadline-during-backoff", {}, 1000, { paced: false, signal: execution.signal }), (error: unknown) => error instanceof ServiceFailure && error.code === "REQUEST_DEADLINE_EXCEEDED");
+      await assert.rejects(amapGet("/deadline-during-backoff", {}, 1000, { signal: execution.signal }), (error: unknown) => error instanceof ServiceFailure && error.code === "REQUEST_DEADLINE_EXCEEDED");
       assert.equal(calls, 1, "overall cancellation must stop a pending retry");
     } finally { execution.dispose(); }
 

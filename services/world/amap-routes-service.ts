@@ -1,7 +1,7 @@
 import { RouteEndpointSchema, RouteSchema, type RouteEndpoint, type TravelMode, type WorldRoute } from "../../types/world";
-import { amapGet, objects, requireAmapKey } from "./amap-client";
+import { amapGet, canUsePartialWorld, objects, requireAmapKey } from "./amap-client";
 import { CoordinateService } from "./coordinate-service";
-import { ServiceFailure } from "../failures";
+import { failureInfo, ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
 export const MAX_ROUTE_PAIRS = 40;
 export const routeKey = (a: RouteEndpoint, b: RouteEndpoint, mode: TravelMode) => `${a.id}:${a.longitude},${a.latitude}:${a.coordinateSystem}>${b.id}:${b.longitude},${b.latitude}:${b.coordinateSystem}:${mode}`;
@@ -22,8 +22,9 @@ export class AmapRoutesService {
       if (!choice) throw new Error("NO_ROUTE");
       return RouteSchema.parse({ ...base, fetchedAt: body._fetchedAt, status:"available", distanceMeters:numeric(choice.distance), durationSeconds:numeric(choice.duration), ...(numeric(choice.cost)!==null ? {fare:numeric(choice.cost)} : {}) });
     } catch (error) {
-      if (error instanceof ServiceFailure) throw error;
-      return { ...base, status:"unavailable", distanceMeters:null, durationSeconds:null };
+      if (error instanceof ServiceFailure && !canUsePartialWorld(error)) throw error;
+      return { ...base, status:"unavailable", distanceMeters:null, durationSeconds:null,
+        ...(error instanceof ServiceFailure ? { failure: failureInfo(error, execution?.traceId ?? crypto.randomUUID()) } : {}) };
     }
   }
   async batch(pairs: Array<{origin:RouteEndpoint;destination:RouteEndpoint}>, mode: TravelMode, signal?: AbortSignal, execution?: RequestExecution): Promise<WorldRoute[]> {

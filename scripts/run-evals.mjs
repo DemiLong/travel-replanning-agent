@@ -11,6 +11,7 @@ writeFileSync("work/eval-build/package.json", '{"type":"commonjs"}');
 const targets = [
   "failure-classification-tests.js",
   "execution-cancellation-tests.js",
+  "amap-reliability-tests.js",
   "auth-rate-limit-tests.js",
   "session-state-tests.js",
   "session-storage-tests.js",

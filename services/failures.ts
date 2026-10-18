@@ -205,6 +205,8 @@ export function failureInfo(failure: ServiceFailure, traceId: string): FailureIn
     stage: failure.stage,
     retryable: failure.retryable,
     traceId,
+    ...(failure.code === "MAP_PROVIDER_ERROR" && /^\d{1,8}$/.test(failure.detail ?? "")
+      ? { providerCode: failure.detail } : {}),
     ...(failure.retryAfterSeconds === undefined
       ? {}
       : { retryAfterSeconds: failure.retryAfterSeconds }),

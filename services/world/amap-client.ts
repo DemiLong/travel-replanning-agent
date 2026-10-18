@@ -3,13 +3,26 @@ import { requestCancelled, ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
 import { MAP_REQUEST_TIMEOUT_MS } from "../../types/protocol";
 
+const TRANSIENT_PROVIDER_CODES = new Set(["10014", "10015", "10016", "10019", "10020", "10021", "10029"]);
+const ACCOUNT_FAILURE_CODES = new Set(["10001", "10005", "10006", "10007", "10008", "10009", "10013", "10026"]);
+
+/** Only a failed lookup may be omitted; cancellation, deadlines and account errors must propagate. */
+export function canUsePartialWorld(error: unknown): error is WorldServiceError {
+  return error instanceof WorldServiceError && error.code !== "MAP_NOT_CONFIGURED" &&
+    !(error.code === "MAP_PROVIDER_ERROR" && ACCOUNT_FAILURE_CODES.has(error.detail ?? "")) &&
+    !(error.code === "MAP_HTTP_ERROR" && ["401", "403"].includes(error.detail ?? ""));
+}
+
 export class WorldServiceError extends ServiceFailure {
   constructor(
     code: "MAP_NOT_CONFIGURED" | "MAP_TIMEOUT" | "MAP_NETWORK_ERROR" | "MAP_HTTP_ERROR" | "MAP_PROVIDER_ERROR" | "MAP_INVALID_RESPONSE",
     detail?: string,
     cause?: unknown,
   ) {
-    super(code, "GROUNDING", { retryable: true, provider: "amap", detail, cause });
+    const retryable = code === "MAP_NETWORK_ERROR" || code === "MAP_TIMEOUT" ||
+      code === "MAP_HTTP_ERROR" && ["429", "500", "502", "503", "504"].includes(detail ?? "") ||
+      code === "MAP_PROVIDER_ERROR" && TRANSIENT_PROVIDER_CODES.has(detail ?? "");
+    super(code, "GROUNDING", { retryable, provider: "amap", detail, cause });
     this.name = "WorldServiceError";
   }
 }
@@ -29,13 +42,19 @@ type InFlightEntry = {
 };
 const inFlight = new Map<string, InFlightEntry>();
 let lastRequestStartedAt=0;
+let cooldownUntil=0;
+export function amapRequestIntervalMs() {
+  const configured = Number(process.env.AMAP_REQUEST_INTERVAL_MS);
+  return Number.isInteger(configured) && configured > 0 && configured <= 60_000 ? configured : 500;
+}
 export function clearWorldCache() {
   cache.clear();
   for (const entry of inFlight.values()) entry.controller.abort(requestCancelled("GROUNDING"));
   inFlight.clear();
   lastRequestStartedAt=0;
+  cooldownUntil=0;
 }
-export type AmapRequestOptions = { paced?: boolean; signal?: AbortSignal; execution?: RequestExecution; timeoutMs?: number };
+export type AmapRequestOptions = { signal?: AbortSignal; execution?: RequestExecution; timeoutMs?: number };
 function cancellationReason(signal?: AbortSignal) {
   return signal?.reason instanceof ServiceFailure ? signal.reason : requestCancelled("GROUNDING", signal?.reason);
 }
@@ -59,7 +78,7 @@ function cancellableDelay(milliseconds: number, signal?: AbortSignal) {
 async function waitForPacing(signal: AbortSignal) {
   while(true){
     if(signal.aborted)throw cancellationReason(signal);
-    const wait=Math.max(0,lastRequestStartedAt+400-Date.now());
+    const wait=Math.max(0,Math.max(lastRequestStartedAt+amapRequestIntervalMs(),cooldownUntil)-Date.now());
     if(!wait){lastRequestStartedAt=Date.now();return;}
     await cancellableDelay(wait,signal);
   }
@@ -114,16 +133,26 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
     try {
       for (let attempt = 0; ; attempt++) {
         // Pacing belongs to the overall request deadline, not network time.
-        if (options.paced !== false) await waitForPacing(entry.controller.signal);
+        await waitForPacing(entry.controller.signal);
         if (entry.controller.signal.aborted) throw cancellationReason(entry.controller.signal);
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? MAP_REQUEST_TIMEOUT_MS);
         const transportSignal = AbortSignal.any([entry.controller.signal, timeoutSignal]);
+        let retryDelayMs = 200;
         try {
           query.set("key", key); query.set("output", "JSON");
           entry.networkStartedAt ??= performance.now();
+          for (const execution of new Set(entry.consumers.values())) execution?.recordProvider("amap", { outboundRequestCount: 1, retryCount: attempt > 0 ? 1 : 0 });
           if (attempt > 0) for (const execution of new Set(entry.consumers.values())) execution?.recordProvider("amap", { requestCount: 1 });
           const response = await fetch(`https://restapi.amap.com${path}?${query}`, { cache: "no-store", signal: transportSignal });
-          if (!response.ok) throw new WorldServiceError("MAP_HTTP_ERROR", String(response.status));
+          if (!response.ok) {
+            if (response.status === 429) {
+              const retryAfter = response.headers.get("Retry-After");
+              const seconds = retryAfter === null ? NaN : Number(retryAfter);
+              const date = retryAfter === null ? NaN : Date.parse(retryAfter);
+              retryDelayMs = Math.max(1_000, Number.isFinite(seconds) ? seconds * 1_000 : Number.isFinite(date) ? date - Date.now() : 0);
+            }
+            throw new WorldServiceError("MAP_HTTP_ERROR", String(response.status));
+          }
           let body: Record<string, unknown>;
           try { body = await response.json() as Record<string, unknown>; }
           catch (error) {
@@ -144,10 +173,16 @@ export async function amapGet(path: string, params: Record<string, string>, ttl 
             : error instanceof ServiceFailure ? error
             : error instanceof TypeError ? new WorldServiceError("MAP_NETWORK_ERROR", undefined, error)
             : new ServiceFailure("INTERNAL_ERROR", "GROUNDING", { retryable: true, cause: error });
-          const transient = failure.code === "MAP_TIMEOUT" || failure.code === "MAP_NETWORK_ERROR" ||
-            failure.code === "MAP_HTTP_ERROR" && ["500", "502", "503", "504"].includes(failure.detail ?? "");
-          if (attempt >= 1 || !transient) throw failure;
-          await cancellableDelay(200, entry.controller.signal);
+          for (const execution of new Set(entry.consumers.values())) {
+            execution?.recordProviderFailure("amap", failure, path, attempt + 1);
+          }
+          if (failure.code === "MAP_PROVIDER_ERROR" && TRANSIENT_PROVIDER_CODES.has(failure.detail ?? "")) retryDelayMs = 1_000;
+          if (retryDelayMs >= 1_000) {
+            // Slow all queued calls after throttling, not just this request's retry.
+            cooldownUntil = Math.max(cooldownUntil, Date.now() + retryDelayMs + Math.floor(Math.random() * 200));
+          }
+          if (attempt >= 1 || !(failure instanceof WorldServiceError && failure.retryable)) throw failure;
+          await cancellableDelay(retryDelayMs, entry.controller.signal);
         }
       }
     } catch (error) {

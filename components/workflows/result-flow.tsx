@@ -229,6 +229,7 @@ export function ResultFlow() {
             </DrawerContent>
           </Drawer>
         </div>
+        {result.context.world?.dataWarnings?.map(warning => <p className="muted" role="status" key={warning}>{warning}</p>)}
         <ItineraryTimeline items={plan.events.map(event => ({ event, ...destinationFor(event), ...statusOf(event) }))} />
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
       </>}

@@ -163,7 +163,7 @@ async function main() {
       clearWorldCache();
       globalThis.fetch = testCase.fetch;
       await assert.rejects(
-        amapGet(testCase.path, { query: testCase.path }, 1, { paced: false }),
+        amapGet(testCase.path, { query: testCase.path }, 1, {}),
         (error: unknown) => error instanceof WorldServiceError && error.code === testCase.code,
       );
     }
@@ -175,6 +175,13 @@ async function main() {
   }
 
   const base = snapshot();
+  const mapThrottled = await runAgentAssist(
+    { snapshot: base, rawText: "下雨了，把今天的行程调整一下" },
+    new RequestExecution({ traceId: "trace-map-10021", deadlineMs: null }),
+    { parse: async () => parsed(base), ground: async () => { throw new WorldServiceError("MAP_PROVIDER_ERROR", "10021"); } },
+  );
+  assert("failure" in mapThrottled);
+  assert.equal(mapThrottled.failure.providerCode, "10021", "the orchestrator response must retain the numeric provider error code");
   const modelTimeout = await runAgentAssist(
     { snapshot: base, rawText: "下雨了，把今天的行程调整一下" },
     new RequestExecution({ traceId: "trace-model-timeout", deadlineMs: null }),

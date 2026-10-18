@@ -169,7 +169,9 @@ export function materializeCandidate(c:AgentContext,raw:PlanCandidate,baseSnapsh
     if(!old&&!poi)throw new CandidateOutputError("模型引用了未知活动或地点。");
     const id=old?.placeId??poi!.poiId;
     const requestedMode=step.travelMode??world.travelMode;
-    const available=world.routes.filter(r=>r.origin.id===previous&&r.destination.id===id&&(!requestedMode||r.travelMode===requestedMode)&&r.status==="available");
+    const allowed=c.disruption.worldOptions?.allowedTravelModes;
+    if(requestedMode&&allowed&&!allowed.includes(requestedMode))throw new CandidateOutputError("交通方式违反用户明确限制。");
+    const available=world.routes.filter(r=>r.origin.id===previous&&r.destination.id===id&&(!requestedMode||r.travelMode===requestedMode)&&(!allowed||allowed.includes(r.travelMode))&&r.status==="available");
     // A missing model choice is resolved only from modes actually returned by
     // grounding; it must never create an unqueried travel time.
     const leg=[...available].sort((a,b)=>(a.trafficDurationSeconds??a.durationSeconds??Infinity)-(b.trafficDurationSeconds??b.durationSeconds??Infinity))[0];

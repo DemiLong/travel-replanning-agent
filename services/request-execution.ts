@@ -5,6 +5,8 @@ type ProviderName = "deepseek" | "amap";
 type StageDurations = Record<FailureStage, number>;
 type ProviderMetrics = Record<ProviderName, {
   requestCount: number;
+  outboundRequestCount: number;
+  retryCount: number;
   cacheHitCount: number;
   queueWaitMs: number;
   networkMs: number;
@@ -20,8 +22,8 @@ export function outcomeForFailure(failure: ServiceFailure): RequestOutcome {
 
 const blankStages = (): StageDurations => ({ AUTH: 0, REQUEST: 0, PARSER: 0, GROUNDING: 0, PLANNER: 0, VALIDATOR: 0 });
 const blankProviders = (): ProviderMetrics => ({
-  deepseek: { requestCount: 0, cacheHitCount: 0, queueWaitMs: 0, networkMs: 0 },
-  amap: { requestCount: 0, cacheHitCount: 0, queueWaitMs: 0, networkMs: 0 },
+  deepseek: { requestCount: 0, outboundRequestCount: 0, retryCount: 0, cacheHitCount: 0, queueWaitMs: 0, networkMs: 0 },
+  amap: { requestCount: 0, outboundRequestCount: 0, retryCount: 0, cacheHitCount: 0, queueWaitMs: 0, networkMs: 0 },
 });
 const elapsed = (startedAt: number) => Math.max(0, performance.now() - startedAt);
 const rounded = (value: number) => Math.round(value * 100) / 100;
@@ -34,6 +36,7 @@ export class RequestExecution {
   private readonly startedAt = performance.now();
   private readonly stages = blankStages();
   private readonly providers = blankProviders();
+  private readonly providerFailures: Array<{ provider: ProviderName; code: string; detail: string | null; path: string | null; attempt: number }> = [];
   private readonly clientSignal?: AbortSignal;
   private readonly deadline = new AbortController();
   private readonly deadlineTimer?: ReturnType<typeof setTimeout>;
@@ -98,9 +101,18 @@ export class RequestExecution {
 
   recordProvider(provider: ProviderName, metrics: Partial<ProviderMetrics[ProviderName]>) {
     const target = this.providers[provider];
-    for (const key of ["requestCount", "cacheHitCount", "queueWaitMs", "networkMs"] as const) {
+    for (const key of ["requestCount", "outboundRequestCount", "retryCount", "cacheHitCount", "queueWaitMs", "networkMs"] as const) {
       target[key] += metrics[key] ?? 0;
     }
+  }
+
+  recordProviderFailure(provider: ProviderName, failure: ServiceFailure, path: string, attempt: number) {
+    if (this.providerFailures.length >= 40) return;
+    this.providerFailures.push({
+      provider, code: failure.code, attempt,
+      detail: /^\d{1,8}$/.test(failure.detail ?? "") ? failure.detail! : null,
+      path: /^\/v[35]\/[a-zA-Z/]+$/.test(path) ? path : null,
+    });
   }
 
   finish(options: {
@@ -129,6 +141,7 @@ export class RequestExecution {
       retryAfterSeconds: failure?.retryAfterSeconds ?? null,
       exceededScope: failure?.rateLimitScope ?? null,
       timeoutStage: failure?.code === "REQUEST_DEADLINE_EXCEEDED" ? failure.stage : null,
+      providerFailures: this.providerFailures,
       stages: {
         authMs: rounded(this.stages.AUTH),
         requestMs: rounded(this.stages.REQUEST),
@@ -144,6 +157,8 @@ export class RequestExecution {
         },
         amap: {
           requestCount: this.providers.amap.requestCount,
+          outboundRequestCount: this.providers.amap.outboundRequestCount,
+          retryCount: this.providers.amap.retryCount,
           cacheHitCount: this.providers.amap.cacheHitCount,
           queueWaitMs: rounded(this.providers.amap.queueWaitMs),
           networkMs: rounded(this.providers.amap.networkMs),

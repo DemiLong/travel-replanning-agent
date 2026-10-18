@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FailureInfoSchema } from "./failures";
 
 export const CoordinateSchema = z.object({
   latitude: z.number().min(-90).max(90), longitude: z.number().min(-180).max(180),
@@ -27,6 +28,7 @@ export const RouteSchema = z.object({
   distanceMeters: z.number().nonnegative().nullable(), durationSeconds: z.number().nonnegative().nullable(),
   trafficDurationSeconds: z.number().nonnegative().optional(), fare: z.number().nonnegative().optional(),
   source: z.literal("amap"), fetchedAt: z.string().datetime(), status: z.enum(["available", "unavailable"]),
+  failure: FailureInfoSchema.optional(),
 });
 export type WorldRoute = z.infer<typeof RouteSchema>;
 export const WeatherSchema = z.object({
@@ -72,6 +74,7 @@ export const RealWorldContextSchema = z.object({
   travelMode:TravelModeSchema.nullable(),
   cityResolution:CityResolutionSchema.optional(),
   resolutionEvidence:z.array(ResolutionEvidenceSchema).optional(),
+  dataWarnings:z.array(z.string()).optional(),
   status:z.enum(["ready","needs_input","unavailable"]),
 });
 export type RealWorldContext = z.infer<typeof RealWorldContextSchema>;

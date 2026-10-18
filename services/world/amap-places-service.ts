@@ -19,7 +19,7 @@ export class AmapPlacesService {
     return this.normalize(await amapGet("/v3/place/text", { keywords, ...(knownCity ? {city, citylimit:"true"} : {}), offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }, 300000, { signal, execution }));
   }
   async searchUnbounded(keywords: string, signal?: AbortSignal, execution?: RequestExecution): Promise<PlaceResolution> {
-    return this.normalize(await amapGet("/v3/place/text", { keywords, offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }, 300000, {paced:false, signal, execution}));
+    return this.normalize(await amapGet("/v3/place/text", { keywords, offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }, 300000, { signal, execution }));
   }
   async around(keywords: string, location: Coordinate, signal?: AbortSignal, execution?: RequestExecution): Promise<PlaceResolution> {
     return this.normalize(await amapGet("/v3/place/around", { keywords, location: await this.coordinates.format(location, signal, execution), radius: "3000", offset: String(MAX_PLACE_CANDIDATES), page: "1", extensions: "base" }, 300000, { signal, execution }));

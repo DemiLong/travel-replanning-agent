@@ -39,6 +39,7 @@ export const FailureInfoSchema = z.object({
   stage: FailureStageSchema,
   retryable: z.boolean(),
   traceId: z.string().min(1),
+  providerCode: z.string().regex(/^\d{1,8}$/).optional(),
   retryAfterSeconds: z.number().int().min(1).optional(),
 });
 

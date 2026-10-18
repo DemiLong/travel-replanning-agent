@@ -4,7 +4,7 @@ import { AmapPlacesService, MAX_PLACE_CANDIDATES } from "./amap-places-service";
 import { AmapRoutesService, MAX_ROUTE_PAIRS } from "./amap-routes-service";
 import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
-import { requireAmapKey, WorldServiceError } from "./amap-client";
+import { canUsePartialWorld, requireAmapKey, WorldServiceError } from "./amap-client";
 import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes, stationLevelCandidates } from "./context-resolution";
 import { ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
@@ -40,6 +40,7 @@ export class WorldContextService {
     const now=new Date().toISOString();
     const result:RealWorldContext={currentTime:{value:state.currentTime,date:state.currentDate,source:(request.stateSources??snapshot.stateSources).currentTime==="user"?"user":"system",confirmedAt:input.confirmation!.confirmedAt},currentLocation:null,resolvedPlaces:[],alternatives:[],routes:[],weather:emptyWeather("not_requested"),dataFreshness:{groundedAt:now,routeMaxAgeSeconds:120,locationMaxAgeSeconds:600},missingWorldFacts:[],ambiguities:[],candidatePlaceIds:{},travelMode:options?.travelMode??null,cityResolution:{city:null,source:"none",evidence:[],conflicts:[]},status:"needs_input"};
     result.resolutionEvidence=[];
+    result.dataWarnings=[];
     const candidatePlaceIds=result.candidatePlaceIds??(result.candidatePlaceIds={});
     const tripCity=snapshot.trip.destination==="待确认城市"?"":snapshot.trip.destination;
     let city="";
@@ -65,7 +66,9 @@ export class WorldContextService {
         const evidencePoi=resolvedPoi??(candidateCities.length===1?response.candidates[0]:null);
         return evidencePoi?{...anchor,evidencePoi,resolvedPoi}:null;
       }catch(error){
-        if(error instanceof ServiceFailure)throw error;
+        if(error instanceof ServiceFailure && !canUsePartialWorld(error))throw error;
+        // This lookup only supplies city evidence. Each required place is still
+        // resolved below; a failed evidence lookup never authorizes a guessed POI.
         return null;
       }
     });
@@ -178,16 +181,23 @@ export class WorldContextService {
     const needsWeather=request.reason==="weather" || state.weather!==undefined || /天气|下雨|高温|暴雨|暴晒/.test(request.freeText);
     if(needsWeather && result.currentLocation){
       if(!result.currentLocation.adcode){
-        try{result.currentLocation.adcode=(await this.places.reverse(result.currentLocation, signal, execution)).adcode;}catch(error){if(error instanceof ServiceFailure)throw error; /* Keep unavailable instead of fabricating an administrative code. */ }
+        try{result.currentLocation.adcode=(await this.places.reverse(result.currentLocation, signal, execution)).adcode;}catch(error){if(error instanceof ServiceFailure && !canUsePartialWorld(error))throw error; /* Weather stays unavailable; no administrative code is guessed. */ }
       }
       result.weather=await this.weather.weather(result.currentLocation.adcode, signal, execution);
     }
-    if(needsWeather && result.weather.status!=="available")missing("world","weather","天气数据不可用，不能确认天气适宜程度。");
+    if(needsWeather && result.weather.status!=="available"){
+      missing("world","weather","天气数据不可用，不能确认天气适宜程度。");
+      result.dataWarnings.push("实时天气暂未获取成功，本次方案未核实天气适宜程度。");
+    }
     if(result.currentLocation && ["weather","closed","discovery","tired"].includes(request.reason)){
       try {
         const search=await this.places.around(request.reason==="tired"?"咖啡馆":"博物馆",result.currentLocation, signal, execution);
         result.alternatives=search.candidates.filter(p=>!result.resolvedPlaces.some(r=>r.poi.poiId===p.poiId)).slice(0,MAX_PLACE_CANDIDATES);
-      }catch(error){if(error instanceof ServiceFailure)throw error;missing("world","alternatives","附近替代地点暂不可用。已有安排仍可比较。");}
+      }catch(error){
+        if(error instanceof ServiceFailure && !canUsePartialWorld(error))throw error;
+        missing("world","alternatives","附近替代地点暂不可用。已有安排仍可比较。");
+        result.dataWarnings.push("附近替代地点暂未获取成功，本次未加入这些推荐。");
+      }
     }
     if(result.currentLocation && modes.length && !result.ambiguities.length && !result.missingWorldFacts.some(x=>x.kind==="user")){
       const endpoints:RouteEndpoint[]=result.resolvedPlaces.map(x=>({...x.poi,id:x.placeId}));
@@ -218,7 +228,14 @@ export class WorldContextService {
         const bounded=pairs.slice(0,Math.floor(MAX_ROUTE_PAIRS/modes.length));
         for(const mode of modes)result.routes.push(...await this.routes.batch(bounded,mode,signal,execution));
       }
-      if(result.routes.some(r=>r.status==="unavailable"))missing("world","routes","部分路线不可用；不会用估算时间代替，包含这些路段的方案将被拒绝。");
+      if(result.routes.some(r=>r.status==="unavailable")){
+        missing("world","routes","部分路线不可用；不会用估算时间代替，包含这些路段的方案将被拒绝。");
+        result.dataWarnings.push("部分路线暂未获取成功，仅使用已取得真实路线且符合你交通限制的方案。");
+        if(!result.routes.some(r=>r.status==="available")){
+          const failure=result.routes.find(r=>r.failure)?.failure;
+          if(failure)throw new ServiceFailure(failure.code,failure.stage,{retryable:failure.retryable,provider:"amap",detail:failure.providerCode});
+        }
+      }
     }
     const allPlaces=result.resolvedPlaces.length===new Set(worldItems.map(e=>e.placeId)).size;
     result.status=result.ambiguities.length || result.missingWorldFacts.some(x=>x.kind==="user") ? "needs_input" : result.currentLocation && allPlaces && result.routes.some(r=>r.status==="available") ? "ready" : "unavailable";

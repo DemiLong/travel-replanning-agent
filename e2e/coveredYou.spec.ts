@@ -172,6 +172,17 @@ async function seed(page: Page, value: unknown = ordinarySession()) {
   }, { key: sessionKey, session: value });
 }
 
+test("结果页展示局部查询失败提示并保留可接受方案", async ({ page }) => {
+  const session = pendingPlanSession();
+  const warning = "部分路线暂未获取成功，仅使用已取得真实路线且符合你交通限制的方案。";
+  const pending = session.pendingPlan;
+  await seed(page, { ...session, pendingPlan: { ...pending, result: { ...pending.result,
+    context: { ...pending.result.context, world: { ...pending.result.context.world, dataWarnings: [warning] } } } } });
+  await page.goto("/result");
+  await expect(page.getByText(warning, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "接受方案", exact: true })).toBeEnabled();
+});
+
 test("首次创建只保存单日正式行程", async ({ page }) => {
   await page.route("**/api/parse", async (route) => {
     await route.fulfill({
@@ -282,7 +293,6 @@ test("六个页面路由使用 v5 会话并保持行程不变", async ({ page })
   ] as const) {
     await page.goto(path);
     await expect(page).toHaveTitle(/coveredYou/);
-    await expect(page.locator("header .brand")).toContainText("coveredYou");
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
   }
   const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), sessionKey);

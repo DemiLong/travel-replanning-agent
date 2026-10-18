@@ -1,5 +1,5 @@
 import { WeatherSchema, type WorldWeather } from "../../types/world";
-import { amapGet, objects, requireAmapKey, textValue } from "./amap-client";
+import { amapGet, canUsePartialWorld, objects, requireAmapKey, textValue } from "./amap-client";
 import { ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
 export function emptyWeather(status: "unavailable" | "not_requested"): WorldWeather {
@@ -11,7 +11,9 @@ export class AmapWeatherService {
     requireAmapKey();
     if (!/^\d{6}$/.test(adcode)) return emptyWeather("unavailable");
     const responses = await Promise.allSettled([amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"base"},600000,{ signal, execution }),amapGet("/v3/weather/weatherInfo",{city:adcode,extensions:"all"},600000,{ signal, execution })]);
-    if (responses[0].status === "rejected" && responses[0].reason instanceof ServiceFailure) throw responses[0].reason;
+    for (const response of responses) {
+      if (response.status === "rejected" && response.reason instanceof ServiceFailure && !canUsePartialWorld(response.reason)) throw response.reason;
+    }
     const liveBody = responses[0].status==="fulfilled" ? responses[0].value : null;
     const forecastBody = responses[1].status==="fulfilled" ? responses[1].value : null;
     const live = objects(liveBody?.lives)[0];

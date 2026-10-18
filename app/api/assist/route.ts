@@ -36,6 +36,7 @@ export async function POST(request: Request) {
       const failure = new ServiceFailure(result.failure.code, result.failure.stage, {
         retryable: result.failure.retryable,
         provider,
+        detail: result.failure.providerCode,
       });
       const httpStatus = failureHttpStatus(failure.code);
       const response = Response.json(result, { status: httpStatus, headers });
