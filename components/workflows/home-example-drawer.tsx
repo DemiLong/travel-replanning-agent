@@ -11,7 +11,7 @@ import {
   DrawerTrigger,
 } from "@/components/ui/drawer";
 
-const exampleText = "我刚到上海博物馆东馆，比原计划晚了60分钟，本来我打算17:00去国金中心、19:00去外滩的，现在还来得及么？";
+const exampleText = "现在是下午4点，我刚到上海博物馆东馆，比原计划晚了60分钟，本来我打算17:00去国金中心、19:00去外滩的，现在还来得及么？";
 
 const STEP_COUNT = 3;
 
@@ -33,10 +33,14 @@ export function HomeExampleDrawer({
 
   useEffect(() => {
     if (!open) return;
-    setActive(0);
     const node = carouselRef.current;
     if (node) node.scrollTo({ left: 0 });
   }, [open]);
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) setActive(0);
+    setOpen(nextOpen);
+  }
 
   function handleScroll() {
     const node = carouselRef.current;
@@ -54,7 +58,7 @@ export function HomeExampleDrawer({
   }
 
   return (
-    <Drawer autoFocus open={open} onOpenChange={setOpen}>
+    <Drawer autoFocus open={open} onOpenChange={handleOpenChange}>
       <DrawerTrigger asChild>
         <button type="button" className="home-example-link">查看示例</button>
       </DrawerTrigger>
@@ -82,23 +86,18 @@ export function HomeExampleDrawer({
           <section className="home-example-page">
             <h3><span className="home-example-number">1</span>说说原计划，发生了什么变化</h3>
             <div className="home-example-page-body">
-              <div className="home-example-input-preview" role="img" aria-label={`示例输入：${exampleText} 点击帮我重新安排今天。`}>
-                <div className="home-example-input">{exampleText}</div>
-                <div className="home-example-preview-button">
-                  帮我重新安排今天 <ArrowRight size={17} />
-                  <ClickCue className="example-click-submit" />
-                </div>
-              </div>
+              <figure className="home-example-image">
+                <Image src="/examples/describe-change.png" alt={`示例输入：${exampleText} 点击帮我重新安排今天。`} width={791} height={540} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
+                <ClickCue className="example-click-submit" />
+              </figure>
             </div>
           </section>
 
           <section className="home-example-page">
             <h3><span className="home-example-number">2</span>确认对应的地点</h3>
             <div className="home-example-page-body">
-              <figure className="home-example-image home-example-image--crop">
-                <span className="home-example-crop-frame">
-                  <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，第一项为上海ifc商场，地址为世纪大道8号。" width={786} height={1074} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
-                </span>
+              <figure className="home-example-image">
+                <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，候选为上海ifc商场、国际金融中心和国金中心2期。" width={793} height={648} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
                 <ClickCue className="example-click-location" />
               </figure>
             </div>

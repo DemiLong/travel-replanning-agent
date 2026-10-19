@@ -28,8 +28,10 @@ import {
   updateSession,
 } from "@/services/trip-service";
 import { authenticatedJsonFetch } from "@/services/api-client";
+import { partialRouteMessage } from "@/services/route-availability";
 import {
   AgentResultSchema,
+  ConfirmedDraftSchema,
   ParsedUserInputSchema,
   ReplanningRequestSchema,
   SnapshotSchema,
@@ -40,6 +42,7 @@ import {
   type ReplanningRequest,
 } from "@/types";
 import type { ResolutionOption } from "@/types";
+import type { RealWorldContext } from "@/types/world";
 import { FailureEnvelopeSchema } from "@/types/failures";
 import {
   errorText,
@@ -57,9 +60,20 @@ const ValidateResponseSchema = z.object({
   violations: z.array(z.unknown()).optional(),
 }).passthrough();
 
-function PlanDetails({ plan, request }: { plan: ProposedPlan; request: ReplanningRequest }) {
+function PlanDetails({ plan, request, world, retrying, busy, retryError, onRetry }: {
+  plan: ProposedPlan; request: ReplanningRequest; world?: RealWorldContext;
+  retrying: boolean; busy: boolean; retryError: string; onRetry: () => void;
+}) {
   const originalIds = new Set(request.activityFacts.filter(fact => fact.progress !== "completed").map(fact => fact.id));
+  const routeMessage = partialRouteMessage(world, request);
+  const additionalNotes = world?.missingWorldFacts.filter(fact => fact.kind === "world" && fact.field !== "routes") ?? [];
   return <div className="plan-details-content">
+    {routeMessage && <section className="plan-route-note" aria-label="线路查询情况" aria-busy={retrying}>
+      <p role="status">{routeMessage}</p>
+      <button type="button" className="route-retry-link" disabled={busy} onClick={onRetry}>{retrying ? "正在重试…" : "点击重试"}</button>
+      {retryError && <p className="route-retry-error" role="alert">{retryError}</p>}
+    </section>}
+    {additionalNotes.length > 0 && <section className="plan-route-note" aria-label="其他查询情况">{additionalNotes.map(fact => <p key={fact.field}>{fact.message}</p>)}</section>}
     <section className="plan-detail-group explanation"><h2>方案说明</h2><p>{plan.explanation}</p></section>
     <section className="plan-detail-group retained"><h2>保留与新增的原因</h2>
       {plan.events.map(event => <div className="plan-detail-reason" key={event.id}><h3><span>{originalIds.has(event.id) ? "保留／调整" : "新增"}</span>{event.name}</h3><p>{event.reason}</p></div>)}
@@ -80,8 +94,11 @@ export function ResultFlow() {
   const [validating, setValidating] = useState(false);
   const [notice, setNotice] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [retryingRoutes, setRetryingRoutes] = useState(false);
+  const [routeRetryError, setRouteRetryError] = useState("");
   const validationControllerRef = useRef<AbortController | null>(null);
-  useEffect(() => () => validationControllerRef.current?.abort(), []);
+  const routeRetryControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { validationControllerRef.current?.abort(); routeRetryControllerRef.current?.abort(); }, []);
   if (!session) return <Loading error={error} />;
   const pending = session.flowStage === "PLAN_READY" ? session.pendingPlan : null;
   if (!pending || pending.result.mode !== "live") return <div className="mobile-workspace empty-screen"><span className="eyebrow">方案</span><h1>还没有待确认的方案。</h1><p className="muted">先从首页告诉我今天发生了什么。</p><Link className="primary full" href="/">返回首页 <ArrowRight size={17} /></Link></div>;
@@ -90,6 +107,53 @@ export function ResultFlow() {
   const plan = result.plan && !validatePlanExplanation(result.context, result.plan).length
     ? { ...result.plan, summary: summarizeVerifiedPlan(result.context, result.plan) } : null;
   const currentParsed = pending.parsedInput ? ParsedUserInputSchema.parse(pending.parsedInput) : null;
+
+  async function retryRoutes() {
+    if (busy || routeRetryControllerRef.current) return;
+    const controller = new AbortController();
+    routeRetryControllerRef.current = controller;
+    setBusy(true); setRetryingRoutes(true); setRouteRetryError("");
+    try {
+      const assertCurrentPlan = () => {
+        const latest = loadSession();
+        if (latest.snapshot.revision !== base.revision || latest.pendingPlan?.result.id !== result.id || latest.flowStage !== "PLAN_READY") {
+          throw new Error("当前方案已变化，请刷新后再重试。");
+        }
+      };
+      assertCurrentPlan();
+      const retainedIds = new Set(request.activityFacts.map(fact => fact.snapshotEventId ?? fact.id));
+      const confirmedDraft = ConfirmedDraftSchema.parse({
+        rawText: request.freeText, intent: currentParsed?.intent ?? "rescue", activityFacts: request.activityFacts,
+        disruptions: currentParsed?.disruptions ?? [{ kind: request.reason, label: request.freeText || "重新查询路线", source: "user" }],
+        constraints: currentParsed?.constraints ?? [], context: request.currentState, contextSources: request.stateSources ?? base.stateSources,
+        closedPlaceIds: request.closedPlaceIds, worldOptions: request.worldOptions, destination: result.context.trip.destination,
+        removedOriginalIds: base.itinerary.filter(event => event.status !== "completed" && !retainedIds.has(event.id)).map(event => event.id),
+        removedLockedIds: request.confirmedDraftChanges?.removedLockedIds ?? [], baseRevision: base.revision,
+      });
+      const response = await authenticatedJsonFetch("/api/assist", { signal: controller.signal, json: {
+        snapshot: base, confirmedDraft, resolutionState: { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] },
+      } });
+      const body = await readAssistResponse(response);
+      if (controller.signal.aborted) return;
+      if (!response.ok) throw new Error(body.message ?? "线路暂未获取成功，请稍后重试。");
+      if (body.status !== "READY") throw new Error(body.missingFact?.question ?? body.message ?? "暂未获取到完整的新方案，当前方案已保留。");
+      const nextResult = AgentResultSchema.parse(body.result);
+      const nextBase = SnapshotSchema.parse(body.base);
+      const nextRequest = ReplanningRequestSchema.parse(body.request);
+      if (!nextResult.ok || !nextResult.plan || nextBase.revision !== base.revision || validatePlanExplanation(nextResult.context, nextResult.plan).length) {
+        throw new Error("新方案暂不可用，当前方案已保留，请稍后重试。");
+      }
+      assertCurrentPlan();
+      setSession(savePendingPlan({ result: nextResult, base: nextBase, request: nextRequest,
+        parsedInput: ParsedUserInputSchema.parse(body.parsedInput), impactAnalysis: body.impactAnalysis }, nextRequest));
+    } catch (cause) {
+      if (!controller.signal.aborted) setRouteRetryError(userFacingPlanningMessage(errorText(cause)));
+    } finally {
+      if (routeRetryControllerRef.current === controller) {
+        routeRetryControllerRef.current = null; setBusy(false); setRetryingRoutes(false);
+      }
+    }
+  }
 
   async function regenerateFromDraft(nextParsed: ParsedUserInput, removedLockedIds: string[] = [], removedEventIds: string[] = []) {
     const confirmedDraft = confirmedDraftFromParsed(base, nextParsed, nextParsed.closedPlaceIds, removedLockedIds, removedEventIds);
@@ -189,7 +253,6 @@ export function ResultFlow() {
   };
   const originalCount = originalIds.size;
   const retainedCount = plan ? plan.events.filter(event => originalIds.has(event.id)).length : 0;
-  const impactLabel = !plan ? "需要再调整" : plan.removedEvents.length + plan.movedEvents.length > 2 ? "较高" : plan.removedEvents.length + plan.movedEvents.length > 0 ? "中等" : "低";
   const conflicts = result.conflicts ?? [];
   const options = result.resolutionOptions ?? [];
   const availableCandidates = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible &&
@@ -209,27 +272,27 @@ export function ResultFlow() {
       <div className="plan-heading"><h1>今天建议这样调整</h1></div>
       {error && <PlanningError message={userFacingPlanningMessage(error)} />}
       {plan && <section className="plan-summary-card">
-        <div className="plan-summary-top"><div className="plan-summary-heading"><b>保留 {retainedCount} / {originalCount} 个原安排</b></div><span className="impact-chip">影响程度：{impactLabel}</span></div>
-        <p className="plan-summary-overview">{plan.summary}</p>
-      </section>}
-      {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
-      {plan && <>
-        <div className="plan-toolbar">
+        <div className="plan-summary-top">
+          <div className="plan-summary-heading"><b>保留 {retainedCount} / {originalCount} 个原安排</b></div>
           <Drawer autoFocus open={detailsOpen} onOpenChange={setDetailsOpen}>
             <DrawerTrigger asChild>
-              <button type="button" className="text-action plan-reasons-link">查看更改理由 <ChevronRight size={15} aria-hidden="true" /></button>
+              <button type="button" className="text-action plan-reasons-link">查看具体改动 <ArrowRight size={14} aria-hidden="true" /></button>
             </DrawerTrigger>
             <DrawerContent className="analysis-drawer plan-reasons-drawer">
               <DrawerHeader className="analysis-header">
-                <DrawerTitle>更改理由</DrawerTitle>
-                <DrawerDescription className="sr-only">方案说明、保留与新增的原因，以及移除的原因。</DrawerDescription>
+                <DrawerTitle>具体改动</DrawerTitle>
+                <DrawerDescription className="sr-only">线路查询情况、方案说明、保留与新增的原因，以及移除的原因。</DrawerDescription>
               </DrawerHeader>
-              <div className="drawer-scroll" data-vaul-no-drag><PlanDetails plan={plan} request={request} /></div>
+              <div className="drawer-scroll" data-vaul-no-drag><PlanDetails plan={plan} request={request} world={result.context.world}
+                retrying={retryingRoutes} busy={busy} retryError={routeRetryError} onRetry={() => void retryRoutes()} /></div>
               <DrawerClose className="drawer-close">知道了</DrawerClose>
             </DrawerContent>
           </Drawer>
         </div>
-        {result.context.world?.dataWarnings?.map(warning => <p className="muted" role="status" key={warning}>{warning}</p>)}
+        <p className="plan-summary-overview">{plan.summary.replace(/^保留或调整：/, "")}</p>
+      </section>}
+      {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
+      {plan && <>
         <ItineraryTimeline items={plan.events.map(event => ({ event, ...destinationFor(event), ...statusOf(event) }))} />
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
       </>}
