@@ -172,15 +172,84 @@ async function seed(page: Page, value: unknown = ordinarySession()) {
   }, { key: sessionKey, session: value });
 }
 
-test("结果页展示局部查询失败提示并保留可接受方案", async ({ page }) => {
+function partialRouteSession() {
   const session = pendingPlanSession();
-  const warning = "部分路线暂未获取成功，仅使用已取得真实路线且符合你交通限制的方案。";
   const pending = session.pendingPlan;
-  await seed(page, { ...session, pendingPlan: { ...pending, result: { ...pending.result,
-    context: { ...pending.result.context, world: { ...pending.result.context.world, dataWarnings: [warning] } } } } });
+  const world = pending.result.context.world;
+  const request = { ...pending.request, worldOptions: { ...pending.request.worldOptions, travelMode: undefined, allowedTravelModes: ["TRANSIT", "DRIVING"] } };
+  return { ...session, pendingPlan: { ...pending, request, result: { ...pending.result,
+    context: { ...pending.result.context, disruption: request, world: { ...world, travelMode: null,
+      routes: [...world.routes, { ...world.routes[0], travelMode: "DRIVING", status: "unavailable", distanceMeters: null, durationSeconds: null }],
+      missingWorldFacts: [{ kind: "world", field: "routes", message: "部分路线不可用。" }],
+      dataWarnings: ["部分路线暂未获取成功，仅使用已取得真实路线且符合你交通限制的方案。"],
+    } } } } };
+}
+
+test("线路提示按实际结果显示在具体改动内", async ({ page }) => {
+  await seed(page, partialRouteSession());
   await page.goto("/result");
-  await expect(page.getByText(warning, { exact: true })).toBeVisible();
+  await expect(page.locator(".plan-screen > p.muted")).toHaveCount(0);
+  await expect(page.getByText("只获取到公共交通线路，若还需其他线路，请重试", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "接受方案", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "查看具体改动" }).click();
+  await expect(page.getByText("只获取到公共交通线路，若还需其他线路，请重试", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "点击重试", exact: true })).toBeEnabled();
+});
+
+test("线路重试失败保留当前方案及交通限制", async ({ page }) => {
+  await seed(page, partialRouteSession());
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/assist", async route => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ status: "UPSTREAM_UNAVAILABLE", message: "线路服务忙，请稍后重试。",
+      failure: { code: "MAP_PROVIDER_ERROR", stage: "GROUNDING", retryable: true, traceId: "retry-failure", providerCode: "10021" } }) });
+  });
+  await page.goto("/result");
+  await page.getByRole("button", { name: "查看具体改动" }).click();
+  await page.getByRole("button", { name: "点击重试", exact: true }).click();
+  await expect(page.locator(".plan-route-note [role=alert]")).toHaveText("线路服务忙，请稍后重试。");
+  expect(submitted?.rawText).toBeUndefined();
+  const draft = submitted?.confirmedDraft as { worldOptions?: { allowedTravelModes?: string[] }; activityFacts?: unknown[] };
+  expect(draft.worldOptions?.allowedTravelModes).toEqual(["TRANSIT", "DRIVING"]);
+  expect(draft.activityFacts).toHaveLength(1);
+  const stored = await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), sessionKey);
+  expect(stored.pendingPlan.result.id).toBe("plan-1");
+  expect(stored.snapshot.revision).toBe(1);
+  await page.getByRole("button", { name: "知道了", exact: true }).click();
+  await expect(page.getByRole("button", { name: "接受方案", exact: true })).toBeEnabled();
+});
+
+test("线路重试成功后更新候选方案并清除缺失提示", async ({ page }) => {
+  await seed(page, partialRouteSession());
+  await page.route("**/api/assist", async route => {
+    const ready = pendingPlanSession().pendingPlan;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "READY", base: ready.base,
+      request: ready.request, result: { ...ready.result, id: "plan-retried" }, parsedInput: parsedInput() }) });
+  });
+  await page.goto("/result");
+  await page.getByRole("button", { name: "查看具体改动" }).click();
+  await page.getByRole("button", { name: "点击重试", exact: true }).click();
+  await expect(page.locator(".plan-route-note")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "具体改动", exact: true })).toBeVisible();
+  const stored = await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), sessionKey);
+  expect(stored.pendingPlan.result.id).toBe("plan-retried");
+  expect(stored.snapshot.revision).toBe(1);
+});
+
+test("示例图片使用新截图并显示点击位置", async ({ page }) => {
+  await seed(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "查看示例", exact: true }).click();
+  const pages = page.locator(".home-example-page");
+  await expect(pages.nth(0).locator("img")).toHaveAttribute("src", "/examples/describe-change.png");
+  await expect(pages.nth(0).locator(".example-click-submit svg")).toBeVisible();
+  await page.getByRole("tab", { name: "第 2 步", exact: true }).click();
+  await expect(pages.nth(1).locator("img")).toHaveAttribute("height", "648");
+  await expect(pages.nth(1).locator(".example-click-location svg")).toBeVisible();
+  await page.getByRole("tab", { name: "第 3 步", exact: true }).click();
+  await expect(pages.nth(2).locator(".example-click-accept svg")).toBeVisible();
+  await page.getByRole("button", { name: "用这个示例试试", exact: true }).click();
+  await expect(page.getByLabel("描述今天的安排和变化")).toHaveValue(/现在是下午4点/);
 });
 
 test("首次创建只保存单日正式行程", async ({ page }) => {

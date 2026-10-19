@@ -85,8 +85,8 @@ export function HomeExampleDrawer({
         >
           <section className="home-example-page">
             <h3><span className="home-example-number">1</span>说说原计划，发生了什么变化</h3>
-            <div className="home-example-page-body">
-              <figure className="home-example-image">
+            <div className="home-example-page-body home-example-fit-body">
+              <figure className="home-example-image home-example-image--fit" style={{ width: "min(100%, calc(100cqh * 791 / 540))" }}>
                 <Image src="/examples/describe-change.png" alt={`示例输入：${exampleText} 点击帮我重新安排今天。`} width={791} height={540} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
                 <ClickCue className="example-click-submit" />
               </figure>
@@ -95,9 +95,9 @@ export function HomeExampleDrawer({
 
           <section className="home-example-page">
             <h3><span className="home-example-number">2</span>确认对应的地点</h3>
-            <div className="home-example-page-body">
-              <figure className="home-example-image">
-                <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，候选为上海ifc商场、国际金融中心和国金中心2期。" width={793} height={648} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
+            <div className="home-example-page-body home-example-fit-body">
+              <figure className="home-example-image home-example-image--fit" style={{ width: "min(100%, calc(100cqh * 795 / 648))" }}>
+                <Image src="/examples/confirm-location.png" alt="地点确认示例：国金中心有多个地点，候选为上海ifc商场、国际金融中心和国金中心2期。" width={795} height={648} sizes="(max-width: 390px) calc(100vw - 40px), 350px" unoptimized />
                 <ClickCue className="example-click-location" />
               </figure>
             </div>
