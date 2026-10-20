@@ -5,7 +5,7 @@ import { AmapRoutesService, MAX_ROUTE_PAIRS } from "./amap-routes-service";
 import { AmapWeatherService, emptyWeather } from "./amap-weather-service";
 import { CoordinateService } from "./coordinate-service";
 import { canUsePartialWorld, requireAmapKey, WorldServiceError } from "./amap-client";
-import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, selectCityEvidence, uniquePlace, allowedModes, stationLevelCandidates } from "./context-resolution";
+import { broadHotelQuery, cityCompatible, freshBrowserLocation, genericLocation, locationQuery, normalizeCity, placeNameCompatible, selectCityEvidence, uniquePlace, allowedModes, stationLevelCandidates } from "./context-resolution";
 import { ServiceFailure } from "../failures";
 import type { RequestExecution } from "../request-execution";
 
@@ -59,11 +59,12 @@ export class WorldContextService {
     const cityResults=await mapConcurrent(cityAnchors,CITY_EVIDENCE_CONCURRENCY,async anchor=>{
       try{
         const response=await this.places.searchUnbounded(anchor.query, signal, execution);
-        candidatePlaceIds[anchor.field]=response.candidates.map(p=>p.poiId);
+        const candidates=response.candidates.filter(p=>placeNameCompatible(p,anchor.query));
+        candidatePlaceIds[anchor.field]=candidates.map(p=>p.poiId);
         const selected=options?.selectedPois[anchor.field];
-        const resolvedPoi=response.candidates.find(p=>p.poiId===selected)??uniquePlace(response.candidates,anchor.query,"");
-        const candidateCities=[...new Set(response.candidates.map(p=>normalizeCity(p.city)).filter(Boolean))];
-        const evidencePoi=resolvedPoi??(candidateCities.length===1?response.candidates[0]:null);
+        const resolvedPoi=candidates.find(p=>p.poiId===selected)??uniquePlace(candidates,anchor.query,"");
+        const candidateCities=[...new Set(candidates.map(p=>normalizeCity(p.city)).filter(Boolean))];
+        const evidencePoi=resolvedPoi??(candidateCities.length===1?candidates[0]:null);
         return evidencePoi?{...anchor,evidencePoi,resolvedPoi}:null;
       }catch(error){
         if(error instanceof ServiceFailure && !canUsePartialWorld(error))throw error;
@@ -104,25 +105,29 @@ export class WorldContextService {
           }
         }
         const cached=preResolved.get(field);
-        if(cached && cityCompatible(cached, searchCity, query)){
+        if(!selected && cached && cityCompatible(cached, searchCity, query)){
           result.resolutionEvidence!.push({field,query,reason:"复用城市证据阶段已确认的高德地点。",poiId:cached.poiId,lookupCity:searchCity,citySource:traceSource??citySource});
           return cached;
         }
         // An unknown booked restaurant cannot be discovered by searching nearby restaurants.
-        if (/^(预约)?晚餐|^餐厅$/.test(query) || /^(我的|我们住的|住的)?(酒店|宾馆|预约景点|已预约景点|景点)(集合|参观)?$/.test(query)) {
+        if (genericLocation(query)) {
           missing("user",field,`“${query}”具体在哪里？告诉我名称或定位即可。`);return null;
         }
         if(broadHotelQuery(query)&&!searchCity){
           missing("user",field,`“${query}”可能对应多个分店，请补充所在城市、道路或具体分店。`);return null;
         }
         const response=await this.places.search(query,/上海虹桥国际机场/.test(query)?"":searchCity,signal,execution);
-        const eligibleCandidates=stationLevelCandidates(response.candidates.filter(p=>cityCompatible(p,searchCity,query)),query);
+        const cityCandidates=response.candidates.filter(p=>cityCompatible(p,searchCity,query));
+        // Search results are options for the traveler, not automatic identity
+        // matches. Preserve provider names/aliases; uniquePlace below applies
+        // the stricter rules only when adopting a place without a selection.
+        const eligibleCandidates=stationLevelCandidates(cityCandidates,query);
         candidatePlaceIds[field]=eligibleCandidates.map(p=>p.poiId);
         if(selected) {
           const selectedCandidate=eligibleCandidates.find(p=>p.poiId===selected);
           if(!selectedCandidate) {
             if(eligibleCandidates.length) result.ambiguities.push({field,label:query,candidates:eligibleCandidates});
-            else missing("user",field,"所选地点不属于本次 Grounding 的合法候选，请重新选择。");
+            else missing("world",field,`未能重新核实你选择的“${query}”，请稍后重试或核对地点名称。`);
             return null;
           }
           result.resolutionEvidence!.push({field,query,reason:"用户选择命中本次 Grounding 的候选地点。",poiId:selected,lookupCity:searchCity,citySource:traceSource??citySource});
@@ -131,8 +136,9 @@ export class WorldContextService {
         const match=uniquePlace(eligibleCandidates,query,searchCity);
         if(match) {result.resolutionEvidence!.push({field,query,reason:"高德查询结合名称、场景及城市得到唯一匹配。",poiId:match.poiId,lookupCity:searchCity,citySource:traceSource??citySource});return match;}
         if(eligibleCandidates.length) result.ambiguities.push({field,label:query,candidates:eligibleCandidates});
-        else if(response.candidates.length) missing("world",field,`“${query}”的候选地点均不在已确认城市“${searchCity}”，未擅自用于本次行程。`);
-        else missing("world",field,`高德没有找到“${query}”的有效地点；未使用本地目录替代。`);
+        else if(response.candidates.length && !cityCandidates.length) missing("world",field,`搜索结果不在已确认的“${searchCity}”，请核对“${query}”的城市或地址。`);
+        else if(response.candidates.length) missing("world",field,`搜索结果与“${query}”的名称或分店信息不符，请核对名称或地址。`);
+        else missing("world",field,`暂时未找到“${query}”，请核对名称或补充地址后重试。`);
       }catch(error){
         if(error instanceof ServiceFailure)throw error;
         const category=error instanceof WorldServiceError?`${error.code}${error.detail?`:${error.detail}`:""}`:"UNKNOWN";
@@ -152,9 +158,18 @@ export class WorldContextService {
       const poi=await resolve("currentLocation",state.currentLocation,currentLookupCity,"current_location");
       if(poi){
         const previousCity=city;
-        result.currentLocation={...poi,id:"current",source:"user",capturedAt:input.confirmation!.confirmedAt,adcode:poi.adcode};
-        if(previousCity&&normalizeCity(previousCity)!==normalizeCity(poi.city))result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:poi.city,message:`当前位置城市“${poi.city}”与既有城市证据“${previousCity}”不一致，优先使用当前位置。`});
-        city=poi.city;citySource="current_location";result.cityResolution={...(result.cityResolution??{city:null,source:"none",evidence:[],conflicts:[]}),city,source:citySource};
+        const conflicting=previousCity&&normalizeCity(previousCity)!==normalizeCity(poi.city);
+        const explicitCurrentCity=normalizeCity(poi.city) && currentQuery.startsWith(normalizeCity(poi.city));
+        if(conflicting && citySource==="place_evidence" && !explicitCurrentCity){
+          const message=`“${currentQuery}”的搜索结果位于${poi.city}，但行程地点指向${previousCity}，请补充当前位置的城市或完整名称。`;
+          result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:poi.city,message});
+          for(const evidence of result.resolutionEvidence!)if(evidence.field==="currentLocation")delete evidence.poiId;
+          missing("user","currentLocation",message);
+        }else{
+          result.currentLocation={...poi,id:"current",source:"user",capturedAt:input.confirmation!.confirmedAt,adcode:poi.adcode};
+          if(conflicting)result.cityResolution?.conflicts.push({source:"current_location",expected:previousCity,actual:poi.city,message:`当前位置城市“${poi.city}”与既有城市证据“${previousCity}”不一致，使用已核对的当前位置。`});
+          city=poi.city;citySource="current_location";result.cityResolution={...(result.cityResolution??{city:null,source:"none",evidence:[],conflicts:[]}),city,source:citySource};
+        }
       }
     } else if(state.browserLocation) {
       const age=Date.now()-Date.parse(state.browserLocation.capturedAt);

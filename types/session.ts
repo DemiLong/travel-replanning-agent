@@ -29,9 +29,10 @@ export const PendingPlanSchema = z.object({
 export const ResolutionStateSchema = z.object({
   currentBlockerKey: z.string().nullable(),
   sameBlockerCount: z.number().int().min(0).max(3),
-  roundCount: z.number().int().min(0).max(3),
-  answeredFields: z.array(z.string().min(1)).max(30),
+  roundCount: z.number().int().min(0).max(120),
+  answeredFields: z.array(z.string().min(1)).max(120),
   questionHistory: z.array(z.string().min(1)).max(12),
+  currentQuestionSignature: z.string().max(4000).optional(),
 });
 
 export const PendingInputSchema = z.object({

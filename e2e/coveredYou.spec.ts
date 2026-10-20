@@ -494,6 +494,101 @@ test("地点候选只作为当前 blocker 的字段答案提交", async ({ page 
   expect(continuation?.answer).toEqual({ kind: "poi", field: "museum-poi", poiId: "poi-1" });
 });
 
+test("高德候选保留商场别名、原始顺序和简洁地址，选择后提交地点ID", async ({ page }) => {
+  await seed(page);
+  const rawText = "出发晚了，请调整国金中心和外滩的行程";
+  const ifc = messageFact("ifc", "国金中心", "17:00", "18:00", "国金中心");
+  const originalDraft = confirmedDraft(rawText);
+  const drafted = { ...originalDraft, activityFacts: [...originalDraft.activityFacts, ifc] };
+  const candidates = [
+    { value: "mall", label: "上海ifc商场", description: "世纪大道8号(陆家嘴地铁站7号口旁)" },
+    { value: "center", label: "国际金融中心", description: "世纪大道8号(陆家嘴地铁站7号口旁)" },
+    { value: "phase", label: "国金中心2期", description: "世纪大道8号上海ifc商场L1层" },
+  ];
+  let selection: unknown;
+  await page.route("**/api/assist", async route => {
+    const body = route.request().postDataJSON();
+    if (body.answer) {
+      selection = body.answer;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "OUT_OF_SCOPE", message: "已检查选择的高德地点。" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      status: "NEEDS_INPUT", parsedInput: { ...parsedInput(rawText), activityFacts: drafted.activityFacts }, confirmedDraft: drafted,
+      impactAnalysis: { completedActivities: [], preservedActivities: ["museum", "ifc"], affectedActivities: [], modifiedActivities: [], removedActivities: [], riskActivities: [], lockedActivities: ["museum"], replacementCandidates: [], availableTimeWindows: [] },
+      resolutionState: { ...resolutionState, currentBlockerKey: ifc.placeId, roundCount: 1, sameBlockerCount: 1, questionHistory: [ifc.placeId] },
+      missingFact: { key: ifc.placeId, field: ifc.placeId, importance: "blocking", question: "请确认“国金中心”对应的具体地点。", reason: "请确认具体地点", answerType: "poi", candidates },
+    }) });
+  });
+  await page.goto("/");
+  await page.getByLabel("描述今天的安排和变化").fill(rawText);
+  await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
+  await expect(page.getByRole("heading", { name: "请确认国金中心位置", exact: true })).toBeVisible();
+  await expect(page.locator(".place-candidate-name")).toHaveText(candidates.map(candidate => candidate.label));
+  await expect(page.locator(".place-candidate-description").first()).toHaveText(candidates[0].description);
+  await page.getByRole("button", { name: /^上海ifc商场 / }).click();
+  await expect(page.locator(".error-box")).toContainText("已检查选择的高德地点");
+  expect(selection).toEqual({ kind: "poi", field: ifc.placeId, poiId: "mall" });
+});
+
+for (const editBeforeRetry of [false, true]) {
+  test(`补问后地图失败保留已回答信息，${editBeforeRetry ? "改口后按新描述分析" : "刷新后继续原草稿"}`, async ({ page }) => {
+    await seed(page);
+    const rawText = "下雨了，把下午行程调一下";
+    const key = "currentLocation";
+    const questionState = { ...resolutionState, currentBlockerKey: key, sameBlockerCount: 1, roundCount: 1, questionHistory: [key] };
+    const resumedDraft = { ...confirmedDraft(rawText), context: { ...state, currentLocation: "上海图书馆东馆" } };
+    const resumedParsed = { ...parsedInput(rawText), context: resumedDraft.context, activityFacts: [museumFact] };
+    let count = 0;
+    let retry: Record<string, unknown> | undefined;
+    await page.route("**/api/assist", async route => {
+      count++;
+      if (count === 1) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+          status: "NEEDS_INPUT", parsedInput: parsedInput(rawText), confirmedDraft: confirmedDraft(rawText),
+          impactAnalysis: { completedActivities: [], preservedActivities: ["museum"], affectedActivities: [], modifiedActivities: [], removedActivities: [], riskActivities: [], lockedActivities: ["museum"], replacementCandidates: [], availableTimeWindows: [] },
+          resolutionState: questionState, missingFact: { key, field: key, importance: "blocking", answerType: "text", reason: "请补充当前位置", question: "请补充当前位置" },
+        }) });
+      } else if (count === 2) {
+        expect(route.request().postDataJSON().answer).toEqual({ kind: "text", field: key, value: "上海图书馆东馆" });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({
+          status: "UPSTREAM_UNAVAILABLE", message: "路线服务暂时不可用，请稍后重试。",
+          failure: { code: "MAP_NETWORK_ERROR", stage: "GROUNDING", retryable: true, traceId: "followup-map-error" },
+          parsedInput: resumedParsed, confirmedDraft: resumedDraft, resolutionState: { ...resolutionState, roundCount: 1, answeredFields: [key] },
+        }) });
+      } else {
+        retry = route.request().postDataJSON();
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "OUT_OF_SCOPE", message: "已检查重试请求。" }) });
+      }
+    });
+    await page.goto("/");
+    await page.getByLabel("描述今天的安排和变化").fill(rawText);
+    await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
+    await page.getByPlaceholder("只补充这一项信息").fill("上海图书馆东馆");
+    await page.getByRole("button", { name: "回答当前问题", exact: true }).click();
+    await expect(page.locator(".error-box")).toContainText("路线服务暂时不可用");
+    const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), sessionKey);
+    expect(saved.pendingInput.confirmedDraft.context.currentLocation).toBe("上海图书馆东馆");
+    expect(saved.pendingInput.missingFact).toBeNull();
+    await page.reload();
+    if (editBeforeRetry) {
+      await page.getByLabel("描述今天的安排和变化").fill("出发晚了，请把下午安排得轻松一点");
+      await page.getByRole("button", { name: /按新描述重新分析/ }).click();
+    } else {
+      await page.getByRole("button", { name: /帮我重新安排今天/ }).click();
+    }
+    await expect(page.locator(".error-box")).toContainText("已检查重试请求");
+    if (editBeforeRetry) {
+      expect(retry?.rawText).toBe("出发晚了，请把下午安排得轻松一点");
+      expect(retry?.confirmedDraft).toBeUndefined();
+    } else {
+      expect(retry?.rawText).toBeUndefined();
+      expect(retry?.answer).toBeUndefined();
+      expect((retry?.confirmedDraft as typeof resumedDraft).context.currentLocation).toBe("上海图书馆东馆");
+    }
+  });
+}
+
 test("上游失败保留正式行程并提供可行动错误", async ({ page }) => {
   await seed(page);
   await page.route("**/api/assist", async (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ status: "UPSTREAM_UNAVAILABLE", message: "路线服务暂时不可用，请稍后重试。", failure: { code: "MAP_NETWORK_ERROR", stage: "GROUNDING", retryable: true, traceId: "e2e-map-network" } }) }));

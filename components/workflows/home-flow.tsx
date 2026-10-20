@@ -111,7 +111,7 @@ export function HomeFlow() {
 
   async function submitAssist(event?: FormEvent, candidateValue?: string, forcedAnswer?: Record<string, unknown>, forceFresh = false) {
     event?.preventDefault();
-    const fresh = forceFresh || descriptionChanged || !missingFact;
+    const fresh = forceFresh || descriptionChanged || !confirmedDraft;
     if (fresh && !raw.trim()) {
       setError("先写下今天发生的变化吧。");
       return;
@@ -172,6 +172,19 @@ export function HomeFlow() {
       if (!response.ok || body.status !== "READY") {
         if (body.status === "AUTH_REQUIRED" || body.status === "RATE_LIMITED" || body.failure?.stage === "AUTH") {
           throw new Error(body.message ?? "会话服务暂时不可用，请稍后重试。");
+        }
+        if (body.confirmedDraft && body.parsedInput && body.resolutionState &&
+            (body.status === "UPSTREAM_UNAVAILABLE" || body.status === "REQUEST_TIMEOUT" || body.status === "NO_SAFE_PLAN")) {
+          setMissingFact(null);
+          setConfirmedDraft(body.confirmedDraft);
+          setResolutionState(body.resolutionState);
+          setFollowUp("");
+          setSession(updateSession({ rawInput: raw, parsedInput: body.parsedInput,
+            flowStage: body.status === "NO_SAFE_PLAN" ? "NO_SAFE_PLAN" : "UNAVAILABLE",
+            resolutionState: body.resolutionState, pendingPlan: null, conditionalAdvice: null,
+            pendingInput: { parsedInput: body.parsedInput, confirmedDraft: body.confirmedDraft,
+              missingFact: null, questionRawText: raw, baseRevision: requestSession.snapshot.revision } }));
+          throw new Error(body.message ?? "地点或路线暂时无法确认，请稍后重试。");
         }
         const flowStage = body.status === "OUT_OF_SCOPE" ? "OUT_OF_SCOPE" : body.status === "NO_SAFE_PLAN" || body.status === "CONDITIONAL" ? "NO_SAFE_PLAN" : "UNAVAILABLE";
         const cleanResolutionState = { currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] };

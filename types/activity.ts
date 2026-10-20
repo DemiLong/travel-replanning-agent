@@ -33,6 +33,10 @@ export const ActivityFactSchema = z
     progress: z.enum(["not_started", "missed", "ongoing", "completed"]),
     name: z.string().trim().min(1).max(160),
     placeQuery: z.string().trim().max(160).nullable(),
+    locationEvidence: z.object({
+      source: z.enum(["original_text", "saved_itinerary"]),
+      text: z.string().max(500),
+    }).optional(),
     startTime: TimeSchema.nullable(),
     startTimeSource: z.enum(["user", "snapshot", "not_provided"]),
     endTime: TimeSchema.nullable(),

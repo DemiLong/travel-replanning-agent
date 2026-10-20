@@ -417,6 +417,9 @@ export class DeepSeekSemanticParser {
     if (response.status !== "completed" || !response.output_parsed) {
       throw modelInvalidOutput("PARSER", attempt + 1);
     }
+    if (process.env.NODE_ENV === "development") {
+  console.log("【模型解析原结果】", JSON.stringify(response.output_parsed, null, 2));
+}
     let extraction = SemanticExtractionSchema.parse(response.output_parsed);
     trace?.("model_extraction", extraction);
     let normalized = normalizeSemanticExtraction(snapshot, rawText, extraction, this.model, hint);

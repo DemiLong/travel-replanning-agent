@@ -727,7 +727,7 @@ async function main() {
   if (second.status !== "NEEDS_INPUT") throw new Error("expected repeated blocker");
   assert.equal(second.resolutionState.sameBlockerCount, 2);
   const third = await runAgentAssist({ snapshot: base, confirmedDraft: second.confirmedDraft, answer: { kind: "text", field: "currentLocation", value: "人民广场地铁站" }, resolutionState: second.resolutionState }, undefined, { ground: alwaysMissing });
-  assert.equal(third.status, "OUT_OF_SCOPE");
+  assert.equal(third.status, "NO_SAFE_PLAN");
 
   assert.equal(CandidateSetSchema.safeParse({ candidates: [{ title: "A", tradeOff: "A", steps: [], removed: [] }, { title: "B", tradeOff: "B", steps: [], removed: [] }, { title: "C", tradeOff: "C", steps: [], removed: [] }] }).success, false);
 

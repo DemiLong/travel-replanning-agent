@@ -19,6 +19,7 @@ const targets = [
   "activity-fact-tests.js",
   "cleanup-contract-tests.js",
   "validator-tests.js",
+  "location-followup-tests.js",
 ];
 for (const target of targets) {
   const result = spawnSync(

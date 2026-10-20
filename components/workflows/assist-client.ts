@@ -73,12 +73,14 @@ const AssistTerminalSchema = z.object({
   status: z.enum(["OUT_OF_SCOPE", "NO_SAFE_PLAN", "CONDITIONAL"]),
   message: z.string().min(1),
   parsedInput: ParsedUserInputSchema.optional(),
+  confirmedDraft: ConfirmedDraftSchema.optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
   resolutionState: ResolutionStateSchema.optional(),
 }).passthrough();
 
 const AssistFailureSchema = FailureEnvelopeSchema.extend({
   parsedInput: ParsedUserInputSchema.optional(),
+  confirmedDraft: ConfirmedDraftSchema.optional(),
   impactAnalysis: ImpactAnalysisSchema.optional(),
   resolutionState: ResolutionStateSchema.optional(),
 }).passthrough();

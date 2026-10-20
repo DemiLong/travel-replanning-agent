@@ -1,7 +1,7 @@
 import type { Snapshot } from "../../types";
 import type { BrowserLocation, TravelMode, WorldPoi } from "../../types/world";
 
-export const genericLocation = (text = "") => !text.trim() || /^(?:(我|我们)?(的|住的|住在的)?(酒店|宾馆|美术馆|博物馆|景点|另一个景点|已预约景点|预约景点|晚餐|预约晚餐|餐厅|集合地点)(集合|参观)?|地铁站附近|附近的?地铁站)$/.test(text.trim());
+export const genericLocation = (text = "") => !text.trim() || /^(?:(我|我们)?(的|住的|住在的)?(酒店|宾馆|美术馆|博物馆|动物园|植物园|游乐园|公园|商场|咖啡馆|咖啡店|饭店|车站|机场|码头|广场|景点|另一个景点|已预约景点|预约景点|早饭|午饭|晚饭|早餐|午餐|晚餐|预约晚餐|餐厅|集合地点)(集合|参观)?|地铁站附近|附近的?地铁站)$/.test(text.trim());
 export const broadHotelQuery = (text = "") => {
   const value=text.trim();
   if(!/(酒店|宾馆)$/.test(value))return false;
@@ -38,25 +38,44 @@ export function locationQuery(text: string, rawText: string, snapshot: Snapshot)
     return { query: "上海虹桥国际机场", reason: "原文虹桥与航班到达语境共同限定机场；城市与坐标仍须高德验证。" };
   }
   if (/^(我|我们)?(的|住的)?(酒店|宾馆)$/.test(text.trim())) {
-    const hotels = [...new Set(snapshot.itinerary.flatMap(e => /酒店|宾馆|hotel/i.test(e.location + e.name) && !genericLocation(e.location) ? [e.location] : []))];
+    const hotels = [...new Set(snapshot.itinerary.flatMap(e => /酒店|宾馆|hotel|住宿|入住/i.test(e.location + e.name + e.category) && !genericLocation(e.location) ? [e.location] : []))];
     if (hotels.length === 1) return {query:hotels[0], reason:"已有行程唯一明确酒店与本次酒店指代对应。"};
   }
   return {query:text.replace(/(?:的)?(?:门口|入口|大门口)$/, "").trim(), reason:"使用用户地点文字及已有上下文查询，不补造坐标。"};
 }
+function placeNameKey(value: string, city: string) {
+  const key=value.toLocaleLowerCase().replace(/[\s·（）()]/g, "");
+  const prefix=normalizeCity(city).toLocaleLowerCase();
+  return prefix && key.startsWith(prefix) ? key.slice(prefix.length).replace(/^市/u, "") : key;
+}
+
+export function placeNameCompatible(poi: WorldPoi, query: string) {
+  if (genericLocation(query)) return false;
+  const key=placeNameKey(query,poi.city);
+  const name=placeNameKey(poi.name,poi.city);
+  const ancillary=/(地铁站|公交站|公交车站|停车场|售票|航站楼|\d+口)/u;
+  if (ancillary.test(poi.name) && !ancillary.test(query)) return false;
+  return Boolean(key && name.includes(key));
+}
+
 export function uniquePlace(candidates: WorldPoi[], query: string, city: string): WorldPoi | null {
-  const normalize=(s:string)=>{const value=s.replace(/[\s·（）()]/g, ""),prefix=city.replace(/市$/,"");return prefix&&value.startsWith(prefix)?value.slice(prefix.length):value;};
   const inCity = city && city !== "待确认城市" ? candidates.filter(p => p.city.replace(/市$/, "") === city.replace(/市$/, "")) : candidates;
   // Once the trip city is verified, out-of-city candidates are excluded unless
   // the user explicitly named that other city in the queried place.
   const pool = city && city !== "待确认城市" ? candidates.filter(p => cityCompatible(p, city, query)) : inCity;
   // A category such as “美术馆” is not a named venue, even when a city's
   // museum happens to share that category as its name.
-  if (genericLocation(query)) return pool.length === 1 ? pool[0] : null;
-  const exact=pool.filter(p=>normalize(p.name)===normalize(query));
-  if (exact.length===1) return exact[0];
-  const alias=pool.filter(p=>p.name.split(/[（）()]/).some(part=>normalize(part)===normalize(query)) && !/(地铁站|停车场|售票|航站楼|\d+口)/.test(p.name));
-  if(alias.length===1)return alias[0];
-  return pool.length===1 ? pool[0] : null;
+  if (genericLocation(query)) return null;
+  const matches=pool.filter(p=>{
+    const normalize=(value:string)=>placeNameKey(value,p.city||city);
+    return placeNameCompatible(p,query) &&
+      (normalize(p.name)===normalize(query) || p.name.split(/[（）()]/).some(part=>normalize(part)===normalize(query)));
+  });
+  // One search hit is not proof of identity. An exact brand name plus another
+  // branch alias is ambiguous as well, even if the exact hit is listed first.
+  if(matches.length!==1)return null;
+  const competingBranch=pool.some(p=>p.poiId!==matches[0].poiId && placeNameCompatible(p,query) && /店[）)]?$/u.test(p.name));
+  return competingBranch ? null : matches[0];
 }
 
 export function selectCityEvidence(entries: Array<{field:string;query:string;poi:WorldPoi}>){

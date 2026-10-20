@@ -25,6 +25,7 @@ import { confirmedOriginals, reconcileActivityFacts, snapshotActivityFacts } fro
 import { analyzeImpact } from "../services/impact-analysis";
 import { WorldContextService } from "../services/world/world-context-service";
 import { allowedModes } from "../services/world/context-resolution";
+import { recoverActivityLocation } from "../services/location-recovery";
 import { protectionPolicyForActivity, stationLevelLocation } from "../services/protection-policy";
 import { replanReal } from "./real-replanning-agent";
 import type { FailureInfo, FailureStage } from "../types/failures";
@@ -78,9 +79,9 @@ export type AssistResponse =
   | (ResponseContext & { status: "CONDITIONAL"; message: string; advice: ConditionalAdvice })
   | (ResponseContext & { status: "NEEDS_INPUT"; confirmedDraft: ConfirmedDraft; missingFact: MissingFact; ambiguities?: RealWorldContext["ambiguities"]; world?: RealWorldContext })
   | (ResponseContext & { status: "READY"; result: AgentResult; base: Snapshot; request: ReturnType<typeof ReplanningRequestSchema.parse> })
-  | (ResponseContext & { status: "NO_SAFE_PLAN"; result?: AgentResult; base?: Snapshot; request?: ReturnType<typeof ReplanningRequestSchema.parse>; message: string })
+  | (ResponseContext & { status: "NO_SAFE_PLAN"; confirmedDraft?: ConfirmedDraft; result?: AgentResult; base?: Snapshot; request?: ReturnType<typeof ReplanningRequestSchema.parse>; message: string })
   | (Partial<ResponseContext> & { status: "OUT_OF_SCOPE"; message: string })
-  | (Partial<ResponseContext> & { status: AssistFailureStatus; message: string; failure: FailureInfo });
+  | (Partial<ResponseContext> & { status: AssistFailureStatus; confirmedDraft?: ConfirmedDraft; message: string; failure: FailureInfo });
 
 const emptyResolutionState = (): ResolutionState => ({ currentBlockerKey: null, sameBlockerCount: 0, roundCount: 0, answeredFields: [], questionHistory: [] });
 
@@ -138,6 +139,7 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
   if (answer.kind === "poi") {
     next.worldOptions = { ...(next.worldOptions ?? { selectedPois: {} }), selectedPois: { ...next.worldOptions?.selectedPois, [answer.field]: answer.poiId } };
   } else if (answer.kind === "browser_location") {
+    delete next.worldOptions?.selectedPois.currentLocation;
     next.context.browserLocation = answer.location;
     next.context.currentLocation = "浏览器定位";
     next.contextSources.currentLocation = "user";
@@ -164,10 +166,13 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
     }
   } else if (answer.kind === "text") {
     if (answer.field === "currentLocation") {
+      delete next.worldOptions?.selectedPois.currentLocation;
+      delete next.context.browserLocation;
       next.context.currentLocation = answer.value;
       next.contextSources.currentLocation = "user";
     } else if (answer.field === "destination") {
       next.destination = answer.value;
+      next.worldOptions = { ...(next.worldOptions ?? { selectedPois: {} }), selectedPois: {} };
     } else if (/^activity:.+:role$/.test(answer.field)) {
       const id = /^activity:(.+):role$/.exec(answer.field)?.[1];
       const fact = next.activityFacts.find(item => item.id === id);
@@ -182,6 +187,8 @@ function applyAnswer(draft: ConfirmedDraft, answer: NonNullable<AssistRequest["a
       if (!fact) throw new Error("当前文本回答没有对应到已确认字段。");
       const stationLocation = stationLevelLocation(answer.value).location;
       fact.placeQuery = stationLocation;
+      delete fact.locationEvidence;
+      delete next.worldOptions?.selectedPois[fact.placeId];
       Object.assign(fact, refreshMessageFactPolicy(fact));
     }
   }
@@ -222,10 +229,20 @@ function missingFact(key: string, question: string, answerType: MissingFact["ans
 }
 
 function nextResolutionState(previous: ResolutionState, blocker: MissingFact): ResolutionState | null {
-  const sameBlockerCount = previous.currentBlockerKey === blocker.key ? previous.sameBlockerCount + 1 : 1;
+  const signature = JSON.stringify([blocker.key, blocker.answerType, blocker.question,
+    blocker.candidates?.map(candidate => candidate.value).sort() ?? []]);
+  const sameQuestion = previous.currentBlockerKey === blocker.key &&
+    (!previous.currentQuestionSignature || previous.currentQuestionSignature === signature);
+  const sameBlockerCount = sameQuestion ? previous.sameBlockerCount + 1 : 1;
   const roundCount = previous.roundCount + 1;
-  if (sameBlockerCount > 2 || roundCount > 3) return null;
-  return ResolutionStateSchema.parse({ currentBlockerKey: blocker.key, sameBlockerCount, roundCount, answeredFields: previous.answeredFields, questionHistory: [...previous.questionHistory, blocker.key].slice(-12) });
+  // Resolving different fields, or moving from text to a POI choice, is progress.
+  if (sameBlockerCount > 2 || roundCount > 120) return null;
+  return ResolutionStateSchema.parse({ currentBlockerKey: blocker.key, currentQuestionSignature: signature,
+    sameBlockerCount, roundCount, answeredFields: previous.answeredFields, questionHistory: [...previous.questionHistory, blocker.key].slice(-12) });
+}
+
+function resumableResolutionState(state: ResolutionState): ResolutionState {
+  return { ...state, currentBlockerKey: null, currentQuestionSignature: undefined, sameBlockerCount: 0 };
 }
 
 function answeredResolutionState(previous: ResolutionState, field: string): ResolutionState {
@@ -240,7 +257,7 @@ function assistFailure(
   error: unknown,
   stage: FailureStage,
   traceId: string,
-  context: Partial<ResponseContext> = {},
+  context: Partial<ResponseContext> & { confirmedDraft?: ConfirmedDraft } = {},
   message?: string,
 ): AssistResponse {
   const failure = normalizeFailure(error, stage);
@@ -294,6 +311,21 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
     snapshot = planningSnapshotFromDraft(base, draft);
   }
 
+  draft.activityFacts = draft.activityFacts.map(fact => {
+    const recovered = recoverActivityLocation(fact, draft.rawText, base);
+    return recovered === fact ? fact : refreshMessageFactPolicy(recovered);
+  });
+  parsed.activityFacts = draft.activityFacts;
+  const unresolved = new Set(draft.activityFacts.filter(fact => !fact.placeQuery?.trim()).map(fact => fact.id));
+  parsed.missingFacts = parsed.missingFacts.filter(key => {
+    if (key === "activityDetails") return unresolved.size > 0;
+    const match = /^activity:(.+):location$/.exec(key);
+    return !match || unresolved.has(match[1]);
+  });
+  parsed.parseWarnings = parsed.parseWarnings.filter(warning => !draft.activityFacts.some(fact =>
+    fact.locationEvidence && fact.placeQuery && warning === `“${fact.name}”的地点未提供，请在确认页补充。`));
+  snapshot = planningSnapshotFromDraft(base, draft);
+
   const retainedFacts = retainedFactsFromDraft(base, draft);
   const confirmedActivities = confirmedOriginals(retainedFacts);
   if (!confirmedActivities.length &&
@@ -308,7 +340,7 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
       { value: "reference", label: "仅作背景" },
     ]);
     const nextState = nextResolutionState(resolutionState, blocker);
-    if (!nextState) return { status: "OUT_OF_SCOPE", message: "这项安排仍未能确认，请修改描述后重新分析。", parsedInput: parsed, impactAnalysis: noImpact(snapshot), resolutionState };
+    if (!nextState) return { status: "NO_SAFE_PLAN", message: "这项安排仍未能确认，请补充更具体的信息或修改描述后重试。", parsedInput: parsed, confirmedDraft: draft, impactAnalysis: noImpact(snapshot), resolutionState: resumableResolutionState(resolutionState) };
     parsed.missingFacts = [blocker.key];
     parsed.status = "needs_input";
     return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: noImpact(snapshot), resolutionState: nextState, missingFact: blocker };
@@ -344,10 +376,11 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
   const blockers: MissingFact[] = [];
   const add = (fact: MissingFact) => { if (!blockers.some((item) => item.key === fact.key)) blockers.push(fact); };
   const respondWithBlocker = (world?: RealWorldContext): AssistResponse => {
-    const priority = (fact: MissingFact) => confirmedActivities.some(activity => activity.placeId === fact.field && activity.commitment !== "flexible") ? 0 : fact.field === "currentLocation" ? 1 : 2;
+    const priority = (fact: MissingFact) => fact.field === "currentLocation" || fact.field === "destination" ? 0
+      : confirmedActivities.some(activity => (activity.placeId === fact.field || `activity:${activity.id}:location` === fact.field) && activity.commitment !== "flexible") ? 1 : 2;
     const blocker = [...blockers].sort((a, b) => priority(a) - priority(b))[0];
     const nextState = nextResolutionState(resolutionState, blocker);
-    if (!nextState) return { status: "OUT_OF_SCOPE", message: "同一个关键信息仍未能确认。本次调整已安全结束，原行程没有改变；请修改正式行程后重新发起。", parsedInput: parsed, impactAnalysis: impact, resolutionState };
+    if (!nextState) return { status: "NO_SAFE_PLAN", message: "这个地点或安排仍未能确认。请补充完整名称、分店或地址后重试。", parsedInput: parsed, confirmedDraft: draft, impactAnalysis: impact, resolutionState: resumableResolutionState(resolutionState) };
     parsed.missingFacts = [blocker.key];
     parsed.status = "needs_input";
     return { status: "NEEDS_INPUT", parsedInput: ParsedUserInputSchema.parse(parsed), confirmedDraft: draft, impactAnalysis: impact, resolutionState: nextState, missingFact: blocker, ambiguities: world?.ambiguities.filter((item) => item.field === blocker.field) ?? [], world };
@@ -363,10 +396,22 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
     const ground = dependencies.ground ?? ((value: unknown, abortSignal?: AbortSignal) => new WorldContextService().ground(value, abortSignal, execution));
     world = await execution.measure("GROUNDING", () => ground({ snapshot, request, mode: "live", confirmation: { status: "confirmed", confirmedAt: new Date().toISOString() } }, signal));
   } catch (error) {
-    return assistFailure(error, "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState });
+    return assistFailure(error, "GROUNDING", traceId, { parsedInput: parsed, confirmedDraft: draft, impactAnalysis: impact, resolutionState: resumableResolutionState(resolutionState) });
   }
   impact = analyzeImpact(snapshot, request, world);
-  parsed.resolutionEvidence = world.resolutionEvidence;
+  parsed.resolutionEvidence = [
+    ...draft.activityFacts.filter(fact => fact.locationEvidence && fact.placeQuery).map(fact => ({
+      field: fact.placeId, query: fact.placeQuery!,
+      reason: `使用${fact.locationEvidence!.source === "original_text" ? "原文中已提供的地点名称" : "已有行程中唯一对应的酒店"}查询，尚须核对地图结果。`,
+    })),
+    ...(world.resolutionEvidence ?? []),
+  ];
+  // Keep completed resolutions while another field still needs an answer.
+  draft.worldOptions ??= { selectedPois: {} };
+  for (const resolved of world.resolvedPlaces) draft.worldOptions.selectedPois[resolved.placeId] = resolved.poi.poiId;
+  const resolvedCurrent = [...(world.resolutionEvidence ?? [])].reverse().find(item => item.field === "currentLocation" && item.poiId);
+  if (resolvedCurrent?.poiId) draft.worldOptions.selectedPois.currentLocation = resolvedCurrent.poiId;
+  parsed.worldOptions = draft.worldOptions;
   for (const fact of world.missingWorldFacts.filter((item) => item.kind === "user")) {
     if (["currentLocation", "currentTime", "destination", "travelMode"].includes(fact.field)) {
       add(missingFact(fact.field, fact.message, fact.field === "currentTime" ? "time" : "text"));
@@ -379,7 +424,12 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
     add(missingFact(`activity:${matchingActivities[0].id}:location`, fact.message));
   }
   for (const ambiguity of world.ambiguities) {
-    add(missingFact(ambiguity.field, `“${ambiguity.label}”有多个地点，请选择一个。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.displayName ?? candidate.name, description: candidate.address }))));
+    const knownCity = world.currentLocation?.city ?? world.cityResolution?.city;
+    add(missingFact(ambiguity.field, `请确认“${ambiguity.label}”对应的具体地点。`, "poi", ambiguity.candidates.map((candidate) => ({ value: candidate.poiId, label: candidate.displayName ?? candidate.name,
+      description: [...new Set([
+        ...(!knownCity || knownCity.replace(/市$/, "") !== candidate.city.replace(/市$/, "") ? [candidate.city, candidate.district] : []),
+        candidate.address,
+      ].filter(Boolean))].join(" · ") }))));
   }
   if (parsed.disruptions.some((item) => item.kind === "closed") && !parsed.closedPlaceIds.length) {
     const closedLabels = parsed.disruptions.filter(item => item.kind === "closed").map(item => item.label);
@@ -400,7 +450,7 @@ export async function runAgentAssist(raw: unknown, execution: RequestExecution =
   }
   if (blockers.length) return respondWithBlocker(world);
   if (world.status !== "ready") {
-    return assistFailure(new ServiceFailure("MAP_PROVIDER_ERROR", "GROUNDING", { retryable: true, provider: "amap", detail: "WORLD_CONTEXT_UNAVAILABLE" }), "GROUNDING", traceId, { parsedInput: parsed, impactAnalysis: impact, resolutionState }, world.missingWorldFacts.find((item) => item.kind === "world")?.message ?? "真实地点或路线数据暂时不可用，请稍后重试。");
+    return assistFailure(new ServiceFailure("MAP_PROVIDER_ERROR", "GROUNDING", { retryable: true, provider: "amap", detail: "WORLD_CONTEXT_UNAVAILABLE" }), "GROUNDING", traceId, { parsedInput: parsed, confirmedDraft: draft, impactAnalysis: impact, resolutionState: resumableResolutionState(resolutionState) }, world.missingWorldFacts.find((item) => item.kind === "world")?.message ?? "真实地点或路线数据暂时不可用，请稍后重试。");
   }
 
   if (world.currentLocation?.city) snapshot.trip.destination = world.currentLocation.city;
