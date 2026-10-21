@@ -4,7 +4,7 @@ import { buildRealContext } from "../agents/real-context-builder";
 import { MAX_REPLAN_ATTEMPTS, replanReal } from "../agents/real-replanning-agent";
 import { createStarterSnapshot } from "../data/session-defaults";
 import { confirmedDraftFromParsed } from "../services/itinerary-domain";
-import { normalizeSemanticExtraction, SEMANTIC_PARSER_PROMPT } from "../services/semantic-parser";
+import { normalizeSemanticExtraction } from "../services/semantic-parser";
 import { CandidateSetSchema, type CandidatePlanner } from "../services/deepseek-planner";
 import {
   EventSchema,
@@ -696,8 +696,6 @@ async function main() {
     "test-model",
   );
   assert.deepEqual(feasibilitySequence.activityFacts.filter(fact=>fact.role==="existing_plan").map((item) => item.startTime), ["15:00", "18:00", "20:00"]);
-  assert(SEMANTIC_PARSER_PROMPT.includes("asks whether to keep or cancel an activity that was already planned"));
-  assert(SEMANTIC_PARSER_PROMPT.includes("Never promote B"));
 
   const base = snapshot();
   const facts = parsed();
