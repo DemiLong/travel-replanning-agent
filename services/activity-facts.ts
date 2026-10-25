@@ -41,6 +41,10 @@ function snapshotMatch(
 
 function shiftedTiming(saved: ActivityFact, incoming: ActivityFact) {
   const startTime = incoming.startTime ?? saved.startTime;
+  if ((incoming.endTimeFixed || saved.endTimeFixed) && (incoming.durationMinutes === null || incoming.endTimeFixed)) {
+    return { startTime, endTime: incoming.endTime ?? saved.endTime, durationMinutes: null,
+      durationSource: "user" as const, endTimeFixed: true };
+  }
   const startChanged = incoming.startTime !== null && incoming.startTime !== saved.startTime;
   if (!startChanged) {
     return {
@@ -87,8 +91,9 @@ export function snapshotActivityFacts(snapshot: Snapshot): ActivityFact[] {
     startTime: event.startTime,
     startTimeSource: "snapshot",
     endTime: event.durationSource === "unknown" ? null : event.endTime,
-    durationMinutes: event.durationSource === "unknown" ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
+    durationMinutes: event.durationSource === "unknown" || event.endTimeFixed ? null : Math.max(1, minutes(event.endTime) - minutes(event.startTime)),
     durationSource: event.durationSource ?? "user",
+    ...(event.endTimeFixed ? { endTimeFixed: true } : {}),
     commitment: event.locked
       ? event.protectionPolicy?.source === "possible" ? "uncertain" : "fixed"
       : "flexible",
@@ -134,12 +139,14 @@ export function reconcileActivityFacts(
         endTime: fact.endTime,
         durationMinutes: fact.durationMinutes,
         durationSource: fact.durationSource,
+        endTimeFixed: Boolean(fact.endTimeFixed && fact.endTime),
       } : shiftedTiming(saved, fact);
       facts[index] = ActivityFactSchema.parse({
         ...saved,
         progress: fact.progress,
         name: fact.name.trim() || saved.name,
         ...timing,
+        endTimeFixed: "endTimeFixed" in timing ? timing.endTimeFixed : false,
         placeQuery: explicitSnapshotEdit ? fact.placeQuery : fact.placeQuery?.trim() ? fact.placeQuery : saved.placeQuery,
         commitment,
         protectionPolicy: commitment === "flexible" ? undefined : fact.protectionPolicy ?? saved.protectionPolicy,

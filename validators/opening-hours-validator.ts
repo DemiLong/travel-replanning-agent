@@ -9,6 +9,7 @@ export function openingHoursValidator(
     if (!place) return [];
     return c.disruption.closedPlaceIds.includes(e.placeId) ||
       e.startTime < place.openingTime ||
+      e.startTime >= place.closingTime ||
       e.endTime > place.closingTime
       ? [
           {

@@ -39,6 +39,7 @@ import {
   ServiceFailure,
 } from "../services/failures";
 import { RequestExecution } from "../services/request-execution";
+import { planningTimeConstraints } from "../services/activity-duration";
 
 const FieldAnswerSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), field: z.string().min(1), value: z.string().trim().min(1).max(200) }),
@@ -220,7 +221,7 @@ function requestReason(parsed: ParsedUserInput) {
 function buildRequest(snapshot: Snapshot, parsed: ParsedUserInput, draft: ConfirmedDraft) {
   const activityFacts = retainedFactsFromDraft(snapshot, draft);
   return ReplanningRequestSchema.parse({ reason: requestReason(parsed), freeText: parsed.rawText, currentState: snapshot.state, closedPlaceIds: parsed.closedPlaceIds, variation: 0, stateSources: parsed.contextSources, worldOptions: parsed.worldOptions,
-    activityFacts,
+    activityFacts, timeConstraints: planningTimeConstraints(snapshot, draft.constraints, activityFacts),
     ...(draft.removedLockedIds.length ? { confirmedDraftChanges: { removedLockedIds: draft.removedLockedIds } } : {}) });
 }
 

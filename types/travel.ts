@@ -4,6 +4,13 @@ import { BrowserLocationSchema } from "./world";
 
 export const TimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
+export const ScheduleTimeConstraintSchema = z.object({
+  value: z.string().min(1).max(300),
+  sourceText: z.string().max(500).optional(),
+  endByTime: TimeSchema.nullable().optional(),
+  activityIds: z.array(z.string()).max(30).optional(),
+});
+
 export const DateSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -98,9 +105,13 @@ export const EventSchema = z.object({
   name: z.string().min(1),
   category: z.string(),
   startTime: TimeSchema,
+  // With durationSource=unknown, endTime=startTime is an unknown end marker,
+  // not a zero-minute visit. ActivityFact uses null for that same state.
   endTime: TimeSchema,
   startTimeSource: z.enum(["user", "snapshot", "suggested"]).optional(),
   durationSource: z.enum(["user", "suggested", "unknown"]).optional(),
+  // A user supplied only an ending clock time, not a duration to shift later.
+  endTimeFixed: z.boolean().optional(),
   travelMode: z.enum(["DRIVING", "WALKING", "TRANSIT"]).optional(),
   location: z.string(),
   status: z.enum(["completed", "missed", "planned", "locked"]),
@@ -141,6 +152,7 @@ export const SnapshotSchema = z.object({
     disruption: "unset",
   }),
   itinerary: z.array(EventSchema).max(30),
+  timeConstraints: z.array(ScheduleTimeConstraintSchema).max(30).optional(),
   revision: z.number().int().min(0),
 });
 

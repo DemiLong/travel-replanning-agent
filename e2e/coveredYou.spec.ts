@@ -230,7 +230,7 @@ test("线路重试成功后更新候选方案并清除缺失提示", async ({ pa
   await page.getByRole("button", { name: "查看具体改动" }).click();
   await page.getByRole("button", { name: "点击重试", exact: true }).click();
   await expect(page.locator(".plan-route-note")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "具体改动", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "具体改动与建议", exact: true })).toBeVisible();
   const stored = await page.evaluate(key => JSON.parse(localStorage.getItem(key)!), sessionKey);
   expect(stored.pendingPlan.result.id).toBe("plan-retried");
   expect(stored.snapshot.revision).toBe(1);
@@ -886,7 +886,7 @@ test("接受方案前复验成功后才更新 revision", async ({ page }) => {
   expect(stored.parsedInput).toBeNull();
   expect(stored.pendingPlan).toBeNull();
   expect(stored.lastDisruption).toEqual(pendingPlanSession().lastDisruption);
-  expect(stored.itineraryPresentation).toEqual({ revision: 2, events: [{ id: "museum", name: "城市博物馆", address: "城市博物馆", label: "保留", tone: "kept" }] });
+  expect(stored.itineraryPresentation).toEqual({ revision: 2, events: [{ id: "museum", name: "城市博物馆", address: "城市博物馆", label: "推荐公共交通", tone: "adjusted" }] });
   expect(stored.conditionalAdvice).toEqual(conditionalAdvice);
 });
 

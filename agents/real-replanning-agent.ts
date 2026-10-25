@@ -3,7 +3,6 @@ import { buildRealContext } from "./real-context-builder";
 import { CandidateOutputError, DeepSeekPlanner, materializeCandidate, type CandidatePlanner } from "../services/deepseek-planner";
 import { UnknownDurationConflict } from "../services/deepseek-planner";
 import { validatePlan } from "../validators";
-import { validatePlanExplanation } from "../services/plan-narrative";
 import { decisionTrace } from "../services/decision-trace";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION } from "../lib/time";
 import type { AgentResult, ImpactAnalysis, PlanConflict, ResolutionOption, Violation } from "../types";
@@ -88,7 +87,7 @@ export async function replanReal(raw:unknown,planner:CandidatePlanner=new DeepSe
       feedback=[];comparisons=[];candidatePlans=[];
       for(const candidate of candidates){
         try{
-          const evaluated=()=>{const plan=materializeCandidate(context,candidate,input.snapshot);return {plan,violations:[...validatePlan(context,plan),...validatePlanExplanation(context,plan)]};};
+          const evaluated=()=>{const plan=materializeCandidate(context,candidate,input.snapshot);return {plan,violations:validatePlan(context,plan)};};
           const {plan,violations}=execution?execution.measureSync("VALIDATOR",evaluated):evaluated();
           comparisons.push({title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,conflicts:violations.map(v=>v.message)});
           candidatePlans.push({id:crypto.randomUUID(),title:plan.summary,tradeOff:plan.explanation,feasible:!violations.length,plan,conflicts:violations.flatMap(v=>v.conflict?[v.conflict]:[])});

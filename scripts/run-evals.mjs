@@ -17,6 +17,8 @@ const targets = [
   "session-storage-tests.js",
   "protocol-contract-tests.js",
   "activity-fact-tests.js",
+  "plan-changes-tests.js",
+  "final-activity-tests.js",
   "cleanup-contract-tests.js",
   "validator-tests.js",
   "location-followup-tests.js",

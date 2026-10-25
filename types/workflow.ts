@@ -69,6 +69,9 @@ export const SemanticExtractionSchema = z.object({
         kind: z.enum(["keep", "time", "region"]),
         value: z.string().min(1).max(300),
         sourceText: z.string().min(1).max(500),
+        endByTime: TimeSchema.nullable().optional(),
+        timeScope: z.enum(["activity", "itinerary_end", "clear_itinerary_end", "preference", "unresolved"]).nullable().optional(),
+        activitySourceText: z.string().max(500).nullable().optional(),
       }),
     )
     .max(30),
@@ -104,6 +107,10 @@ export const ParsedConstraintSchema = z.object({
   kind: z.enum(["keep", "time", "region"]),
   value: z.string().min(1),
   source: FactSourceSchema,
+  sourceText: z.string().max(500).optional(),
+  endByTime: TimeSchema.nullable().optional(),
+  timeScope: z.enum(["activity", "itinerary_end", "clear_itinerary_end", "preference", "unresolved"]).nullable().optional(),
+  activityIds: z.array(z.string()).max(30).optional(),
 });
 
 export const ParsedContextSchema = TripStateSchema.partial().extend({

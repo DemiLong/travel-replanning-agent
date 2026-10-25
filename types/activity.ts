@@ -6,6 +6,7 @@ import {
   EventSchema,
   FactSourceSchema,
   ProtectionPolicySchema,
+  ScheduleTimeConstraintSchema,
   StateSourcesSchema,
   TimeSchema,
   TripStateSchema,
@@ -42,6 +43,7 @@ export const ActivityFactSchema = z
     endTime: TimeSchema.nullable(),
     durationMinutes: z.number().int().positive().max(1440).nullable(),
     durationSource: z.enum(["user", "suggested", "unknown"]),
+    endTimeFixed: z.boolean().optional(),
     commitment: z.enum(["fixed", "flexible", "uncertain"]),
     protectionPolicy: ProtectionPolicySchema.optional(),
     sourceText: z.string().max(500).nullable(),
@@ -72,6 +74,7 @@ export const ReplanningRequestSchema = z.object({
   stateSources: StateSourcesSchema.optional(),
   worldOptions: WorldOptionsSchema.optional(),
   activityFacts: z.array(ActivityFactSchema).max(30),
+  timeConstraints: z.array(ScheduleTimeConstraintSchema).max(30).optional(),
   confirmedDraftChanges: z
     .object({ removedLockedIds: z.array(z.string()).max(30) })
     .optional(),

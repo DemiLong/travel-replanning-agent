@@ -10,6 +10,7 @@ import { openingHoursValidator } from "./opening-hours-validator";
 import { pastEventValidator } from "./past-event-validator";
 import { MAX_SUGGESTED_DURATION, MIN_SUGGESTED_DURATION, minutes as minutesOf } from "../lib/time";
 import { stationLevelLocation } from "../services/protection-policy";
+import { canLeaveEndUnknown, hasUnknownEnd, scheduleEndLimit, unresolvedTimeConstraints } from "../services/activity-duration";
 export const validators = [
   protectionPolicyValidator,
   timeConflictValidator,
@@ -31,6 +32,16 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
     ];
   const p = parsed.data,
     errors = validators.flatMap((v) => v(c, p));
+  const endLimit = scheduleEndLimit(c);
+  for (const constraint of unresolvedTimeConstraints(c)) errors.push({ code: "context",
+    message: `“${constraint.value}”尚未对应到可校验的时间或后续地点。` });
+  for (const constraint of c.disruption.timeConstraints ?? []) {
+    for (const id of constraint.activityIds ?? []) {
+      const fact = c.remainingActivityFacts.find(item => item.id === id || item.snapshotEventId === id);
+      if (fact && !p.events.some(event => event.id === fact.id)) errors.push({ code: "time_conflict", eventId: fact.id,
+        message: `后续时间限制“${constraint.value}”不能通过省略对应活动绕过。` });
+    }
+  }
   const ids = new Set<string>();
   for (const e of p.events) {
     if (ids.has(e.id))
@@ -47,8 +58,16 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
         message: "锁定状态与锁定标记不一致。",
       });
     const original=c.activityFacts.find(fact=>fact.id===e.id);
-    const arrivalOnly=Boolean(c.world&&original?.durationSource==="unknown"&&e.durationSource==="unknown"&&e.startTime===e.endTime);
+    const arrivalOnly=hasUnknownEnd(e);
+    if (arrivalOnly && !canLeaveEndUnknown(c, original)) errors.push({ code: "duration", eventId: e.id,
+      message: "用户已给出的结束时间、时长或全程结束限制不能改为结束未定。" });
+    if (e.durationSource === "unknown" && !arrivalOnly) errors.push({ code: "duration", eventId: e.id,
+      message: "结束时间未知时不能同时保存推测的结束时刻。" });
+    if (endLimit !== null && minutesOf(e.endTime) > endLimit) errors.push({ code: "time_conflict", eventId: e.id,
+      message: `${e.name} 超出用户要求的全程结束时间。` });
     const nextEvent = p.events.find(other=>other.id!==e.id&&other.startTime>=e.startTime);
+    if (c.world && !nextEvent && canLeaveEndUnknown(c, original) && !arrivalOnly) errors.push({ code: "duration", eventId: e.id,
+      message: "末站没有用户提供的结束时间或后续限制，应保持结束未定，不再补停留建议。" });
     if(arrivalOnly&&nextEvent)errors.push({code:"duration",eventId:e.id,message:"这项安排的结束时间未知，无法安全安排后续活动。",conflict:{kind:"unknown_duration_window",eventId:e.id,nextAnchorEventId:nextEvent.id,message:`${e.name} 后面还有 ${nextEvent.name}，需要先确定可执行的停留时间。`}});
     if (e.endTime <= e.startTime && !arrivalOnly)
       errors.push({
@@ -86,15 +105,18 @@ export function validatePlan(c: AgentContext, candidate: unknown): Violation[] {
       const alternative=c.world.alternatives.find(x=>x.poiId===e.placeId);
       if(!resolved&&!alternative)errors.push({code:"place_data",eventId:e.id,message:"地点未由高德解析并确认。"});
       const unknownDuration=old?.durationSource==="unknown";
+      const clearedSuggestion=arrivalOnly && old?.durationSource==="suggested" && canLeaveEndUnknown(c,old);
       const proposedDuration=unknownDuration&&e.durationSource==="suggested";
       if(unknownDuration&&!arrivalOnly&&(!proposedDuration||minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`未知停留时长只能使用${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟的方案建议，不能伪装成用户事实。`});
       const expectedLocation=old?.placeQuery?stationLevelLocation(old.placeQuery).location:"";
-      const expectedDuration=old?.durationMinutes??(old?.startTime&&old.endTime?minutesOf(old.endTime)-minutesOf(old.startTime):null);
-      if(old && (e.name!==old.name || ![old.placeQuery,expectedLocation].includes(e.location) || (!unknownDuration&&(e.durationSource!==old.durationSource||(expectedDuration!==null&&minutesOf(e.endTime)-minutesOf(e.startTime)!==expectedDuration)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点或活动时长。"});
-      if(old?.startTime===null && (e.placeId!==old.placeId || e.name!==old.name || e.startTimeSource!=="suggested" || (old.durationMinutes!==null && minutesOf(e.endTime)-minutesOf(e.startTime)!==old.durationMinutes)))errors.push({code:"place_data",eventId:e.id,message:"无原定时间活动必须保留原身份，开始时间标为建议。"});
+      const expectedDuration=old?.endTimeFixed?null:old?.durationMinutes??(old?.startTime&&old.endTime?minutesOf(old.endTime)-minutesOf(old.startTime):null);
+      if(old && (e.name!==old.name || ![old.placeQuery,expectedLocation].includes(e.location) || (!unknownDuration&&!clearedSuggestion&&(e.durationSource!==old.durationSource||(expectedDuration!==null&&minutesOf(e.endTime)-minutesOf(e.startTime)!==expectedDuration)))))errors.push({code:"place_data",eventId:e.id,message:"模型不能改写用户确认的地点或活动时长。"});
+      if(old?.startTime===null && (e.placeId!==old.placeId || e.name!==old.name || e.startTimeSource!=="suggested" || (!clearedSuggestion && old.durationMinutes!==null && minutesOf(e.endTime)-minutesOf(e.startTime)!==old.durationMinutes)))errors.push({code:"place_data",eventId:e.id,message:"无原定时间活动必须保留原身份，开始时间标为建议。"});
+      if (old?.startTime === null && old.endTime !== null && old.durationSource === "user" && e.endTime !== old.endTime) errors.push({ code: "duration", eventId: e.id, message: "用户明确提供的结束时刻不能被覆盖。" });
+      if (old?.endTimeFixed && (e.endTime !== old.endTime || !e.endTimeFixed)) errors.push({ code: "duration", eventId: e.id, message: "用户提供的结束时刻必须保留，不能转换为可顺延的停留建议。" });
       if(!old && (!alternative || e.name!==alternative.name || e.location!==(alternative.address||alternative.name)))errors.push({code:"place_data",eventId:e.id,message:"新增活动必须使用真实候选地点。"});
       if(e.openingTime!==null||e.closingTime!==null)errors.push({code:"place_data",eventId:e.id,message:"高德 POI 基础数据未验证营业时间，不能自行填入。"});
-      if(!old && (minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`建议活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
+      if(!old && !arrivalOnly && (e.durationSource!=="suggested"||minutesOf(e.endTime)-minutesOf(e.startTime)<MIN_SUGGESTED_DURATION||minutesOf(e.endTime)-minutesOf(e.startTime)>MAX_SUGGESTED_DURATION))errors.push({code:"duration",eventId:e.id,message:`建议活动时长必须在${MIN_SUGGESTED_DURATION}–${MAX_SUGGESTED_DURATION}分钟之间。`});
       continue;
     }
     if (

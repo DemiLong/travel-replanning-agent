@@ -1,5 +1,8 @@
 import type { AgentContext, AgentResult, ProposedPlan, Violation } from "../types";
 import { protectionSummary } from "./protection-policy";
+import { hasUnknownEnd } from "./activity-duration";
+
+const eventTime = (event: ProposedPlan["events"][number]) => hasUnknownEnd(event) ? `${event.startTime}（结束未定）` : `${event.startTime}–${event.endTime}`;
 
 const validationChecks: Array<[Violation["code"], string]> = [
   ["locked_event", "固定安排"],
@@ -31,8 +34,8 @@ export function decisionTrace(
     ...context.protectedActivityFacts.map((fact) => ({ eventId: fact.id, decision: `保留 ${fact.name}`, reason: protectionSummary(fact), evidence: plan.events.some((next) => next.id === fact.id && next.startTime === fact.startTime && next.location === fact.placeQuery) ? [`新行程保留在 ${fact.startTime}，地点为 ${fact.placeQuery}。`] : ["受保护字段未被完整保留。"] })),
     ...plan.removedEvents.map((change) => ({ eventId: change.eventId, decision: `移除 ${change.name}`, reason: change.reason, evidence: ["该活动未出现在新的可执行行程中。", `约束：${change.constraint}。`] })),
     ...plan.movedEvents.map((change) => ({ eventId: change.eventId, decision: `建议改到 ${change.suggestedDate} ${change.suggestedStart}`, reason: change.reason, evidence: [change.note, `约束：${change.constraint}。`] })),
-    ...plan.events.filter((event) => context.activityFacts.some((fact) => fact.id === event.id && fact.commitment === "flexible" && (fact.startTime !== event.startTime || fact.endTime !== event.endTime))).map((event) => ({ eventId: event.id, decision: `调整 ${event.name} 到 ${event.startTime}–${event.endTime}`, reason: event.reason, evidence: [`输入变化：${context.disruption.freeText}`, `路线校验：${violations.some((item) => item.code === "travel_time" && item.eventId === event.id) ? "未通过" : "通过"}`] })),
-    ...plan.events.filter((event) => !context.activityFacts.some((fact) => fact.id === event.id)).map((event) => ({ eventId: event.id, decision: `新增 ${event.name}`, reason: event.reason, evidence: [`安排在 ${event.startTime}–${event.endTime}。`, event.constraint] })),
+    ...plan.events.filter((event) => context.activityFacts.some((fact) => fact.id === event.id && fact.commitment === "flexible" && (fact.startTime !== event.startTime || fact.endTime !== event.endTime))).map((event) => ({ eventId: event.id, decision: `调整 ${event.name} 到 ${eventTime(event)}`, reason: event.reason, evidence: [`输入变化：${context.disruption.freeText}`, `路线校验：${violations.some((item) => item.code === "travel_time" && item.eventId === event.id) ? "未通过" : "通过"}`] })),
+    ...plan.events.filter((event) => !context.activityFacts.some((fact) => fact.id === event.id)).map((event) => ({ eventId: event.id, decision: `新增 ${event.name}`, reason: event.reason, evidence: [`安排在 ${eventTime(event)}。`, event.constraint] })),
   ] : [];
   const validationEvidence: NonNullable<AgentResult["decisionTrace"]>["validationEvidence"] = validationChecks.map(([code, check]) => {
     const failures = violations.filter((item) => item.code === code);
@@ -50,7 +53,7 @@ export function decisionTrace(
   );
   if (context.world) {
     for (const evidence of context.world.resolutionEvidence ?? []) inputFacts.push({ field: `地点解析 ${evidence.field}`, value: `${evidence.query} / ${evidence.reason} / ${evidence.poiId ?? "尚未确定"}`, source: "system" });
-    for (const event of plan?.events ?? []) if (event.durationSource === "unknown" || event.durationSource === "suggested") validationEvidence.push({ check: `${event.name}停留时长`, status: "not_checked", detail: event.durationSource === "unknown" ? "只核验固定到达时刻，结束时间未知。" : "本方案使用建议停留时长，非用户提供事实。", source: "unset" });
+    for (const event of plan?.events ?? []) if (event.durationSource === "unknown" || event.durationSource === "suggested") validationEvidence.push({ check: `${event.name}停留时长`, status: "not_checked", detail: event.durationSource === "unknown" ? "只核验到达/开始时刻，结束时间未知。" : "本方案使用建议停留时长，非用户提供事实。", source: "unset" });
     inputFacts.push(...context.world.resolvedPlaces.map((item) => ({ field: "高德地点", value: `${item.poi.name} / ${item.poi.poiId} / GCJ02 / ${item.poi.fetchedAt}`, source: "system" as const })));
     for (const route of context.world.routes.filter((item) => plan?.events.some((event) => event.placeId === item.destination.id))) inputFacts.push({ field: "高德路线", value: `${route.origin.id} → ${route.destination.id} / ${route.travelMode} / ${route.durationSeconds ?? "不可用"} 秒 / ${route.fetchedAt}`, source: "system" });
     if (context.world.currentLocation) inputFacts.push({ field: "位置来源", value: `${context.world.currentLocation.source} / GCJ02 / ${context.world.currentLocation.capturedAt}`, source: "system" });

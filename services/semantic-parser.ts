@@ -38,6 +38,8 @@ export const SEMANTIC_PARSER_PROMPT = `你是当日行程的事实提取器，�
 
 【变化与请求】
 - disruptions 只记原文支持的变化，交通停运不当作地点关闭。constraints 保留对象和否定：keep=活动取舍；time=时间限制；region=地点范围或交通限制。
+- 回酒店、集合、赶末班车等有目的地和到达/出发要求的后续约束，也须作为 existing_plan 活动保留，固定时间按 locked 规则处理，不能只写在说明里。若用户明确规定全程最晚结束时间，在对应 time 约束的 endByTime 填 HH:mm；活动开始、到达或发车时间不能当作全程结束时间，其余填 null。末站停留未知仍填 null，不补默认时长。
+- time 约束的 timeScope：某活动的时间=activity，同时用 activitySourceText 引用那条 activities[].sourceText；全程结束截止=itinerary_end；用户明确取消全程结束限制=clear_itinerary_end（endByTime=null）；不含硬性期限的节奏偏好=preference；确有时间限制但无法确定对应关系=unresolved。非 time 项这两个字段填 null。不要把“慢慢逛”等偏好当作硬截止。
 - intent 最后判断：活动与变更同时出现=mixed；仅变更=rescue；优化或可行性核对=optimize；其余=create。不得据此删事实或编造活动。
 - question 保留用户问题原文，没有则 null。ambiguities 只记对象、字段和原因，不代写补问，不把抽取失败或未查地图说成用户未提供。
 
@@ -233,7 +235,7 @@ export function normalizeSemanticExtraction(
       : null);
     const commitment = activityCommitment(activity);
     const id = `message-${index}-${crypto.randomUUID()}`;
-    const endTime = startTime ? activity.endTime : null;
+    const endTime = activity.endTime;
     return [{
       id,
       placeId: `custom-${id}`,
@@ -247,7 +249,8 @@ export function normalizeSemanticExtraction(
       startTimeSource: startTime ? "user" as const : "not_provided" as const,
       endTime,
       durationMinutes,
-      durationSource: durationMinutes ? "user" as const : "unknown" as const,
+      durationSource: durationMinutes || endTime ? "user" as const : "unknown" as const,
+      ...(endTime && !startTime && !activity.durationMinutes ? { endTimeFixed: true } : {}),
       commitment,
       protectionPolicy: protectionPolicyForActivity({
         name: activity.name.trim(),
@@ -287,6 +290,10 @@ export function normalizeSemanticExtraction(
         kind: item.kind,
         value: item.value,
         source: "user" as const,
+        sourceText: item.sourceText,
+        ...(item.kind === "time" ? { endByTime: item.endByTime ?? null, timeScope: item.timeScope,
+          activityIds: item.activitySourceText ? activityFacts.filter(fact => fact.sourceText === item.activitySourceText).map(fact => fact.id) : [],
+        } : {}),
       })),
     context,
     contextSources,

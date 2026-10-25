@@ -20,6 +20,11 @@ export function confirmParsedInput(input: ParsedUserInput): ParsedUserInput {
 }
 
 function materializeFactTime(fact: ActivityFact, existing?: ItineraryEvent) {
+  // An explicit unknown must not resurrect a previous suggested end from the
+  // saved event. Reconciliation already preserves user-provided timing facts.
+  if (fact.durationSource === "unknown" && fact.endTime === null && fact.durationMinutes === null) {
+    return { endTime: fact.startTime!, durationSource: "unknown" as const };
+  }
   const suppliedEndTime = fact.endTime ?? (fact.startTime && fact.durationMinutes
     ? addMinutesWithinDay(fact.startTime, fact.durationMinutes)
     : null);
@@ -57,6 +62,7 @@ export function activityFactToEvent(fact: ActivityFact, snapshot: Snapshot): Iti
     endTime: timing.endTime,
     startTimeSource: fact.startTimeSource === "not_provided" ? "suggested" : fact.startTimeSource,
     durationSource: timing.durationSource,
+    endTimeFixed: Boolean(fact.endTimeFixed && fact.endTime),
     location,
     locked,
     protectionPolicy: fact.protectionPolicy,

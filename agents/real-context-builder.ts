@@ -6,5 +6,5 @@ export function buildRealContext(raw:unknown,world:RealWorldContext,impactAnalys
   if(world.status!=="ready")throw new Error("真实世界数据尚未准备好。");
   const activityFacts=request.activityFacts;
   const remainingActivityFacts=activityFacts.filter(fact=>fact.progress!=="completed");
-  return {profile:snapshot.profile,trip:snapshot.trip,state:request.currentState,stateSources:request.stateSources??snapshot.stateSources,activityFacts,remainingActivityFacts,protectedActivityFacts:remainingActivityFacts.filter(fact=>fact.commitment!=="flexible"),disruption:request,places:[],travelMinutes:{},world,impactAnalysis,removedLockedIds:request.confirmedDraftChanges?.removedLockedIds};
+  return {profile:snapshot.profile,trip:snapshot.trip,state:request.currentState,stateSources:request.stateSources??snapshot.stateSources,activityFacts,remainingActivityFacts,protectedActivityFacts:remainingActivityFacts.filter(fact=>fact.commitment!=="flexible"),disruption:{...request,timeConstraints:request.timeConstraints??snapshot.timeConstraints},places:[],travelMinutes:{},world,impactAnalysis,removedLockedIds:request.confirmedDraftChanges?.removedLockedIds};
 }

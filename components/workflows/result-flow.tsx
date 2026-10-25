@@ -2,7 +2,10 @@
 
 import Link from "next/link";
 import { PlanningError } from "@/components/ui/planning-error";
-import { ItineraryTimeline, type ItineraryTone } from "@/components/ui/itinerary-timeline";
+import { ItineraryTimeline } from "@/components/ui/itinerary-timeline";
+import { PlanDetails } from "./plan-details";
+import { PlanOverview } from "./plan-overview";
+import { buildPlanChanges, changePresentation, originalFactForEvent } from "@/services/plan-changes";
 import {
   Drawer,
   DrawerClose,
@@ -18,7 +21,7 @@ import { ArrowRight, Check, ChevronRight } from "lucide-react";
 import { confirmedDraftFromParsed, eventsFromActivityFacts } from "@/services/itinerary-domain";
 import {
   summarizeVerifiedPlan,
-  validatePlanExplanation,
+  planNarrativeForDisplay,
 } from "@/services/plan-narrative";
 import {
   commitSnapshot,
@@ -28,7 +31,6 @@ import {
   updateSession,
 } from "@/services/trip-service";
 import { authenticatedJsonFetch } from "@/services/api-client";
-import { partialRouteMessage } from "@/services/route-availability";
 import {
   AgentResultSchema,
   ConfirmedDraftSchema,
@@ -39,10 +41,8 @@ import {
   type ItineraryEvent,
   type ParsedUserInput,
   type ProposedPlan,
-  type ReplanningRequest,
 } from "@/types";
 import type { ResolutionOption } from "@/types";
-import type { RealWorldContext } from "@/types/world";
 import { FailureEnvelopeSchema } from "@/types/failures";
 import {
   errorText,
@@ -59,30 +59,6 @@ const ValidateResponseSchema = z.object({
   ok: z.boolean(),
   violations: z.array(z.unknown()).optional(),
 }).passthrough();
-
-function PlanDetails({ plan, request, world, retrying, busy, retryError, onRetry }: {
-  plan: ProposedPlan; request: ReplanningRequest; world?: RealWorldContext;
-  retrying: boolean; busy: boolean; retryError: string; onRetry: () => void;
-}) {
-  const originalIds = new Set(request.activityFacts.filter(fact => fact.progress !== "completed").map(fact => fact.id));
-  const routeMessage = partialRouteMessage(world, request);
-  const additionalNotes = world?.missingWorldFacts.filter(fact => fact.kind === "world" && fact.field !== "routes") ?? [];
-  return <div className="plan-details-content">
-    {routeMessage && <section className="plan-route-note" aria-label="线路查询情况" aria-busy={retrying}>
-      <p role="status">{routeMessage}</p>
-      <button type="button" className="route-retry-link" disabled={busy} onClick={onRetry}>{retrying ? "正在重试…" : "点击重试"}</button>
-      {retryError && <p className="route-retry-error" role="alert">{retryError}</p>}
-    </section>}
-    {additionalNotes.length > 0 && <section className="plan-route-note" aria-label="其他查询情况">{additionalNotes.map(fact => <p key={fact.field}>{fact.message}</p>)}</section>}
-    <section className="plan-detail-group explanation"><h2>方案说明</h2><p>{plan.explanation}</p></section>
-    <section className="plan-detail-group retained"><h2>保留与新增的原因</h2>
-      {plan.events.map(event => <div className="plan-detail-reason" key={event.id}><h3><span>{originalIds.has(event.id) ? "保留／调整" : "新增"}</span>{event.name}</h3><p>{event.reason}</p></div>)}
-    </section>
-    {plan.removedEvents.length > 0 && <section className="plan-detail-group removed"><h2>移除的原因</h2>
-      {plan.removedEvents.map(item => <div className="plan-detail-reason" key={item.eventId}><h3>{item.name}</h3><p>{item.reason}</p></div>)}
-    </section>}
-  </div>;
-}
 
 function planIdentity(plan: ProposedPlan) {
   return JSON.stringify({ events: plan.events.map(event => [event.id, event.placeId, event.startTime, event.endTime, event.travelMode]), removed: plan.removedEvents.map(event => event.eventId) });
@@ -104,8 +80,9 @@ export function ResultFlow() {
   if (!pending || pending.result.mode !== "live") return <div className="mobile-workspace empty-screen"><span className="eyebrow">方案</span><h1>还没有待确认的方案。</h1><p className="muted">先从首页告诉我今天发生了什么。</p><Link className="primary full" href="/">返回首页 <ArrowRight size={17} /></Link></div>;
   const { result, base, request } = pending;
   const activePending = pending;
-  const plan = result.plan && !validatePlanExplanation(result.context, result.plan).length
+  const plan = result.ok && result.plan
     ? { ...result.plan, summary: summarizeVerifiedPlan(result.context, result.plan) } : null;
+  const overview = plan ? planNarrativeForDisplay(result.context, plan).overview : null;
   const currentParsed = pending.parsedInput ? ParsedUserInputSchema.parse(pending.parsedInput) : null;
 
   async function retryRoutes() {
@@ -140,7 +117,7 @@ export function ResultFlow() {
       const nextResult = AgentResultSchema.parse(body.result);
       const nextBase = SnapshotSchema.parse(body.base);
       const nextRequest = ReplanningRequestSchema.parse(body.request);
-      if (!nextResult.ok || !nextResult.plan || nextBase.revision !== base.revision || validatePlanExplanation(nextResult.context, nextResult.plan).length) {
+      if (!nextResult.ok || !nextResult.plan || nextBase.revision !== base.revision) {
         throw new Error("新方案暂不可用，当前方案已保留，请稍后重试。");
       }
       assertCurrentPlan();
@@ -184,7 +161,7 @@ export function ResultFlow() {
   }
 
   function chooseCandidate(candidate: NonNullable<typeof result.candidatePlans>[number]) {
-    if (!candidate.plan || !candidate.feasible || validatePlanExplanation(result.context, candidate.plan).length) return;
+    if (!candidate.plan || !candidate.feasible) return;
     const verifiedPlan = { ...candidate.plan, summary: summarizeVerifiedPlan(result.context, candidate.plan) };
     const choices = [...(result.candidatePlans ?? [])];
     if (plan && !choices.some(choice => choice.plan && planIdentity(choice.plan) === planIdentity(plan))) {
@@ -225,9 +202,9 @@ export function ResultFlow() {
       if (!current.pendingPlan || current.flowStage !== "PLAN_READY" || current.pendingPlan.result.id !== result.id) throw new Error("当前方案已失效，请重新分析。");
       if (current.snapshot.revision !== base.revision) throw new Error("原行程已发生变化，请重新生成方案。");
       const completedEvents=eventsFromActivityFacts(base,request.activityFacts.filter(fact=>fact.progress==="completed"));
-      const next = SnapshotSchema.parse({ ...base, state: request.currentState, itinerary: [...completedEvents, ...plan.events], revision: current.snapshot.revision + 1 });
+      const next = SnapshotSchema.parse({ ...base, state: request.currentState, timeConstraints: request.timeConstraints ?? base.timeConstraints, itinerary: [...completedEvents, ...plan.events], revision: current.snapshot.revision + 1 });
       commitSnapshot(next, current.snapshot.revision);
-      const updated = updateSession({ itineraryDraft: null, pendingInput: null, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null, itineraryPresentation: { revision: next.revision, events: plan.events.map(event => ({ id: event.id, ...destinationFor(event), ...statusOf(event) })) } });
+      const updated = updateSession({ itineraryDraft: null, pendingInput: null, flowStage: "HAS_ITINERARY", rawInput: "", parsedInput: null, lastDisruption: request, pendingPlan: null, itineraryPresentation: { revision: next.revision, events: plan.events.map(event => ({ id: event.id, ...destinationFor(event), ...statusOf(event, true) })) } });
       setSession(updated); await logEvent("replan_accepted", { planId: result.id, mode: "real" }); setNotice("方案已接受"); window.location.assign("/trip");
     } catch (cause) {
       if ((cause as Error)?.name !== "AbortError") setError(errorText(cause));
@@ -238,25 +215,14 @@ export function ResultFlow() {
     }
   }
 
-  const baseMap = new Map(base.itinerary.map(event => [event.id, event]));
   const originalIds = new Set(request.activityFacts.filter(fact=>fact.progress!=="completed").map(fact=>fact.id));
-  const statusOf = (event: ItineraryEvent): { label: string; tone: ItineraryTone } => {
-    const original = baseMap.get(event.id);
-    if (!original) {
-      const fact = request.activityFacts.find(fact => fact.id === event.id);
-      if (!fact) return plan?.removedEvents.length ? { label: "替换", tone: "replaced" } : { label: "新增", tone: "new" };
-      const changed = Boolean(fact.startTime && fact.startTime !== event.startTime || fact.endTime && fact.endTime !== event.endTime);
-      return changed ? { label: "调整", tone: "adjusted" } : { label: "保留", tone: "kept" };
-    }
-    const changed = original.startTime !== event.startTime || original.endTime !== event.endTime || original.location !== event.location;
-    return changed ? { label: "调整", tone: "adjusted" } : { label: "保留", tone: "kept" };
-  };
+  const changes = plan ? buildPlanChanges(request.activityFacts, plan, base) : [];
+  const statusOf = (event: ItineraryEvent, accepted = false) => changePresentation(changes.find(item => item.id === event.id)!, accepted);
   const originalCount = originalIds.size;
-  const retainedCount = plan ? plan.events.filter(event => originalIds.has(event.id)).length : 0;
+  const retainedCount = plan ? plan.events.filter(event => originalFactForEvent(request.activityFacts, event.id)).length : 0;
   const conflicts = result.conflicts ?? [];
   const options = result.resolutionOptions ?? [];
-  const availableCandidates = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible &&
-    !validatePlanExplanation(result.context, candidate.plan).length);
+  const availableCandidates = (result.candidatePlans ?? []).filter(candidate => candidate.plan && candidate.feasible);
   const candidatePlans = availableCandidates.filter(candidate => !plan || planIdentity(candidate.plan!) !== planIdentity(plan));
   const viewingAlternative = Boolean(plan && availableCandidates[0]?.plan && planIdentity(availableCandidates[0].plan) !== planIdentity(plan));
   const destinationFor = (event: ItineraryEvent) => {
@@ -280,20 +246,20 @@ export function ResultFlow() {
             </DrawerTrigger>
             <DrawerContent className="analysis-drawer plan-reasons-drawer">
               <DrawerHeader className="analysis-header">
-                <DrawerTitle>具体改动</DrawerTitle>
-                <DrawerDescription className="sr-only">线路查询情况、方案说明、保留与新增的原因，以及移除的原因。</DrawerDescription>
+                <DrawerTitle>具体改动与建议</DrawerTitle>
+                <DrawerDescription className="sr-only">逐项查看实际变化、规划建议、取舍原因及执行提醒。</DrawerDescription>
               </DrawerHeader>
-              <div className="drawer-scroll" data-vaul-no-drag><PlanDetails plan={plan} request={request} world={result.context.world}
+              <div className="drawer-scroll" data-vaul-no-drag><PlanDetails plan={plan} request={request} base={base} context={result.context} world={result.context.world}
                 retrying={retryingRoutes} busy={busy} retryError={routeRetryError} onRetry={() => void retryRoutes()} /></div>
               <DrawerClose className="drawer-close">知道了</DrawerClose>
             </DrawerContent>
           </Drawer>
         </div>
-        <p className="plan-summary-overview">{plan.summary.replace(/^保留或调整：/, "")}</p>
+        {overview && <PlanOverview key={planIdentity(plan)} text={overview} />}
       </section>}
       {(!result.ok || !plan || conflicts.length > 0) && <section className="conflict-panel" aria-live="polite"><div><span className="eyebrow">需要换一种安排</span><h2>有一处时间需要重新协调</h2><p>{conflicts[0]?.message ?? "当前路线或时间无法同时满足，我们保留了你的原行程。"}</p></div><div className="conflict-options">{options.map(option => <button key={option.id} type="button" disabled={busy} onClick={() => void applyResolutionOption(option)}>{option.label}<ChevronRight size={15} /></button>)}</div>{!options.length && <Link className="secondary full" href="/rescue">重新描述这次变化</Link>}</section>}
       {plan && <>
-        <ItineraryTimeline items={plan.events.map(event => ({ event, ...destinationFor(event), ...statusOf(event) }))} />
+        <ItineraryTimeline showChangeLabels={false} showAddresses={false} showTimeLabels={false} items={plan.events.map(event => ({ event, ...destinationFor(event), ...statusOf(event) }))} />
         <button type="button" className="text-action centered" disabled={busy} onClick={reviseDescription}>结果有误？点击重新规划</button>
       </>}
       {!notice && plan && <div className="plan-actions">
