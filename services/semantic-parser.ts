@@ -349,7 +349,7 @@ export class DeepSeekSemanticParser {
       const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 1400, reasoning: { effort: "none" },
       input: [
-        { role: "system", content: "Independently inspect the traveler text. List each distinct activity the traveler says was already planned, decided or booked for today. Include an uncertain activity if its decision status cannot be determined. Exclude current position, completed background references and mere options. Split separately named activities even when they share one sentence. Each sourceText must be an exact substring of travelerText. Return structured data only." },
+        { role: "system", content: "独立检查 travelerText 中的用户原文，逐项列出用户表示今天已经计划、决定或预约的活动。无法确定是否已决定的活动也列出，标为 uncertain；当前位置、仅作背景的已完成事项和明确尚未决定的备选不列入原安排。同一句中分别提到的活动也要拆开。每项 sourceText 必须原样引用 travelerText 中连续的一段文字。只输出符合所提供 Schema 的结构化数据。" },
         { role: "user", content: JSON.stringify({ travelerText: rawText }) },
       ],
       text: { format: deepSeekFormat(ActivityCoverageSchema, "coveredYou_activity_coverage") },
@@ -366,7 +366,7 @@ export class DeepSeekSemanticParser {
       const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 2200, reasoning: { effort: "none" },
       input: [
-        { role: "system", content: `${SEMANTIC_PARSER_PROMPT}\nExtract activities only for the supplied uncovered original-text spans. Use the full traveler text to understand each span's role and time. Do not repeat any other activities.` },
+        { role: "system", content: `${SEMANTIC_PARSER_PROMPT}\n本次只补充 uncoveredSpans 指定原文片段中的活动。结合完整用户原文判断这些活动的角色和时间，不要重复提取其他活动。` },
         { role: "user", content: JSON.stringify({ travelerText: rawText, uncoveredSpans: missing }) },
       ],
       text: { format: deepSeekFormat(SemanticExtractionSchema, "coveredYou_missing_activities") },
@@ -381,7 +381,7 @@ export class DeepSeekSemanticParser {
       const response = await this.client.responses.parse({
       model: this.model, store: false, max_output_tokens: 900, reasoning: { effort: "none" },
       input: [
-        { role: "system", content: "Determine only entity relationships in the traveler's original text. For each supplied planned activity, identify the exact words naming the venue where that activity would take place, not the street/area where the traveler currently stands. Return the exact venue substring in venueText, or null if no venue is named. If a closure is reported, identify which supplied activity it refers to by returning its exact activitySourceText; return null if unclear. Do not infer from what would be convenient for the itinerary. Return structured data only." },
+        { role: "system", content: "只核对用户原文中活动与地点的对应关系。对输入中的每项原安排，找出原文实际指明的活动场所，区分活动地点与用户当前所在的街道或区域。venueText 原样引用对应场所名称；原文没有提到活动场所时填 null。如果用户报告地点关闭，判断它对应输入中的哪项活动，在 closedActivitySourceText 中原样返回该活动的 activitySourceText；无法确定时填 null。不要根据怎样安排行程更方便来猜测地点归属。只输出符合所提供 Schema 的结构化数据。" },
         { role: "user", content: JSON.stringify({ travelerText: rawText, activities: extraction.activities.map(item => ({ name: item.name, activitySourceText: item.sourceText, currentVenueGuess: item.location })), disruptions: extraction.disruptions }) },
       ],
       text: { format: deepSeekFormat(VenueAuditSchema, "coveredYou_venue_relation_audit") },
@@ -403,7 +403,7 @@ export class DeepSeekSemanticParser {
       max_output_tokens: 3000,
       reasoning: { effort: "none" },
       input: [
-        { role: "system", content: SEMANTIC_PARSER_PROMPT + (attempt ? "\nThe previous output was incomplete or invalid JSON. Return one complete JSON object matching the schema. No markdown fences or text outside JSON. Re-extract only the original traveler facts." : "") },
+        { role: "system", content: SEMANTIC_PARSER_PROMPT + (attempt ? "\n上次输出不完整或不是有效 JSON。请重新从用户原文提取事实，返回一个完整、符合所提供 Schema 的 JSON 对象，不要添加 Markdown 代码围栏或 JSON 以外的文字。" : "") },
         {
           role: "user",
           content: JSON.stringify({
